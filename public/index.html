@@ -853,8 +853,12 @@ $('#swapBtn').addEventListener('click',()=>requestRev(+$('#cmpSel').value));  //
 // <select>s mutated-but-unsynced, eventually wedging swap (a===b) and the dropdown until reload.
 function requestRev(revId){
   if(!revId || revId===curRevId) return;
-  // A/B is always an AUDIO crossfade — for a video track the picture is locked, so comparing mixes is
-  // a gapless audio swap against the same (still-playing) video. The picture isn't touched.
+  // For a video track (a locked picture is on screen) swap the mix by cleanly RELOADING the single
+  // active audio element at the matched playhead, not the gapless dual-element crossfade: with the
+  // video also decoding, the crossfade's repeated seeking of the inactive element can leave it
+  // stalled (frozen currentTime ⇒ the synced picture loops a few frames in silence until a reload).
+  // Reloading is fresh each time (no stuck seek state) and runs only 2 decoders. Picture keeps playing.
+  if(curVideoName()){ loadTrack(curTrackId, revId, {play:!audio.paused, keepPos:audio.currentTime}); return; }
   if(crossing){ pendingRev=revId; return; }
   crossfadeTo(revId);
 }
@@ -879,6 +883,7 @@ $('#vol').addEventListener('input',e=>{
 
 // ── gapless A/B crossfade (keep one element playing while the other catches up) ──
 function preloadInactive(){
+  if(curVideoName()) return;   // video tracks swap via loadTrack on the active element — no 2nd-element preload
   const t=trackById(curTrackId); if(!t)return;
   const other=players[1-act];
   let cmp=+$('#cmpSel').value;
