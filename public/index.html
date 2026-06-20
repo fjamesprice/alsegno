@@ -1325,6 +1325,11 @@ SETTING_TOGGLES.forEach(k=>{
       await api('settings',{method:'PUT',body:{[k]:on}});
       if(k==='null_test_visible'){ NULL_VIS=on; applyNullVis(); }
       if(k==='keep_lossless'){ KEEP_LOSSLESS=on; if(VIEW==='studio') renderStudio(); }
+      // Re-fetch the open track's notes so toggling deleted-note visibility takes effect live
+      // (the server filters per the new setting) instead of waiting for a page reload.
+      if(k==='show_deleted_notes' && panelTrackId){
+        comments=await api('tracks/'+panelTrackId+'/comments'); renderComments(); drawPins(); refreshCounts();
+      }
       toast('Setting saved');
     }catch(err){ toast(err.message,true); e.target.checked=!on; }
   });
