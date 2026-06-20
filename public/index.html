@@ -416,19 +416,13 @@
     <h2>New project</h2>
     <div class="mfield">
       <label for="npName">Project name</label>
-      <input type="text" id="npName" placeholder="e.g. a song title, or an album / EP name" autocomplete="off">
+      <input type="text" id="npName" placeholder="e.g. a song or video title" autocomplete="off">
+      <div class="faint small" style="margin-top:6px">Starts as a single track — add more tracks later to make it an album.</div>
     </div>
-    <div class="mfield">
+    <div class="mfield hidden" id="npKindField">
       <label>Kind</label>
       <div class="segctl" id="npKind">
-        <button type="button" data-v="song">Single track</button>
-        <button type="button" data-v="album">Album (multiple tracks)</button>
-      </div>
-    </div>
-    <div class="mfield hidden" id="npMediaField">
-      <label>Media type</label>
-      <div class="segctl" id="npMedia">
-        <button type="button" data-v="audio">Audio</button>
+        <button type="button" data-v="audio">Music</button>
         <button type="button" data-v="video">Video</button>
       </div>
     </div>
@@ -1537,13 +1531,12 @@ $('#newProjectBtn').addEventListener('click',newProjectFlow);
 // New-project modal — a single form (name + kind + media type) instead of chained native dialogs.
 function segValue(id){ const b=$('#'+id+' button.on'); return b?b.dataset.v:null; }
 function setSeg(id,val){ $$('#'+id+' button').forEach(b=>b.classList.toggle('on', b.dataset.v===val)); }
-['npKind','npMedia'].forEach(id=>{ const box=$('#'+id);
-  box.addEventListener('click',e=>{ const b=e.target.closest('button'); if(b) setSeg(id,b.dataset.v); }); });
+$('#npKind').addEventListener('click',e=>{ const b=e.target.closest('button'); if(b) setSeg('npKind',b.dataset.v); });
 let npAfter='projects';   // where to refresh after creating (the projects list vs the admin page)
 function newProjectFlow(){
   npAfter = VIEW==='admin' ? 'admin' : 'projects';
-  $('#npName').value=''; setSeg('npKind','song'); setSeg('npMedia','audio');
-  $('#npMediaField').classList.toggle('hidden', !VIDEO_ENABLED);   // media choice only when video is enabled
+  $('#npName').value=''; setSeg('npKind','audio');                // 'audio' = Music (the default)
+  $('#npKindField').classList.toggle('hidden', !VIDEO_ENABLED);   // Music/Video choice only when video is enabled
   $('#newProjModal').classList.remove('hidden');
   setTimeout(()=>$('#npName').focus(),0);
 }
@@ -1554,12 +1547,12 @@ $('#npName').addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefau
 document.addEventListener('keydown',e=>{ if(e.key==='Escape' && !$('#newProjModal').classList.contains('hidden')) closeNewProject(); });
 $('#npCreate').addEventListener('click',async()=>{
   const title=$('#npName').value.trim(); if(!title){ $('#npName').focus(); return; }
-  const type=segValue('npKind')||'song';
-  const media_type=(VIDEO_ENABLED && segValue('npMedia')==='video') ? 'video' : 'audio';
+  // Every project starts as a single track ('song'); adding a 2nd track promotes it to an album.
+  const media_type=(VIDEO_ENABLED && segValue('npKind')==='video') ? 'video' : 'audio';
   try{
-    const r=await api('projects',{method:'POST',body:{type,title,media_type}});
+    const r=await api('projects',{method:'POST',body:{type:'song',title,media_type}});
     closeNewProject();
-    toast(type==='album'?'Album created':'Project created');
+    toast('Project created');
     if(npAfter==='admin') renderAdmin();
     else { await loadProjects(); if(r&&r.id) await openProject(r.id); }
   }catch(e){ toast(e.message,true); }
