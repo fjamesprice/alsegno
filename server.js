@@ -218,7 +218,8 @@ db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('video_enabled',
   const tcols = db.prepare('PRAGMA table_info(tracks)').all().map(c => c.name);
   const tadd = (name, decl) => { if (!tcols.includes(name)) db.exec(`ALTER TABLE tracks ADD COLUMN ${name} ${decl}`); };
   tadd('video_stored_name', 'TEXT');            // HQ H.264/AAC mp4 (the picture, streamed muted)
-  tadd('video_proxy_name', 'TEXT');             // 480p proxy (Phase 6c instant scrub)
+  tadd('video_proxy_name', 'TEXT');             // 480p proxy (mid tier — instant scrub / medium links)
+  tadd('video_micro_name', 'TEXT');             // 240p ultra-low tier — instant start on slow/non-LAN links (Phase 6d)
   tadd('video_original_name', 'TEXT');          // uploaded filename (for display/download)
   tadd('video_original_stored_name', 'TEXT');   // kept lossless original video (keep_lossless)
   tadd('video_fps', 'REAL');
@@ -451,12 +452,23 @@ async function transcodeToVideoPreview(input, output) {
     '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', output]);
 }
 
-// Low-quality 480p proxy for instant scrubbing (Phase 6c shows it under the HQ video until HQ is
-// ready). Smaller/faster to seek; faststart so it streams immediately.
+// Mid-tier 480p proxy: the steady remote tier and the instant-scrub source. NO audio track (-an) —
+// the picture is always muted (audio comes from the separate mix revision), so the embedded track was
+// ~25% dead weight on the wire. Short GOP (-g 60 ≈ 2s) so seeks resolve fast. faststart streams it.
 async function transcodeToVideoProxy(input, output) {
-  await run('ffmpeg', ['-y', '-i', input, '-vf', 'scale=-2:480',
-    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '30', '-pix_fmt', 'yuv420p',
-    '-c:a', 'aac', '-b:a', '96k', '-movflags', '+faststart', output]);
+  await run('ffmpeg', ['-y', '-i', input, '-an', '-vf', 'scale=-2:480',
+    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '30', '-g', '60', '-pix_fmt', 'yuv420p',
+    '-movflags', '+faststart', output]);
+}
+
+// Ultra-low 240p tier: tiny + low-bitrate (capped) so it starts playing almost immediately and fully
+// downloads fast even on a slow non-LAN link — after which the whole timeline is locally seekable
+// (instant scrub anywhere). No audio (muted picture), short GOP, faststart. The frontend shows this
+// first and climbs to proxy→HQ as they buffer in (Phase 6d adaptive tiers).
+async function transcodeToVideoMicro(input, output) {
+  await run('ffmpeg', ['-y', '-i', input, '-an', '-vf', 'scale=-2:240',
+    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '33', '-maxrate', '220k', '-bufsize', '440k',
+    '-g', '60', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', output]);
 }
 
 // Does this media file have at least one audio stream?
@@ -477,15 +489,18 @@ async function ffprobeHasAudio(file) {
 async function processTrackVideo(file, keepLossless = false) {
   const inputPath = file.path;
   const storedName = crypto.randomUUID() + '.mp4';        // HQ preview (the picture, streamed muted)
-  const proxyName = crypto.randomUUID() + '_proxy.mp4';   // 480p instant-scrub proxy (6c)
+  const proxyName = crypto.randomUUID() + '_proxy.mp4';   // 480p mid tier / instant-scrub proxy
+  const microName = crypto.randomUUID() + '_micro.mp4';   // 240p ultra-low tier (slow-link instant start)
   const finalPath = path.join(UPLOADS_DIR, storedName);
   const proxyPath = path.join(UPLOADS_DIR, proxyName);
+  const microPath = path.join(UPLOADS_DIR, microName);
   let audioName = null, audioPath = null;
   try {
     const v = await ffprobeVideo(inputPath);
     if (!v) { const e = new Error('File does not appear to be a video'); e.status = 400; throw e; }
     await transcodeToVideoPreview(inputPath, finalPath);
     await transcodeToVideoProxy(inputPath, proxyPath);
+    await transcodeToVideoMicro(inputPath, microPath);
     const duration = await getDuration(finalPath);
     if (!duration) { const e = new Error('Video has no decodable duration'); e.status = 400; throw e; }
     let origAudio = null;
@@ -500,12 +515,12 @@ async function processTrackVideo(file, keepLossless = false) {
     if (keepLossless) originalStoredName = file.filename;          // keep original video for download
     else { try { fs.unlinkSync(inputPath); } catch {} }
     return {
-      video: { storedName, proxyName, originalName: file.originalname, originalStoredName,
+      video: { storedName, proxyName, microName, originalName: file.originalname, originalStoredName,
                fps: v.fps, width: v.width, height: v.height, duration, size: fs.statSync(finalPath).size },
       origAudio
     };
   } catch (e) {
-    for (const p of [inputPath, finalPath, proxyPath, audioPath]) {
+    for (const p of [inputPath, finalPath, proxyPath, microPath, audioPath]) {
       if (p && fs.existsSync(p)) { try { fs.unlinkSync(p); } catch {} }
     }
     throw e;
@@ -632,7 +647,7 @@ const projectIdForAudio    = name => {
   // A media name is either a revision's audio (stored_name) or a track's video (HQ or proxy).
   const r = db.prepare('SELECT t.project_id AS p FROM revisions r JOIN tracks t ON r.track_id = t.id WHERE r.stored_name = ?').get(name);
   if (r) return r.p ?? null;
-  const t = db.prepare('SELECT project_id AS p FROM tracks WHERE video_stored_name = ? OR video_proxy_name = ?').get(name, name);
+  const t = db.prepare('SELECT project_id AS p FROM tracks WHERE video_stored_name = ? OR video_proxy_name = ? OR video_micro_name = ?').get(name, name, name);
   return t ? (t.p ?? null) : null;
 };
 const isMember = (username, projectId) => !!db.prepare('SELECT 1 FROM project_users WHERE project_id = ? AND username = ?').get(projectId, username);
@@ -875,7 +890,7 @@ app.delete('/api/projects/:id', requireAdmin, (req, res) => {
   const pid = Number(req.params.id);
   if (!projectExists(pid)) return res.status(404).json({ error: 'Not found' });
   const revs = db.prepare('SELECT r.stored_name, r.original_stored_name FROM revisions r JOIN tracks t ON r.track_id = t.id WHERE t.project_id = ?').all(pid);
-  const vids = db.prepare('SELECT video_stored_name, video_proxy_name, video_original_stored_name FROM tracks WHERE project_id = ?').all(pid);
+  const vids = db.prepare('SELECT video_stored_name, video_proxy_name, video_micro_name, video_original_stored_name FROM tracks WHERE project_id = ?').all(pid);
   db.transaction(() => {
     db.prepare('DELETE FROM seen WHERE track_id IN (SELECT id FROM tracks WHERE project_id = ?)').run(pid);
     db.prepare('DELETE FROM tracks WHERE project_id = ?').run(pid);   // cascades revisions + comments
@@ -883,7 +898,7 @@ app.delete('/api/projects/:id', requireAdmin, (req, res) => {
     db.prepare('DELETE FROM projects WHERE id = ?').run(pid);          // cascades project_users
   })();
   for (const r of revs) { unlinkStored(r.stored_name); unlinkStored(r.original_stored_name); }
-  for (const v of vids) { unlinkStored(v.video_stored_name); unlinkStored(v.video_proxy_name); unlinkStored(v.video_original_stored_name); }
+  for (const v of vids) { unlinkStored(v.video_stored_name); unlinkStored(v.video_proxy_name); unlinkStored(v.video_micro_name); unlinkStored(v.video_original_stored_name); }
   // Membership is gone now, so anyone who had it open re-validates via the projects ping → 404 → list.
   broadcastProjects();
   res.json({ ok: true });
@@ -942,10 +957,10 @@ app.put('/api/tracks/:id', requireProjectEngineer(pTrack), (req, res) => {
 
 app.delete('/api/tracks/:id', requireProjectEngineer(pTrack), (req, res) => {
   const revs = db.prepare('SELECT stored_name, original_stored_name FROM revisions WHERE track_id = ?').all(req.params.id);
-  const trk = db.prepare('SELECT video_stored_name, video_proxy_name, video_original_stored_name FROM tracks WHERE id = ?').get(req.params.id);
+  const trk = db.prepare('SELECT video_stored_name, video_proxy_name, video_micro_name, video_original_stored_name FROM tracks WHERE id = ?').get(req.params.id);
   db.prepare('DELETE FROM tracks WHERE id = ?').run(req.params.id); // cascades revisions/comments
   for (const r of revs) { unlinkStored(r.stored_name); unlinkStored(r.original_stored_name); }
-  if (trk) { unlinkStored(trk.video_stored_name); unlinkStored(trk.video_proxy_name); unlinkStored(trk.video_original_stored_name); }
+  if (trk) { unlinkStored(trk.video_stored_name); unlinkStored(trk.video_proxy_name); unlinkStored(trk.video_micro_name); unlinkStored(trk.video_original_stored_name); }
   broadcastChange(req.projectId);
   res.json({ ok: true });
 });
@@ -1017,18 +1032,18 @@ app.post('/api/tracks/:id/video', requireProjectEngineer(pTrack), upload.single(
     catch (e) { console.error('[track-video] processing failed:', e.message); db.prepare('UPDATE tracks SET video_processing = 0 WHERE id = ?').run(trackId); broadcastChange(projectId); return; }
     // Re-read current state INSIDE the job (FIFO queue ⇒ a prior video upload to this track may have
     // run first; the track could also have been deleted while queued).
-    const cur = db.prepare('SELECT video_stored_name, video_proxy_name, video_original_stored_name FROM tracks WHERE id = ?').get(trackId);
-    if (!cur) { unlinkStored(a.video.storedName); unlinkStored(a.video.proxyName); unlinkStored(a.video.originalStoredName); if (a.origAudio) unlinkStored(a.origAudio.storedName); return; }
-    const old = { v: cur.video_stored_name, p: cur.video_proxy_name, ov: cur.video_original_stored_name };
+    const cur = db.prepare('SELECT video_stored_name, video_proxy_name, video_micro_name, video_original_stored_name FROM tracks WHERE id = ?').get(trackId);
+    if (!cur) { unlinkStored(a.video.storedName); unlinkStored(a.video.proxyName); unlinkStored(a.video.microName); unlinkStored(a.video.originalStoredName); if (a.origAudio) unlinkStored(a.origAudio.storedName); return; }
+    const old = { v: cur.video_stored_name, p: cur.video_proxy_name, mi: cur.video_micro_name, ov: cur.video_original_stored_name };
     const oldOrig = db.prepare('SELECT id, stored_name, original_stored_name FROM revisions WHERE track_id = ? AND is_orig_audio = 1').get(trackId);
     const oa = a.origAudio;
     const oaName = oa ? (path.basename(a.video.originalName, path.extname(a.video.originalName)) || 'audio') + '.mp3' : null;
     try {
       db.transaction(() => {
-        db.prepare(`UPDATE tracks SET video_stored_name=?, video_proxy_name=?, video_original_name=?, video_original_stored_name=?,
+        db.prepare(`UPDATE tracks SET video_stored_name=?, video_proxy_name=?, video_micro_name=?, video_original_name=?, video_original_stored_name=?,
                       video_fps=?, video_width=?, video_height=?, video_duration=?, video_uploaded_by=?, video_updated_at=datetime('now'),
                       video_processing=0, updated_at=datetime('now') WHERE id=?`)
-          .run(a.video.storedName, a.video.proxyName, a.video.originalName, a.video.originalStoredName,
+          .run(a.video.storedName, a.video.proxyName, a.video.microName, a.video.originalName, a.video.originalStoredName,
                a.video.fps, a.video.width, a.video.height, a.video.duration, username, trackId);
         if (oa && oldOrig) {
           db.prepare(`UPDATE revisions SET stored_name=?, original_name=?, original_stored_name=NULL, mime_type='audio/mpeg',
@@ -1052,7 +1067,7 @@ app.post('/api/tracks/:id/video', requireProjectEngineer(pTrack), upload.single(
         }
       })();
     } catch (e) {
-      unlinkStored(a.video.storedName); unlinkStored(a.video.proxyName); unlinkStored(a.video.originalStoredName);
+      unlinkStored(a.video.storedName); unlinkStored(a.video.proxyName); unlinkStored(a.video.microName); unlinkStored(a.video.originalStoredName);
       if (oa) unlinkStored(oa.storedName);
       db.prepare('UPDATE tracks SET video_processing = 0 WHERE id = ?').run(trackId);
       console.error('[track-video] db failed:', e.message);
@@ -1062,6 +1077,7 @@ app.post('/api/tracks/:id/video', requireProjectEngineer(pTrack), upload.single(
     // committed — unlink the replaced video files + the Original-audio's old files
     if (old.v && old.v !== a.video.storedName) unlinkStored(old.v);
     if (old.p && old.p !== a.video.proxyName) unlinkStored(old.p);
+    if (old.mi && old.mi !== a.video.microName) unlinkStored(old.mi);
     if (old.ov && old.ov !== a.video.originalStoredName) unlinkStored(old.ov);
     if (oldOrig) { if (!oa || oldOrig.stored_name !== oa.storedName) unlinkStored(oldOrig.stored_name); unlinkStored(oldOrig.original_stored_name); }
     broadcastChange(projectId);
@@ -1200,7 +1216,7 @@ app.get('/api/audio/:name', requireProjectAccess(pAudio), (req, res) => {
   const p = path.join(UPLOADS_DIR, name);
   if (!fs.existsSync(p)) return res.status(404).json({ error: 'File missing' });
   const rev = db.prepare('SELECT * FROM revisions WHERE stored_name = ?').get(name);
-  const trk = rev ? null : db.prepare('SELECT * FROM tracks WHERE video_stored_name = ? OR video_proxy_name = ?').get(name, name);
+  const trk = rev ? null : db.prepare('SELECT * FROM tracks WHERE video_stored_name = ? OR video_proxy_name = ? OR video_micro_name = ?').get(name, name, name);
   if (!rev && !trk) return res.status(404).json({ error: 'Not found' });
   if (req.query.dl) {
     const orig = rev ? rev.original_stored_name : trk.video_original_stored_name;     // kept lossless/original

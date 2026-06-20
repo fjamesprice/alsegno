@@ -370,8 +370,9 @@
     <div id="pbEmpty" class="pb-empty">Select a track to play</div>
     <div id="pbActive" class="hidden">
       <div class="vstage" id="vstage">
-        <video id="vidpic" playsinline preload="auto" muted></video>
+        <video id="vidpic" class="vhide" playsinline preload="auto" muted></video>
         <video id="vidproxy" class="vhide" playsinline preload="auto" muted></video>
+        <video id="vidmicro" class="vhide" playsinline preload="auto" muted></video>
       </div>
       <div class="wave-wrap">
         <canvas id="wave"></canvas>
@@ -482,9 +483,11 @@ let autoAdvance=false;
 // always audio; the video just follows.
 const players=[document.getElementById('audioA'), document.getElementById('audioB')];
 let act=0, audio=players[0];
-const vid=document.getElementById('vidpic');   // the HQ picture for a video track (muted, follows audio)
-const vidlo=document.getElementById('vidproxy');// 480p instant-scrub proxy, layered over the HQ picture
-vid.muted=true; vidlo.muted=true;
+const vid=document.getElementById('vidpic');     // HQ tier (highest quality)
+const vidpx=document.getElementById('vidproxy'); // 480p mid tier
+const vidmi=document.getElementById('vidmicro'); // 240p micro tier (loads first; instant start on slow links)
+const VIDELS=[vid,vidpx,vidmi];                  // high→low; all muted, all slaved to the audio clock
+vid.muted=true; vidpx.muted=true; vidmi.muted=true;
 let userVol = (()=>{ const v=parseFloat(localStorage.getItem('at_vol')); return isFinite(v)?v:1; })();
 let crossing=false, xfRaf=null, pendingRev=null;
 let dragSeek=null;                              // non-null while a waveform scrub/seek drag is in flight
@@ -527,60 +530,88 @@ function applyNullVis(){
 }
 function applyMediaMode(){ applyNullVis(); updateStage(); }
 
-// ── Video picture (audio-post model) ────────────────────────
-// The current track's video (the locked picture) plays MUTED in `vid`, slaved to the active audio
-// mix's clock. updateStage shows it for a video track, (re)loads the picture only when the track's
-// video changes, and reveals the resize handle.
+// ── Video picture (audio-post model, Phase 6d adaptive tiers) ────────────────────────
+// The track's picture is shown MUTED and slaved to the active audio mix's clock. Up to three quality
+// tiers are stacked <video>s — HQ (vid), 480p proxy (vidpx), 240p micro (vidmi) — all time-aligned to
+// the audio. We DISPLAY the highest-quality tier that currently holds the frame at the playhead,
+// dropping to a lower one during buffering and climbing back as quality streams in (seamless because
+// they're all on the same clock). Tiers load micro-first (staged) so the tiny one starts instantly on
+// a slow link; once the small tiers fully download, the whole timeline is locally seekable.
 function curVideoName(){ const t=trackById(curTrackId); return (t && t.has_video) ? t.video_stored_name : null; }
-function curProxyName(){ const t=trackById(curTrackId); return (t && t.has_video) ? (t.video_proxy_name||null) : null; }
 function curFps(){ const t=trackById(curTrackId); return (t && t.has_video && t.video_fps>0) ? t.video_fps : 0; }
+// Existing tiers for the current track, HIGH→LOW quality (HQ is always present for a video track).
+function videoTiers(){
+  const t=trackById(curTrackId);
+  if(!t || !t.has_video) return [];
+  const out=[{el:vid, vn:t.video_stored_name}];
+  if(t.video_proxy_name) out.push({el:vidpx, vn:t.video_proxy_name});
+  if(t.video_micro_name) out.push({el:vidmi, vn:t.video_micro_name});
+  return out;
+}
+function loadTier(el, vn){ el._vname=vn; el._loaded=true; el._err=false; el.muted=true; el.src='api/audio/'+vn; el.load(); }
+function unloadTier(el){ try{el.pause();}catch{} if(el._vname){ try{ el.removeAttribute('src'); el.load(); }catch{} } el._vname=null; el._loaded=false; el._err=false; }
+function tierComplete(el){ if(!el._loaded || !el.duration) return false; try{ const b=el.buffered; return b.length>0 && b.start(0)<=0.2 && b.end(b.length-1)>=el.duration-0.3; }catch{ return false; } }
+function bufferedAt(el, t){ try{ const b=el.buffered; for(let i=0;i<b.length;i++){ if(t>=b.start(i)-0.3 && t<=b.end(i)+0.1) return true; } }catch{} return false; }
+// A tier is "showable" at t when it has decoded the frame there (readyState≥2) AND is parked on ~t.
+function showableAt(el, t){ return el._loaded && el.readyState>=2 && Math.abs((el.currentTime||0)-t) < 0.35; }
+// Staged loader: micro → proxy → HQ, each gated on the previous being playable, so the tiny tier wins
+// the bandwidth race at startup. Reconciles to the current track (reloads all on a track switch).
+let tiersTrackId=null, scrubEl=null;   // scrubEl: during a waveform drag, the single tier being moved live
+function tierPump(){
+  const t=trackById(curTrackId);
+  if(!t || !t.has_video || !curRevId) return;
+  if(tiersTrackId!==curTrackId){ for(const el of VIDELS) unloadTier(el); tiersTrackId=curTrackId; }
+  const hq=t.video_stored_name, px=t.video_proxy_name||null, mi=t.video_micro_name||null;
+  if(mi && vidmi._vname!==mi){ loadTier(vidmi, mi); return; }
+  const microReady = !mi || vidmi._err || vidmi.readyState>=3 || tierComplete(vidmi);   // _err ⇒ skip a dead tier (don't block the rest)
+  if(px && microReady && vidpx._vname!==px){ loadTier(vidpx, px); return; }
+  const proxyReady = !px || vidpx._err || vidpx.readyState>=3 || tierComplete(vidpx);
+  if(hq && proxyReady && vid._vname!==hq){ loadTier(vid, hq); return; }
+}
+// Show the highest tier that currently has the frame at the playhead; if none is ready yet keep the
+// current one (anti-flicker), else fall back to the lowest loaded tier.
+function pickDisplay(){
+  const tiers=videoTiers(); if(!tiers.length) return;
+  const t=audio.currentTime||0;
+  let chosen=null;
+  if(scrubEl){ if(showableAt(scrubEl,t)) chosen=scrubEl; }   // mid-drag: only the moved tier sits at the cursor — never flash a stale frozen heavier tier
+  else { for(const {el} of tiers){ if(showableAt(el,t)){ chosen=el; break; } } }   // highest tier holding ~t
+  if(!chosen){
+    // none ready at t: keep the current frame up (anti-flicker), unless nothing's shown yet → lowest non-errored loaded
+    if(tiers.some(x=>!x.el.classList.contains('vhide'))) return;
+    chosen = [...tiers].reverse().find(x=>x.el._loaded && !x.el._err)?.el;
+    if(!chosen) return;
+  }
+  for(const el of VIDELS) el.classList.toggle('vhide', el!==chosen);
+}
 function updateStage(){
-  const vname = curVideoName();
-  const show = !!vname && !!curRevId;
+  const show = !!curVideoName() && !!curRevId;
   $('#vstage').classList.toggle('show', show);
   $('#pbResize').classList.toggle('show', show);
   $('#framestep').classList.toggle('show', show && curFps()>0);   // frame-step needs a known fps
-  if(show){
-    if(vid._vname !== vname){ vid._vname=vname; vid.src='api/audio/'+vname; vid.muted=true; vid.load(); }
-    const pname = curProxyName();
-    if(vidlo._vname !== (pname||null)){
-      vidlo._vname = pname||null;
-      if(pname){ vidlo.src='api/audio/'+pname; vidlo.muted=true; vidlo.load(); } else { try{vidlo.removeAttribute('src');}catch{} }
-    }
-    showProxy(false);                                              // start on the HQ picture
-    applyVideoH();
-  } else {
-    try{ vid.pause(); }catch{} if(vid._vname){ vid.removeAttribute('src'); vid._vname=null; }
-    try{ vidlo.pause(); }catch{} if(vidlo._vname){ vidlo.removeAttribute('src'); vidlo._vname=null; }
-    showProxy(false);
-  }
+  if(show){ tierPump(); applyVideoH(); pickDisplay(); }
+  else { for(const el of VIDELS) unloadTier(el); tiersTrackId=null; }
   syncBottomPad();
 }
-// Reveal (on) or hide the 480p proxy that's layered over the HQ picture. Hidden ⇒ HQ shows through.
-function showProxy(on){ vidlo.classList.toggle('vhide', !on); }
-// Seek the picture to t. Instant: show the proxy at t (low-bitrate ⇒ fast random-access), then seek
-// HQ underneath and swap back once HQ has the frame (or a short fallback) — no buffering hitch. During
-// an active drag (scrub=true) only the proxy moves; HQ is left frozen until the drag commits so it
-// doesn't thrash. A no-op for audio projects (no picture).
-let hqRevealTO=null, hqOnSeeked=null;
+// Seek the picture to t. A normal seek/commit moves EVERY loaded tier (the lowest, fully-buffered one
+// lands instantly from local data → no hitch; the heavier ones climb in as they re-buffer). During a
+// live drag (scrub) only the lightest loaded tier moves — the heavier ones stay put so they don't
+// thrash — and the display shows it. A no-op for audio projects (no picture).
 function seekPicture(t, {scrub=false}={}){
-  if(!curVideoName()) return;
-  const tt = Math.max(0, Math.min(t, vid.duration||t));
-  const haveLo = vidlo._vname && vidlo.readyState>=1;             // proxy buffered enough to seek?
-  if(haveLo){ try{ vidlo.currentTime = Math.min(tt, vidlo.duration||tt); }catch{} showProxy(true); }
-  if(scrub) return;                                               // mid-drag: proxy only, defer HQ
-  try{ vid.currentTime = tt; }catch{}
-  if(haveLo) armHqReveal(); else showProxy(false);                // no proxy ⇒ just live on HQ as before
-}
-// Swap from proxy back to HQ as soon as HQ has decoded the seeked frame (single pending listener;
-// the timeout guarantees we never get stuck showing the lower-quality proxy if HQ stalls).
-function armHqReveal(){
-  clearTimeout(hqRevealTO);
-  if(hqOnSeeked){ vid.removeEventListener('seeked', hqOnSeeked); hqOnSeeked=null; }
-  const reveal=()=>{ clearTimeout(hqRevealTO); if(hqOnSeeked){ vid.removeEventListener('seeked',hqOnSeeked); hqOnSeeked=null; } showProxy(false); };
-  hqOnSeeked = reveal;
-  vid.addEventListener('seeked', hqOnSeeked);
-  hqRevealTO = setTimeout(reveal, 1200);
+  const tiers=videoTiers(); if(!tiers.length) return;
+  const tt=Math.max(0,t);
+  if(scrub){
+    // move only the lightest loaded tier LIGHTER than HQ (never live-seek the heavy HQ element); show
+    // only that tier so a frozen heavier tier near the cursor can't flash a stale frame. If HQ is the
+    // only loaded tier, don't seek it live at all — defer to the commit (mirrors the pre-6d behavior).
+    const light=[...tiers].reverse().find(x=>x.el._loaded && x.el!==vid);
+    scrubEl = light ? light.el : null;
+    if(light){ try{ light.el.currentTime=Math.min(tt, light.el.duration||tt); }catch{} }
+    pickDisplay(); return;
+  }
+  scrubEl=null;
+  for(const {el} of tiers){ if(el._loaded){ try{ el.currentTime=Math.min(tt, el.duration||tt); }catch{} } }
+  pickDisplay();
 }
 // Step ±n frames (currentTime ± n/fps). Frame-stepping is a paused inspection: pause, move the audio
 // clock AND the picture exactly (the step is below syncVid's 0.25s drift threshold, so it won't follow
@@ -602,19 +633,34 @@ function frameStep(n){
   seekPicture(t);   // picture lands frame-accurately on the requested t regardless of the audio snap
   updateTime(t,dur);
 }
-// Keep the muted picture locked to the active audio mix: match play/pause and correct time drift.
-// Suppressed during a scrub drag — seekPicture drives the proxy then, and HQ must not seek live.
+// Keep every loaded tier locked to the audio mix: match play/pause, and chase the playhead only when
+// it's cheap (already buffered on that tier) or the user is paused on a frame — never chase a tier
+// that can't keep up mid-playback (that would thrash the heavy HQ). Then advance staging + pick the
+// display. NB: not guarded by dragSeek — the rAF play-loop must keep the picture following even if a
+// drag's pointerup was ever missed; HQ-thrash during a scrub is prevented at the 'seeked' listener.
 function syncVid(){
-  if(!curVideoName() || nullOn) return;   // NB: NOT guarded by dragSeek — the rAF loop must keep the
-  // picture following the audio during playback even if a drag's pointerup was ever missed. HQ-thrash
-  // during a scrub is prevented at the 'seeked' listener instead (a scrub pauses audio, so this rAF
-  // path isn't running then anyway).
-  if(audio.paused){ if(!vid.paused){ try{ vid.pause(); }catch{} } }
-  else if(vid.paused && vid._vname){ vid.play().catch(()=>{}); }
-  if(vid.readyState>=1 && Math.abs((vid.currentTime||0)-(audio.currentTime||0)) > 0.25){
-    try{ vid.currentTime = Math.min(audio.currentTime, (vid.duration||audio.currentTime)); }catch{}
+  if(nullOn) return;
+  const tiers=videoTiers(); if(!tiers.length) return;
+  const cur=audio.currentTime||0;
+  for(const {el} of tiers){
+    if(!el._loaded) continue;
+    if(audio.paused){ if(!el.paused){ try{ el.pause(); }catch{} } }
+    else if(el.paused){ el.play().catch(()=>{}); }
+    if(el.readyState>=1 && Math.abs((el.currentTime||0)-cur) > 0.25){
+      if(audio.paused || bufferedAt(el,cur)){ try{ el.currentTime=Math.min(cur, el.duration||cur); }catch{} }
+    }
   }
+  tierPump();
+  pickDisplay();
 }
+// Buffering-state changes on any tier → advance staging + re-pick the display: this is what makes the
+// quality climb (and drop) seamless as data streams in.
+VIDELS.forEach(el=>{
+  ['loadeddata','canplay','progress','seeked','playing','waiting','stalled'].forEach(ev=>
+    el.addEventListener(ev, ()=>{ if(curVideoName()){ tierPump(); pickDisplay(); } }));
+  // a fatally-errored tier (404/decode) must mark itself done so it can't block the higher tiers.
+  el.addEventListener('error', ()=>{ el._err=true; if(curVideoName()){ tierPump(); pickDisplay(); } });
+});
 
 // ── Resizable video + dynamic player-bar clearance ──────────
 // The player bar is fixed at the bottom; with a video it gets tall, so (1) #mainView is given a
@@ -903,7 +949,7 @@ async function ensurePeaks(revId){
 }
 
 function togglePlay(){ if(nullOn){ toggleNull(); return;} if(audio.paused){ audio.volume=userVol; audio.play().catch(()=>{}); } else audio.pause(); }
-function stopAll(){ players.forEach(p=>{try{p.pause()}catch{}}); stopNull(); curTrackId=null; curRevId=null; dragSeek=null; stepT=null; $('#pbActive').classList.add('hidden'); $('#pbEmpty').classList.remove('hidden'); $('#cpanel').classList.add('hidden'); updateStage(); render(); }
+function stopAll(){ players.forEach(p=>{try{p.pause()}catch{}}); stopNull(); curTrackId=null; curRevId=null; dragSeek=null; stepT=null; scrubEl=null; $('#pbActive').classList.add('hidden'); $('#pbEmpty').classList.remove('hidden'); $('#cpanel').classList.add('hidden'); updateStage(); render(); }
 
 $('#playBtn').addEventListener('click',togglePlay);
 $('#prevBtn').addEventListener('click',()=>step(-1));
