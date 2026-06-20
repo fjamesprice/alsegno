@@ -114,17 +114,20 @@
   #playerBar{position:fixed;left:0;right:0;bottom:0;z-index:30;background:rgba(18,20,28,.97);backdrop-filter:blur(12px);border-top:1px solid var(--line)}
   .pb-inner{max-width:940px;margin:0 auto;padding:10px 16px calc(10px + env(safe-area-inset-bottom))}
   .wave-wrap{position:relative;height:64px;margin-bottom:8px}
-  /* Video stage (Phase 6) — shown only for video projects, above the waveform in the player bar. */
-  .vstage{display:none;justify-content:center;align-items:center;background:#000;border-radius:8px;margin-bottom:8px;height:38vh;overflow:hidden}
-  .vstage.show{display:flex}
-  .vstage video{width:100%;height:100%;object-fit:contain;background:#000;display:block;border-radius:8px}
+  /* Video stage (Phase 6) — shown only for video projects, above the waveform in the player bar.
+     Two stacked <video>s: the HQ picture (#vidpic) and a 480p instant-scrub proxy (#vidproxy) layered
+     on top. During a seek/scrub the proxy is revealed at the new spot instantly while HQ catches up
+     underneath, then the proxy hides → no buffering hitch. Both letterbox identically (object-fit). */
+  .vstage{position:relative;display:none;background:#000;border-radius:8px;margin-bottom:8px;height:38vh;overflow:hidden}
+  .vstage.show{display:block}
+  .vstage video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000;display:block;border-radius:8px}
   .vstage video.vhide{display:none}
   /* Drag handle on top of the player bar — grow/shrink the video (only shown for video). */
   .pb-resize{display:none;height:12px;cursor:ns-resize;align-items:center;justify-content:center;touch-action:none}
   .pb-resize.show{display:flex}
   .pb-resize::before{content:"";width:48px;height:4px;border-radius:3px;background:var(--line);transition:.12s}
   .pb-resize:hover::before{background:var(--accent);width:64px}
-  #wave{width:100%;height:100%;display:block;border-radius:8px;background:var(--panel);cursor:pointer}
+  #wave{width:100%;height:100%;display:block;border-radius:8px;background:var(--panel);cursor:pointer;touch-action:none}
   .pins{position:absolute;inset:0;pointer-events:none}
   .pin{position:absolute;top:-2px;transform:translateX(-50%);pointer-events:auto;cursor:pointer;font-size:11px;color:var(--warn)}
   .pin:hover{color:#fff}
@@ -133,6 +136,10 @@
   .tbtn{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:14px;background:var(--panel2);border:1px solid var(--line)}
   .tbtn:hover{border-color:var(--accent);color:#fff}
   .tbtn.big{width:42px;height:42px;background:var(--accent2);border-color:var(--accent2);color:#fff;font-size:16px}
+  /* Frame-step group (Phase 6c) — shown only for a video track (needs fps). */
+  .framestep{display:none;align-items:center;gap:4px}
+  .framestep.show{display:flex}
+  .tbtn.fs{width:30px;height:30px;font-size:15px}
   .time{font-variant-numeric:tabular-nums;font-size:13px;color:var(--muted);min-width:88px}
   .nowtitle{font-weight:600;flex:1;min-width:90px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .seg{display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--muted)}
@@ -364,6 +371,7 @@
     <div id="pbActive" class="hidden">
       <div class="vstage" id="vstage">
         <video id="vidpic" playsinline preload="auto" muted></video>
+        <video id="vidproxy" class="vhide" playsinline preload="auto" muted></video>
       </div>
       <div class="wave-wrap">
         <canvas id="wave"></canvas>
@@ -386,6 +394,12 @@
           <button class="tbtn" id="prevBtn" title="Previous">⏮</button>
           <button class="tbtn big" id="playBtn" title="Play/Pause (space)">▶</button>
           <button class="tbtn" id="nextBtn" title="Next">⏭</button>
+        </div>
+        <div class="framestep" id="framestep">
+          <button class="tbtn fs" id="fsB5" title="Back 5 frames">«</button>
+          <button class="tbtn fs" id="fsB1" title="Back 1 frame (←)">‹</button>
+          <button class="tbtn fs" id="fsF1" title="Forward 1 frame (→)">›</button>
+          <button class="tbtn fs" id="fsF5" title="Forward 5 frames">»</button>
         </div>
         <span class="time" id="timeLbl">0:00 / 0:00</span>
         <span class="seg vol" title="Volume">🔊<input type="range" id="vol" min="0" max="100" value="100" style="width:78px"></span>
@@ -468,10 +482,12 @@ let autoAdvance=false;
 // always audio; the video just follows.
 const players=[document.getElementById('audioA'), document.getElementById('audioB')];
 let act=0, audio=players[0];
-const vid=document.getElementById('vidpic');   // the picture for a video track (muted, follows audio)
-vid.muted=true;
+const vid=document.getElementById('vidpic');   // the HQ picture for a video track (muted, follows audio)
+const vidlo=document.getElementById('vidproxy');// 480p instant-scrub proxy, layered over the HQ picture
+vid.muted=true; vidlo.muted=true;
 let userVol = (()=>{ const v=parseFloat(localStorage.getItem('at_vol')); return isFinite(v)?v:1; })();
 let crossing=false, xfRaf=null, pendingRev=null;
+let dragSeek=null;                              // non-null while a waveform scrub/seek drag is in flight
 let peakMaxHold=-Infinity;   // peak meter max-hold (resets on revision/track load)
 
 // ───────── API ─────────
@@ -516,22 +532,83 @@ function applyMediaMode(){ applyNullVis(); updateStage(); }
 // mix's clock. updateStage shows it for a video track, (re)loads the picture only when the track's
 // video changes, and reveals the resize handle.
 function curVideoName(){ const t=trackById(curTrackId); return (t && t.has_video) ? t.video_stored_name : null; }
+function curProxyName(){ const t=trackById(curTrackId); return (t && t.has_video) ? (t.video_proxy_name||null) : null; }
+function curFps(){ const t=trackById(curTrackId); return (t && t.has_video && t.video_fps>0) ? t.video_fps : 0; }
 function updateStage(){
   const vname = curVideoName();
   const show = !!vname && !!curRevId;
   $('#vstage').classList.toggle('show', show);
   $('#pbResize').classList.toggle('show', show);
+  $('#framestep').classList.toggle('show', show && curFps()>0);   // frame-step needs a known fps
   if(show){
     if(vid._vname !== vname){ vid._vname=vname; vid.src='api/audio/'+vname; vid.muted=true; vid.load(); }
+    const pname = curProxyName();
+    if(vidlo._vname !== (pname||null)){
+      vidlo._vname = pname||null;
+      if(pname){ vidlo.src='api/audio/'+pname; vidlo.muted=true; vidlo.load(); } else { try{vidlo.removeAttribute('src');}catch{} }
+    }
+    showProxy(false);                                              // start on the HQ picture
     applyVideoH();
   } else {
     try{ vid.pause(); }catch{} if(vid._vname){ vid.removeAttribute('src'); vid._vname=null; }
+    try{ vidlo.pause(); }catch{} if(vidlo._vname){ vidlo.removeAttribute('src'); vidlo._vname=null; }
+    showProxy(false);
   }
   syncBottomPad();
 }
+// Reveal (on) or hide the 480p proxy that's layered over the HQ picture. Hidden ⇒ HQ shows through.
+function showProxy(on){ vidlo.classList.toggle('vhide', !on); }
+// Seek the picture to t. Instant: show the proxy at t (low-bitrate ⇒ fast random-access), then seek
+// HQ underneath and swap back once HQ has the frame (or a short fallback) — no buffering hitch. During
+// an active drag (scrub=true) only the proxy moves; HQ is left frozen until the drag commits so it
+// doesn't thrash. A no-op for audio projects (no picture).
+let hqRevealTO=null, hqOnSeeked=null;
+function seekPicture(t, {scrub=false}={}){
+  if(!curVideoName()) return;
+  const tt = Math.max(0, Math.min(t, vid.duration||t));
+  const haveLo = vidlo._vname && vidlo.readyState>=1;             // proxy buffered enough to seek?
+  if(haveLo){ try{ vidlo.currentTime = Math.min(tt, vidlo.duration||tt); }catch{} showProxy(true); }
+  if(scrub) return;                                               // mid-drag: proxy only, defer HQ
+  try{ vid.currentTime = tt; }catch{}
+  if(haveLo) armHqReveal(); else showProxy(false);                // no proxy ⇒ just live on HQ as before
+}
+// Swap from proxy back to HQ as soon as HQ has decoded the seeked frame (single pending listener;
+// the timeout guarantees we never get stuck showing the lower-quality proxy if HQ stalls).
+function armHqReveal(){
+  clearTimeout(hqRevealTO);
+  if(hqOnSeeked){ vid.removeEventListener('seeked', hqOnSeeked); hqOnSeeked=null; }
+  const reveal=()=>{ clearTimeout(hqRevealTO); if(hqOnSeeked){ vid.removeEventListener('seeked',hqOnSeeked); hqOnSeeked=null; } showProxy(false); };
+  hqOnSeeked = reveal;
+  vid.addEventListener('seeked', hqOnSeeked);
+  hqRevealTO = setTimeout(reveal, 1200);
+}
+// Step ±n frames (currentTime ± n/fps). Frame-stepping is a paused inspection: pause, move the audio
+// clock AND the picture exactly (the step is below syncVid's 0.25s drift threshold, so it won't follow
+// on its own). Video tracks only. The picture lands on the frame-accurate HQ frame via the proxy swap.
+let stepT=null;   // intended picture time across a frame-stepping run (immune to MP3-snapped read-back)
+function frameStep(n){
+  const fps=curFps(); if(!fps || nullOn || !curRevId) return;
+  if(!audio.paused){ try{ audio.pause(); }catch{} }
+  const r=revById(trackById(curTrackId),curRevId); const dur=audio.duration || (r?r.duration:0) || 0;
+  // Accumulate from the INTENDED time, not audio.currentTime: a 320k-MP3 element snaps currentTime to
+  // the nearest ~26ms granule on a paused seek, so reading it back would make repeated single-frame
+  // steps drift (forward+back wouldn't return to the same frame). Resync to the live clock only when
+  // the playhead clearly moved by other means (play/seek) — a gap of more than ~1 frame.
+  const base = (stepT!=null && Math.abs((audio.currentTime||0)-stepT) < 1.5/fps) ? stepT : (audio.currentTime||0);
+  let t=base + n/fps;
+  t=Math.max(0, dur ? Math.min(t,dur) : t);
+  stepT=t;
+  try{ audio.currentTime=t; }catch{}
+  seekPicture(t);   // picture lands frame-accurately on the requested t regardless of the audio snap
+  updateTime(t,dur);
+}
 // Keep the muted picture locked to the active audio mix: match play/pause and correct time drift.
+// Suppressed during a scrub drag — seekPicture drives the proxy then, and HQ must not seek live.
 function syncVid(){
-  if(!curVideoName() || nullOn) return;
+  if(!curVideoName() || nullOn) return;   // NB: NOT guarded by dragSeek — the rAF loop must keep the
+  // picture following the audio during playback even if a drag's pointerup was ever missed. HQ-thrash
+  // during a scrub is prevented at the 'seeked' listener instead (a scrub pauses audio, so this rAF
+  // path isn't running then anyway).
   if(audio.paused){ if(!vid.paused){ try{ vid.pause(); }catch{} } }
   else if(vid.paused && vid._vname){ vid.play().catch(()=>{}); }
   if(vid.readyState>=1 && Math.abs((vid.currentTime||0)-(audio.currentTime||0)) > 0.25){
@@ -766,13 +843,13 @@ async function loadTrack(trackId, revId, {play=false, keepPos=null}={}){
   const rev=revById(t,revId)||t.revisions[t.revisions.length-1]; if(!rev)return;
   if(nullOn) stopNull();
   const other=players[1-act]; try{other.pause();}catch{} other.volume=0; other._revId=null;
-  curTrackId=trackId; curRevId=rev.id;
+  curTrackId=trackId; curRevId=rev.id; stepT=null;   // new track/rev → drop the frame-step accumulator
   $('#pbEmpty').classList.add('hidden'); $('#pbActive').classList.remove('hidden');
   audio.volume=userVol;
   audio.src='api/audio/'+rev.stored_name;
   audio.load();
   const startAt = keepPos!=null? keepPos : 0;
-  const begin=()=>{ if(startAt) audio.currentTime=Math.min(startAt, rev.duration||startAt); audio.volume=userVol; if(play) audio.play().catch(()=>{}); syncVid(); };
+  const begin=()=>{ const sa=startAt?Math.min(startAt, rev.duration||startAt):0; if(startAt) audio.currentTime=sa; audio.volume=userVol; if(play) audio.play().catch(()=>{}); seekPicture(sa); syncVid(); };
   audio.addEventListener('loadedmetadata',begin,{once:true});
   syncPlayerSelectors(t);
   $('#nowTitle').textContent=t.title;
@@ -826,11 +903,15 @@ async function ensurePeaks(revId){
 }
 
 function togglePlay(){ if(nullOn){ toggleNull(); return;} if(audio.paused){ audio.volume=userVol; audio.play().catch(()=>{}); } else audio.pause(); }
-function stopAll(){ players.forEach(p=>{try{p.pause()}catch{}}); stopNull(); curTrackId=null; curRevId=null; $('#pbActive').classList.add('hidden'); $('#pbEmpty').classList.remove('hidden'); $('#cpanel').classList.add('hidden'); updateStage(); render(); }
+function stopAll(){ players.forEach(p=>{try{p.pause()}catch{}}); stopNull(); curTrackId=null; curRevId=null; dragSeek=null; stepT=null; $('#pbActive').classList.add('hidden'); $('#pbEmpty').classList.remove('hidden'); $('#cpanel').classList.add('hidden'); updateStage(); render(); }
 
 $('#playBtn').addEventListener('click',togglePlay);
 $('#prevBtn').addEventListener('click',()=>step(-1));
 $('#nextBtn').addEventListener('click',()=>step(1));
+$('#fsB5').addEventListener('click',()=>frameStep(-5));
+$('#fsB1').addEventListener('click',()=>frameStep(-1));
+$('#fsF1').addEventListener('click',()=>frameStep(1));
+$('#fsF5').addEventListener('click',()=>frameStep(5));
 function step(dir){
   const idx=TRACKS.findIndex(t=>t.id===curTrackId); if(idx<0)return;
   const ni=idx+dir; if(ni<0||ni>=TRACKS.length)return;
@@ -842,7 +923,7 @@ players.forEach(el=>{
   el.addEventListener('play',()=>{ if(el!==audio)return; $('#playBtn').textContent='⏸'; syncVid(); render(); raf(); });
   el.addEventListener('pause',()=>{ if(el!==audio||crossing)return; $('#playBtn').textContent='▶'; syncVid(); render(); });
   el.addEventListener('timeupdate',()=>{ if(el!==audio)return; if(!nullOn) updateTime(audio.currentTime, audio.duration); });
-  el.addEventListener('seeked',()=>{ if(el!==audio)return; syncVid(); });   // keep the picture on the playhead even while paused
+  el.addEventListener('seeked',()=>{ if(el!==audio||dragSeek)return; syncVid(); });   // keep the picture on the playhead even while paused (skip mid-scrub: seekPicture drives it, and HQ must not seek 60×/s)
   el.addEventListener('ended',()=>{ if(el!==audio)return; if(autoAdvance && !nullOn) step(1); });
 });
 
@@ -1027,11 +1108,46 @@ function drawBars(){                                  // bars + playhead only (c
   const px=prog*W; ctx.fillStyle='#fff'; ctx.fillRect(px-0.5,0,1.5,H);
 }
 function drawWave(){ layoutCanvas(); drawBars(); drawPins(); }   // full redraw incl. pins (on data change)
-cv.addEventListener('click',e=>{
-  const r=cv.getBoundingClientRect(); const frac=(e.clientX-r.left)/r.width;
-  if(nullOn){ nullSeek(frac*nullDur()); return; }
-  if(audio.duration) audio.currentTime=frac*audio.duration;
+// Scrub / seek on the waveform. A plain tap seeks (no playback blip). A drag scrubs: the playhead
+// follows the cursor live and, for a video track, the picture tracks it instantly via the low-q proxy
+// (HQ swaps in on release). Audio is paused for the duration of a real drag and resumes on release.
+// move/up live on WINDOW (guarded by dragSeek) so the drag follows the cursor anywhere and always ends
+// on release — the same robust idiom as the video-resize handle.
+function waveFrac(e){ const r=cv.getBoundingClientRect(); return r.width ? Math.max(0,Math.min(1,(e.clientX-r.left)/r.width)) : 0; }
+function waveDur(){ return (nullOn?nullDur():audio.duration) || peaksCache[curRevId]?.duration || 0; }
+function scrubMove(e){
+  if(nullOn) return;                       // null = Web-Audio only; seek commits on release (no live re-decode)
+  const dur=waveDur(); if(!dur) return; const t=waveFrac(e)*dur;
+  try{ audio.currentTime=t; }catch{}       // paused during a drag → cheap; syncVid is suppressed (dragSeek set)
+  seekPicture(t,{scrub:true});             // proxy follows the cursor
+  updateTime(t,dur);
+}
+cv.addEventListener('pointerdown',e=>{
+  if(!curRevId || dragSeek) return;          // ignore a second pointer while a drag is already in flight
+  e.preventDefault();
+  try{ cv.setPointerCapture(e.pointerId); }catch{}   // guarantees pointerup even if the cursor leaves the window — prevents a stuck dragSeek
+  dragSeek={ wasPlaying:(nullOn?nullPlaying:!audio.paused), moved:false, x:e.clientX, y:e.clientY, id:e.pointerId };
 });
+window.addEventListener('pointermove',e=>{
+  if(!dragSeek) return;
+  if(!dragSeek.moved){
+    if(Math.hypot(e.clientX-dragSeek.x, e.clientY-dragSeek.y) <= 5) return;   // < ~5px ⇒ still a tap (no pause/blip)
+    dragSeek.moved=true; if(!nullOn && dragSeek.wasPlaying){ try{ audio.pause(); }catch{} }
+  }
+  scrubMove(e);
+});
+function endScrub(e){
+  if(!dragSeek) return; const d=dragSeek; dragSeek=null;
+  try{ if(d.id!=null) cv.releasePointerCapture(d.id); }catch{}
+  if(!curRevId) return;                       // player torn down mid-drag (e.g. project deleted) → don't resume it
+  const frac=waveFrac(e);
+  if(nullOn){ nullSeek(frac*nullDur()); return; }
+  const dur=waveDur(); if(dur){ const t=frac*dur; try{ audio.currentTime=t; }catch{} seekPicture(t); updateTime(t,dur); }
+  if(d.moved && d.wasPlaying) audio.play().catch(()=>{});   // a real drag resumes; a plain tap never paused
+}
+window.addEventListener('pointerup',endScrub);
+window.addEventListener('pointercancel',endScrub);
+cv.addEventListener('lostpointercapture',endScrub);   // safety: if capture is lost abnormally, end the drag cleanly
 let rafId=null;
 function raf(){ cancelAnimationFrame(rafId);
   const loop=()=>{
@@ -1050,7 +1166,7 @@ function drawPins(){
     const el=document.createElement('div'); el.className='pin'; el.textContent='▾';
     el.style.left=Math.max(0,Math.min(1,c.ts/dur))*100+'%';
     el.title=`${c.author} @ ${fmt(c.ts)}: ${c.body}`;
-    el.addEventListener('click',()=>{ if(nullOn){nullSeek(c.ts)}else if(audio.duration){audio.currentTime=c.ts; audio.play().catch(()=>{});} });
+    el.addEventListener('click',()=>{ if(nullOn){nullSeek(c.ts)}else if(audio.duration){const t=Math.min(c.ts,audio.duration); audio.currentTime=t; seekPicture(t); audio.play().catch(()=>{});} });
     wrap.appendChild(el);
   });
 }
@@ -1237,7 +1353,7 @@ function renderComments(){
       if(c.ts!=null) div.querySelector('.tsbtn').addEventListener('click',()=>{
         if(curTrackId!==c.track_id){ const t=trackById(c.track_id); const rv=revById(t,c.revision_id)||t.revisions.at(-1); loadTrack(c.track_id, rv.id,{play:true,keepPos:c.ts}); }
         else if(c.revision_id && c.revision_id!==curRevId){ loadTrack(c.track_id,c.revision_id,{play:true,keepPos:c.ts}); }
-        else if(nullOn){ nullSeek(c.ts); } else if(audio.duration){ audio.currentTime=c.ts; audio.play().catch(()=>{}); }
+        else if(nullOn){ nullSeek(c.ts); } else if(audio.duration){ const t=Math.min(c.ts,audio.duration); audio.currentTime=t; seekPicture(t); audio.play().catch(()=>{}); }
       });
       div.querySelector('.res').addEventListener('click',async()=>{ await api('comments/'+c.id,{method:'PUT',body:{resolved:c.resolved?0:1}}); c.resolved=c.resolved?0:1; renderComments(); refreshCounts(); });
       div.querySelector('.reply').addEventListener('click',()=>{ replyingId=(replyingId===c.id?null:c.id); renderComments(); });
@@ -1662,6 +1778,8 @@ document.addEventListener('keydown',e=>{
   if(e.code==='Space'){ e.preventDefault(); if(curTrackId && (VIEW==='player'||VIEW==='studio')) togglePlay(); }
   else if(e.key==='ArrowRight' && e.shiftKey){ step(1); }
   else if(e.key==='ArrowLeft' && e.shiftKey){ step(-1); }
+  else if(e.key==='ArrowRight'){ if(curFps() && (VIEW==='player'||VIEW==='studio')){ e.preventDefault(); frameStep(1); } }   // plain arrows = ±1 frame (video tracks, player/studio only)
+  else if(e.key==='ArrowLeft'){ if(curFps() && (VIEW==='player'||VIEW==='studio')){ e.preventDefault(); frameStep(-1); } }
 });
 
 // ───────── realtime (SSE, Phase 4) ─────────
