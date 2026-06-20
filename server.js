@@ -1,6 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const session = require('express-session');
+const SqliteStore = require('better-sqlite3-session-store')(session);
 const Database = require('better-sqlite3');
 const multer = require('multer');
 const path = require('path');
@@ -11,6 +12,10 @@ const { execFile } = require('child_process');
 
 const app = express();
 const PORT = process.env.PORT || 3458;
+// Bind address. Default 127.0.0.1 = the prod posture (nginx proxies to localhost). A standalone
+// install (Phase 5) sets HOST=0.0.0.0 to be reachable from other devices on the LAN — install.sh
+// prompts for that and writes it to .env. Loopback stays the safe default for anyone who doesn't.
+const HOST = process.env.HOST || '127.0.0.1';
 
 // ── Directories ──────────────────────────────────────────────
 // Env-overridable so a throwaway test instance can point at a temp DB/uploads dir
@@ -420,7 +425,16 @@ app.set('trust proxy', 1);
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, 'public')));
+// Sessions persist in SQLite (the existing tracker.db, via the same better-sqlite3 handle) rather
+// than the default in-memory store, so a server restart/reboot no longer logs everyone out — it
+// matters for a self-hosted box that reboots (Phase 5). The store creates its own `sessions` table
+// (no FKs, additive) and sweeps expired rows every 15 min. Switching off MemoryStore logs everyone
+// out exactly once, on the deploy that introduces it; sessions survive every restart after that.
 app.use(session({
+  store: new SqliteStore({
+    client: db,
+    expired: { clear: true, intervalMs: 15 * 60 * 1000 }
+  }),
   secret: process.env.SESSION_SECRET || 'album-tracker-dev-secret',
   resave: false,
   saveUninitialized: false,
@@ -1088,4 +1102,10 @@ app.put('/api/settings', requireAdmin, (req, res) => {
 });
 
 // ── Start ────────────────────────────────────────────────────
-app.listen(PORT, '127.0.0.1', () => console.log(`Album Tracker running on http://127.0.0.1:${PORT}`));
+app.listen(PORT, HOST, () => {
+  if (HOST === '0.0.0.0') {
+    console.log(`Album Tracker running on http://localhost:${PORT} (and reachable on this machine's LAN IP)`);
+  } else {
+    console.log(`Album Tracker running on http://${HOST}:${PORT}`);
+  }
+});
