@@ -62,7 +62,7 @@
   .badge.media{background:rgba(122,162,255,.16);color:var(--accent);border:1px solid var(--accent);text-transform:uppercase}
 
   /* Layout */
-  #mainView{max-width:940px;margin:0 auto;padding:0 16px 180px}
+  #mainView{max-width:940px;margin:0 auto;padding:0 16px 24px}  /* bottom clearance for the fixed player bar is set live in JS (syncBottomPad) */
   .topbar{position:sticky;top:0;z-index:20;background:rgba(13,14,18,.86);backdrop-filter:blur(10px);
     display:flex;align-items:center;gap:14px;padding:14px 4px;margin-bottom:8px;border-bottom:1px solid var(--line)}
   .topbar .title{font-weight:600;font-size:16px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -115,10 +115,15 @@
   .pb-inner{max-width:940px;margin:0 auto;padding:10px 16px calc(10px + env(safe-area-inset-bottom))}
   .wave-wrap{position:relative;height:64px;margin-bottom:8px}
   /* Video stage (Phase 6) — shown only for video projects, above the waveform in the player bar. */
-  .vstage{display:none;justify-content:center;align-items:center;background:#000;border-radius:8px;margin-bottom:8px}
+  .vstage{display:none;justify-content:center;align-items:center;background:#000;border-radius:8px;margin-bottom:8px;height:38vh;overflow:hidden}
   .vstage.show{display:flex}
-  .vstage video{max-width:100%;max-height:38vh;border-radius:8px;background:#000;display:block}
+  .vstage video{width:100%;height:100%;object-fit:contain;background:#000;display:block;border-radius:8px}
   .vstage video.vhide{display:none}
+  /* Drag handle on top of the player bar — grow/shrink the video (only shown for video). */
+  .pb-resize{display:none;height:12px;cursor:ns-resize;align-items:center;justify-content:center;touch-action:none}
+  .pb-resize.show{display:flex}
+  .pb-resize::before{content:"";width:48px;height:4px;border-radius:3px;background:var(--line);transition:.12s}
+  .pb-resize:hover::before{background:var(--accent);width:64px}
   #wave{width:100%;height:100%;display:block;border-radius:8px;background:var(--panel);cursor:pointer}
   .pins{position:absolute;inset:0;pointer-events:none}
   .pin{position:absolute;top:-2px;transform:translateX(-50%);pointer-events:auto;cursor:pointer;font-size:11px;color:var(--warn)}
@@ -353,6 +358,7 @@
 
 <!-- ───────── PLAYER BAR ───────── -->
 <div id="playerBar" class="hidden">
+  <div class="pb-resize" id="pbResize" title="Drag to resize the video"></div>
   <div class="pb-inner">
     <div id="pbEmpty" class="pb-empty">Select a track to play</div>
     <div id="pbActive" class="hidden">
@@ -514,9 +520,46 @@ function applyMediaMode(){
 // Show the video stage only for a video project with a loaded revision; show just the active <video>.
 function updateStage(){
   const v=isVideoProject();
-  $('#vstage').classList.toggle('show', v && !!curRevId);
+  const on = v && !!curRevId;
+  $('#vstage').classList.toggle('show', on);
+  $('#pbResize').classList.toggle('show', on);     // the resize handle only makes sense with a video
   videoEls.forEach((el,i)=>el.classList.toggle('vhide', i!==act));
+  if(on) applyVideoH();
+  syncBottomPad();
 }
+
+// ── Resizable video + dynamic player-bar clearance ──────────
+// The player bar is fixed at the bottom; with a video it gets tall, so (1) #mainView is given a
+// bottom padding equal to the bar's LIVE height (kept in sync by a ResizeObserver) so its content is
+// never hidden behind the bar, and (2) the handle on top of the bar drags the video taller/shorter.
+// The chosen height persists in localStorage. Audio projects benefit from (1) too (precise clearance).
+let videoH = (()=>{ const v=parseFloat(localStorage.getItem('at_video_h')); return isFinite(v)&&v>0?v:0; })();
+function videoMax(){ return Math.max(160, window.innerHeight - 200); }   // leave room for transport + topbar
+function applyVideoH(){
+  const vs=$('#vstage');
+  if(videoH>0){ videoH=Math.max(120, Math.min(videoMax(), videoH)); vs.style.height=videoH+'px'; }
+  else vs.style.removeProperty('height');   // 0 ⇒ use the CSS default (38vh)
+}
+function syncBottomPad(){
+  const bar=$('#playerBar'), mv=$('#mainView');
+  mv.style.paddingBottom = bar.classList.contains('hidden') ? '' : (bar.offsetHeight + 16) + 'px';
+}
+(function(){
+  const h=$('#pbResize'); if(!h) return;
+  let dragging=false, startY=0, startH=0;
+  h.addEventListener('pointerdown',e=>{ e.preventDefault(); dragging=true; startY=e.clientY;
+    startH=$('#vstage').getBoundingClientRect().height||0; });
+  // Track move/up on WINDOW (not the 12px handle) so the drag follows the cursor anywhere and always
+  // terminates on release — robust without relying on pointer capture. Guarded cheaply by `dragging`.
+  window.addEventListener('pointermove',e=>{ if(!dragging) return;
+    videoH=Math.max(120, Math.min(videoMax(), startH + (startY - e.clientY)));   // drag up ⇒ taller
+    $('#vstage').style.height=videoH+'px'; syncBottomPad(); });
+  const end=()=>{ if(!dragging) return; dragging=false;
+    if(videoH>0) localStorage.setItem('at_video_h', String(Math.round(videoH))); };
+  window.addEventListener('pointerup',end); window.addEventListener('pointercancel',end);
+})();
+if(window.ResizeObserver){ try{ new ResizeObserver(syncBottomPad).observe($('#playerBar')); }catch{} }
+window.addEventListener('resize',()=>{ applyVideoH(); syncBottomPad(); });
 
 async function boot(){
   const data=await api('bootstrap');
@@ -595,6 +638,7 @@ function setView(v){
   if(v==='studio') renderStudio();
   if(v==='admin') renderAdmin();
   if(v==='settings') renderSettings();
+  syncBottomPad();   // the player bar shows/hides with the view → re-measure the content clearance
 }
 $('#nav').addEventListener('click',e=>{ const b=e.target.closest('button'); if(b&&b.dataset.view) setView(b.dataset.view); });
 
