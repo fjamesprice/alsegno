@@ -142,6 +142,8 @@
   .cmt .gen{flex:none;color:var(--faint);font-size:12px;padding:2px 4px}
   .cmt .cbody{flex:1;min-width:0;word-wrap:break-word}
   .cmt .cwho{font-weight:600;margin-right:6px}  /* color set inline per-author (userColor) */
+  .cmt.deleted{opacity:.5} .cmt.deleted .cbody{font-style:italic}
+  .setrow{margin:4px 0 14px} .setrow .toggle{font-size:14px;font-weight:500}
   .cmt .crev{font-size:11px;color:var(--faint)}
   .cmt .cact{display:flex;gap:6px;flex:none;opacity:.0;transition:.1s}
   .cmt:hover .cact{opacity:1}
@@ -321,8 +323,10 @@
   <div id="settingsView" class="hidden">
     <div class="card">
       <h2>Settings</h2>
-      <label class="toggle" style="font-size:14px"><input type="checkbox" id="setNullVis"> Show the null-test button in the player</label>
-      <p class="faint small" style="margin:8px 0 0">More settings (lossless downloads, deleted-note recovery, video projects) arrive in a later update.</p>
+      <div class="setrow"><label class="toggle"><input type="checkbox" id="set_null_test_visible"> <b>Null-test button</b></label><div class="faint small">Show the null-test (A − B) button in the player.</div></div>
+      <div class="setrow"><label class="toggle"><input type="checkbox" id="set_keep_lossless"> <b>Keep lossless originals</b></label><div class="faint small">Keep each uploaded file for lossless download. Playback still uses a 320k MP3 preview. Off = the original is discarded after conversion (saves space). Applies to new uploads.</div></div>
+      <div class="setrow"><label class="toggle"><input type="checkbox" id="set_show_deleted_notes"> <b>Show deleted notes</b></label><div class="faint small">Admins see soft-deleted notes (greyed, with who &amp; when) so deletions can be reviewed.</div></div>
+      <div class="setrow"><label class="toggle"><input type="checkbox" id="set_video_enabled"> <b>Video projects</b></label><div class="faint small">Enable video projects — coming in a later update; has no effect yet.</div></div>
     </div>
   </div>
 </div>
@@ -395,6 +399,7 @@ let ME=null, TRACKS=[], ALBUM='Album', VIEW='projects';
 let PROJECTS=[];                                // project summaries for the landing list
 let PROJECT=null;                              // the currently-open project ({id,type,title,...}) or null
 let NULL_VIS=true;                             // instance setting: null-test button visible in player
+let KEEP_LOSSLESS=false;                        // instance setting: uploads keep the lossless original
 let curTrackId=null, curRevId=null;           // what's loaded in the player
 const peaksCache={};                           // revId -> {duration,peaks}
 let comments=[];                               // comments for the open track
@@ -441,7 +446,7 @@ function applyNullVis(){ $('#nullBox').classList.toggle('hidden', !NULL_VIS); }
 
 async function boot(){
   const data=await api('bootstrap');
-  ME=data.user; PROJECTS=data.projects||[]; NULL_VIS=data.null_test_visible!==false;
+  ME=data.user; PROJECTS=data.projects||[]; NULL_VIS=data.null_test_visible!==false; KEEP_LOSSLESS=data.keep_lossless===true;
   $('#loginView').classList.add('hidden'); $('#mainView').classList.remove('hidden');
   $('#who').textContent=displayName(ME);
   $('#newProjectBtn').classList.toggle('hidden', ME.role!=='admin');
@@ -458,7 +463,7 @@ async function boot(){
 // ───────── projects list ─────────
 async function loadProjects(){
   const data=await api('bootstrap');
-  ME=data.user; PROJECTS=data.projects||[]; NULL_VIS=data.null_test_visible!==false;
+  ME=data.user; PROJECTS=data.projects||[]; NULL_VIS=data.null_test_visible!==false; KEEP_LOSSLESS=data.keep_lossless===true;
   applyNullVis(); renderProjects();
 }
 function renderProjects(){
@@ -894,7 +899,7 @@ window.addEventListener('resize',()=>{ if(curRevId){ layoutCanvas(); drawBars();
 function drawPins(){
   const wrap=$('#pins'); wrap.innerHTML='';
   const dur=(nullOn?nullDur():(audio.duration||peaksCache[curRevId]?.duration))||1;
-  comments.filter(c=>c.ts!=null && c.parent_id==null && c.revision_id===curRevId).forEach(c=>{
+  comments.filter(c=>c.ts!=null && c.parent_id==null && c.revision_id===curRevId && !c.deleted_at).forEach(c=>{
     const el=document.createElement('div'); el.className='pin'; el.textContent='▾';
     el.style.left=Math.max(0,Math.min(1,c.ts/dur))*100+'%';
     el.title=`${c.author} @ ${fmt(c.ts)}: ${c.body}`;
@@ -1014,6 +1019,13 @@ function renderComments(){
   // are plain authored text that reuse the same inline-edit machinery (keyed on editingId).
   const buildRow=(c,isReply)=>{
     const div=document.createElement('div');
+    // Soft-deleted notes (only ever sent to an admin with "show deleted notes" on) render greyed,
+    // with who/when and no actions — recoverable-by-review, not interactive.
+    if(c.deleted_at){
+      div.className='cmt deleted'+(isReply?' reply':'');
+      div.innerHTML=`<div class="cbody"><span class="cwho" style="color:${userColor(c.author)}">${esc(c.author)}</span>${esc(c.body)}<span class="cedit">(deleted ${esc(fmtDate(c.deleted_at))})</span></div>`;
+      return div;
+    }
     const canEdit = c.author===ME.username || ME.role==='admin';
 
     if(c.id===editingId){
@@ -1084,8 +1096,9 @@ function renderComments(){
                     : ('Delete this note?\n\n"'+c.body+'"\n— '+c.author);
       if(!confirm(msg))return;
       try{ await api('comments/'+c.id,{method:'DELETE'}); }catch(e){ toast(e.message,true); return; }
-      // Server cascade-deletes a note's replies; mirror that locally (drop the row and its children).
-      comments=comments.filter(x=>x.id!==c.id && x.parent_id!==c.id);
+      // Soft-delete server-side; re-fetch so the list reflects the setting (an admin with
+      // "show deleted notes" on keeps the note, greyed; everyone else sees it vanish).
+      comments=await api('tracks/'+panelTrackId+'/comments');
       renderComments(); drawPins(); refreshCounts();
     });
     return div;
@@ -1127,7 +1140,7 @@ function renderComments(){
 }
 async function refreshCounts(){ // light refresh of badges
   const t=trackById(panelTrackId); if(!t)return;
-  const notes=comments.filter(c=>c.parent_id==null); // badges count top-level notes only, not replies
+  const notes=comments.filter(c=>c.parent_id==null && !c.deleted_at); // badges: live top-level notes only
   t.comment_count=notes.length; t.open_comment_count=notes.filter(c=>!c.resolved).length; render();
 }
 $('#cSend').addEventListener('click',sendComment);
@@ -1219,7 +1232,10 @@ function buildStudioBody(el,t){
 
   // uploader — above the revisions list so "Upload new revision" is the first thing you reach (1.4)
   const up=document.createElement('div'); up.className='uploader';
-  up.innerHTML=`<div class="field"><label>Upload new revision (WAV → converted to 320k MP3 preview; original is discarded)</label>
+  const upLabel = KEEP_LOSSLESS
+    ? 'Upload new revision (original kept for lossless download; a 320k MP3 preview is generated for playback)'
+    : 'Upload new revision (WAV → converted to 320k MP3 preview; original is discarded)';
+  up.innerHTML=`<div class="field"><label>${upLabel}</label>
       <input type="file" class="ufile" accept="audio/*,.wav,.aif,.aiff,.flac,.mp3"></div>
     <div class="field"><label>Change notes (optional)</label><textarea class="unotes" rows="2" placeholder="What changed in this revision?"></textarea></div>
     <div class="row"><button class="btn primary uup">Upload revision</button><span class="ustat faint small"></span></div>`;
@@ -1239,16 +1255,16 @@ function buildStudioBody(el,t){
     const lTxt = (r.lufs_i!=null||r.true_peak!=null)
       ? `<div class="sl">${r.lufs_i!=null?r.lufs_i.toFixed(1):'—'} LUFS integrated · LRA ${r.lufs_lra!=null?r.lufs_lra.toFixed(1):'—'} LU · true peak ${r.true_peak!=null?r.true_peak.toFixed(1):'—'} dBFS</div>` : '';
     d.innerHTML=`<div class="sr-h"><span class="rn">v${r.rev_number}</span>
-      <span class="faint small">${fmt(r.duration)} · ${(r.size/1048576).toFixed(1)} MB · ${esc(r.uploaded_by||'')} · ${r.created_at} UTC</span>
+      <span class="faint small">${fmt(r.duration)} · ${(r.size/1048576).toFixed(1)} MB · ${esc(r.uploaded_by||'')} · ${r.created_at} UTC${r.has_lossless?' · lossless ✓':''}</span>
       <button class="btn ghost sm rdel danger" style="margin-left:auto">delete</button></div>
       ${lTxt}
       <div class="field"><label>Change notes (what you did in this revision)</label>
       <textarea class="rnotes" rows="2" placeholder="e.g. brightened vocals, tightened low end, new master chain">${esc(r.notes)}</textarea></div>
       <div class="row" style="margin-top:7px"><button class="btn sm nsave">Save notes</button>
       <button class="btn sm rrepl">↻ Replace audio</button>
-      <a class="btn sm" href="api/audio/${r.stored_name}?dl=1">⬇ Download</a></div>
+      <a class="btn sm" href="api/audio/${r.stored_name}?dl=1">⬇ Download${r.has_lossless?' (original)':''}</a></div>
       <div class="uploader rrepl-box hidden" style="margin-top:9px">
-        <div class="field"><label>Replace this revision's audio — keeps v${r.rev_number}, its notes &amp; comments (WAV → 320k MP3 preview; original is discarded)</label>
+        <div class="field"><label>Replace this revision's audio — keeps v${r.rev_number}, its notes &amp; comments (${KEEP_LOSSLESS?'original kept for download; 320k MP3 preview generated':'WAV → 320k MP3 preview; original is discarded'})</label>
           <input type="file" class="rfile" accept="audio/*,.wav,.aif,.aiff,.flac,.mp3"></div>
         <div class="row"><button class="btn primary sm rupload">Upload replacement</button>
           <button class="btn sm ghost rcancel">Cancel</button>
@@ -1296,14 +1312,22 @@ function buildStudioBody(el,t){
 }
 
 // ───────── SETTINGS (admin) ─────────
+const SETTING_TOGGLES=['null_test_visible','keep_lossless','show_deleted_notes','video_enabled'];
 async function renderSettings(){
-  try{ const s=await api('settings'); $('#setNullVis').checked = s.null_test_visible!=='0'; }
+  try{ const s=await api('settings'); SETTING_TOGGLES.forEach(k=>{ const el=$('#set_'+k); if(el) el.checked = s[k]!=='0'; }); }
   catch(e){ toast(e.message,true); }
 }
-$('#setNullVis').addEventListener('change',async e=>{
-  const on=e.target.checked;
-  try{ await api('settings',{method:'PUT',body:{null_test_visible:on}}); NULL_VIS=on; applyNullVis(); toast('Setting saved'); }
-  catch(err){ toast(err.message,true); e.target.checked=!on; }
+SETTING_TOGGLES.forEach(k=>{
+  const el=document.getElementById('set_'+k); if(!el) return;
+  el.addEventListener('change',async e=>{
+    const on=e.target.checked;
+    try{
+      await api('settings',{method:'PUT',body:{[k]:on}});
+      if(k==='null_test_visible'){ NULL_VIS=on; applyNullVis(); }
+      if(k==='keep_lossless'){ KEEP_LOSSLESS=on; if(VIEW==='studio') renderStudio(); }
+      toast('Setting saved');
+    }catch(err){ toast(err.message,true); e.target.checked=!on; }
+  });
 });
 
 // ───────── ADMIN (users + projects) ─────────

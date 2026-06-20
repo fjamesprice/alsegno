@@ -123,9 +123,14 @@ db.prepare('INSERT OR IGNORE INTO users (username, role) VALUES (?, ?)').run(ADM
 db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('album_title', ?)")
   .run('Noah Praise God — Album');
 
-// Phase 3b settings. Only null_test_visible is wired this session (player hides the null UI when
-// '0'); keep_lossless / show_deleted_notes / video_enabled arrive with their behavior in Phase 3d.
+// Instance settings (Phase 3b–3d). null_test_visible: player shows the null-test button.
+// keep_lossless: uploads keep the original file for lossless download. show_deleted_notes: admins
+// can see soft-deleted notes. video_enabled: gate video projects (Phase 6, not built yet). media_root
+// is intentionally NOT a runtime setting — it stays env-driven (UPLOADS_DIR), a Phase-5 install concern.
 db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('null_test_visible', '1')").run();
+db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('keep_lossless', '0')").run();
+db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('show_deleted_notes', '0')").run();
+db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('video_enabled', '0')").run();
 
 // Migration: loudness/peak metering columns on revisions
 {
@@ -138,6 +143,17 @@ db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('null_test_visib
   add('st_series', "TEXT DEFAULT '[]'"); // short-term LUFS time-series
   add('peak_interval', 'REAL DEFAULT 0');  // seconds per peak-meter sample
   add('peak_series', "TEXT DEFAULT '[]'"); // fine-grained sample-peak series (dBFS)
+}
+
+// Migration (Phase 3d): keep-lossless original + soft-deleted comments.
+//   revisions.original_stored_name — on-disk name of the kept lossless source (NULL = none).
+//   comments.deleted_at — soft-delete timestamp (NULL = live). Replaces the hard DELETE so notes
+//                         are recoverable and admins can review them (show_deleted_notes).
+{
+  const rcols = db.prepare('PRAGMA table_info(revisions)').all().map(c => c.name);
+  if (!rcols.includes('original_stored_name')) db.exec('ALTER TABLE revisions ADD COLUMN original_stored_name TEXT');
+  const ccols = db.prepare('PRAGMA table_info(comments)').all().map(c => c.name);
+  if (!ccols.includes('deleted_at')) db.exec('ALTER TABLE comments ADD COLUMN deleted_at TEXT');
 }
 
 // Migration: edited_at + parent_id on comments
@@ -351,7 +367,7 @@ function analyzeLoudness(file) {
 // peaks / integrated loudness). Returns the stored preview + all analysis, or throws. Cleans up
 // its own temp files on failure; the caller owns nothing until this resolves. A decode/no-audio
 // failure throws an Error with `.status = 400` so the route can surface it as a client error.
-async function processAudioUpload(file) {
+async function processAudioUpload(file, keepLossless = false) {
   const inputPath = file.path;
   const ext = path.extname(file.originalname).toLowerCase();
   let storedName, finalPath;
@@ -373,17 +389,30 @@ async function processAudioUpload(file) {
     const [wave, loud] = await Promise.all([
       computeWaveAndPeaks(finalPath), analyzeLoudness(loudnessSrc)
     ]);
-    // Original analyzed — discard it now (this is a review tool; the preview is the kept asset).
-    if (finalPath !== inputPath && fs.existsSync(inputPath)) { try { fs.unlinkSync(inputPath); } catch {} }
+    // The original was analyzed. Keep it for lossless download when keep_lossless is on (only
+    // meaningful for a transcoded upload — an mp3 upload IS its own original, so nothing to keep);
+    // otherwise discard it (the preview is the kept asset). It already lives at uploads/<uuid><ext>.
+    let originalStoredName = null;
+    if (finalPath !== inputPath && fs.existsSync(inputPath)) {
+      if (keepLossless) originalStoredName = file.filename;
+      else { try { fs.unlinkSync(inputPath); } catch {} }
+    }
     const size = fs.statSync(finalPath).size;
     // Strip the real-case extension (ext is lowercased, so basename(name, ext) would miss e.g. ".WAV").
     const origName = path.basename(file.originalname, path.extname(file.originalname)) + '.mp3';
-    return { storedName, finalPath, duration, size, origName, wave, loud };
+    return { storedName, finalPath, duration, size, origName, wave, loud, originalStoredName };
   } catch (e) {
     if (fs.existsSync(inputPath)) { try { fs.unlinkSync(inputPath); } catch {} }
     if (finalPath && finalPath !== inputPath && fs.existsSync(finalPath)) { try { fs.unlinkSync(finalPath); } catch {} }
     throw e;
   }
+}
+
+// Unlink a stored file by name (preview or kept original), tolerant of NULL/missing.
+function unlinkStored(name) {
+  if (!name) return;
+  const p = path.join(UPLOADS_DIR, name);
+  if (fs.existsSync(p)) { try { fs.unlinkSync(p); } catch {} }
 }
 
 // ── Express setup ────────────────────────────────────────────
@@ -504,12 +533,12 @@ app.get('/api/me', (req, res) => {
 function projectTracks(username, projectId) {
   const tracks = db.prepare('SELECT * FROM tracks WHERE project_id = ? ORDER BY sort_order, id').all(projectId);
   const revStmt = db.prepare(`SELECT id, rev_number, stored_name, original_name, duration, notes, uploaded_by, size, created_at,
-                                     lufs_i, lufs_lra, true_peak
+                                     lufs_i, lufs_lra, true_peak, (original_stored_name IS NOT NULL) AS has_lossless
                               FROM revisions WHERE track_id = ? ORDER BY rev_number`);
   const seenStmt = db.prepare('SELECT last_seen_rev FROM seen WHERE username = ? AND track_id = ?');
   // Badges count top-level notes only — replies (parent_id NOT NULL) don't inflate the count.
-  const cCount = db.prepare('SELECT COUNT(*) v FROM comments WHERE track_id = ? AND parent_id IS NULL');
-  const cOpen = db.prepare('SELECT COUNT(*) v FROM comments WHERE track_id = ? AND resolved = 0 AND parent_id IS NULL');
+  const cCount = db.prepare('SELECT COUNT(*) v FROM comments WHERE track_id = ? AND parent_id IS NULL AND deleted_at IS NULL');
+  const cOpen = db.prepare('SELECT COUNT(*) v FROM comments WHERE track_id = ? AND resolved = 0 AND parent_id IS NULL AND deleted_at IS NULL');
   for (const t of tracks) {
     t.revisions = revStmt.all(t.id);
     const latest = t.revisions[t.revisions.length - 1];
@@ -535,7 +564,7 @@ function projectSummaries(user) {
   const projects = visibleProjects(user);
   const tCount = db.prepare('SELECT COUNT(*) v FROM tracks WHERE project_id = ?');
   const openC = db.prepare(`SELECT COUNT(*) v FROM comments c JOIN tracks t ON c.track_id = t.id
-                            WHERE t.project_id = ? AND c.parent_id IS NULL AND c.resolved = 0`);
+                            WHERE t.project_id = ? AND c.parent_id IS NULL AND c.resolved = 0 AND c.deleted_at IS NULL`);
   const avgDone = db.prepare('SELECT COALESCE(AVG(doneness), 0) v FROM tracks WHERE project_id = ?');
   // unseen: tracks in the project whose latest revision this user hasn't marked seen.
   const unseen = db.prepare(`
@@ -562,7 +591,9 @@ app.get('/api/bootstrap', requireAuth, (req, res) => {
   const last = db.prepare('SELECT last_project_id FROM users WHERE username = ?').get(user.username)?.last_project_id ?? null;
   // Only echo the hint if it's still in the accessible set — never auto-open a revoked/deleted project.
   const last_project_id = (last != null && projects.some(p => p.id === last)) ? last : null;
-  res.json({ user, projects, last_project_id, null_test_visible: settingOn('null_test_visible') });
+  res.json({ user, projects, last_project_id,
+    null_test_visible: settingOn('null_test_visible'),
+    keep_lossless: settingOn('keep_lossless', false) });
 });
 
 // Full payload for one project. requireProjectAccess proves membership/admin BEFORE we record it
@@ -614,14 +645,14 @@ app.put('/api/projects/:id', requireAdmin, (req, res) => {
 app.delete('/api/projects/:id', requireAdmin, (req, res) => {
   const pid = Number(req.params.id);
   if (!projectExists(pid)) return res.status(404).json({ error: 'Not found' });
-  const revs = db.prepare('SELECT r.stored_name FROM revisions r JOIN tracks t ON r.track_id = t.id WHERE t.project_id = ?').all(pid);
+  const revs = db.prepare('SELECT r.stored_name, r.original_stored_name FROM revisions r JOIN tracks t ON r.track_id = t.id WHERE t.project_id = ?').all(pid);
   db.transaction(() => {
     db.prepare('DELETE FROM seen WHERE track_id IN (SELECT id FROM tracks WHERE project_id = ?)').run(pid);
     db.prepare('DELETE FROM tracks WHERE project_id = ?').run(pid);   // cascades revisions + comments
     db.prepare('UPDATE users SET last_project_id = NULL WHERE last_project_id = ?').run(pid);
     db.prepare('DELETE FROM projects WHERE id = ?').run(pid);          // cascades project_users
   })();
-  for (const r of revs) { const fp = path.join(UPLOADS_DIR, r.stored_name); if (fs.existsSync(fp)) { try { fs.unlinkSync(fp); } catch {} } }
+  for (const r of revs) { unlinkStored(r.stored_name); unlinkStored(r.original_stored_name); }
   res.json({ ok: true });
 });
 
@@ -672,9 +703,9 @@ app.put('/api/tracks/:id', requireProjectEngineer(pTrack), (req, res) => {
 });
 
 app.delete('/api/tracks/:id', requireProjectEngineer(pTrack), (req, res) => {
-  const revs = db.prepare('SELECT stored_name FROM revisions WHERE track_id = ?').all(req.params.id);
+  const revs = db.prepare('SELECT stored_name, original_stored_name FROM revisions WHERE track_id = ?').all(req.params.id);
   db.prepare('DELETE FROM tracks WHERE id = ?').run(req.params.id); // cascades revisions/comments
-  for (const r of revs) { const p = path.join(UPLOADS_DIR, r.stored_name); if (fs.existsSync(p)) fs.unlinkSync(p); }
+  for (const r of revs) { unlinkStored(r.stored_name); unlinkStored(r.original_stored_name); }
   res.json({ ok: true });
 });
 
@@ -725,7 +756,7 @@ app.post('/api/tracks/:id/revisions', requireProjectEngineer(pTrack), upload.sin
 
   let a;
   try {
-    a = await processAudioUpload(req.file);
+    a = await processAudioUpload(req.file, settingOn('keep_lossless', false));
   } catch (e) {
     console.error('[upload] analysis failed:', e.message);
     return res.status(e.status || 500).json({ error: e.status ? e.message : 'Processing failed: ' + e.message });
@@ -733,18 +764,18 @@ app.post('/api/tracks/:id/revisions', requireProjectEngineer(pTrack), upload.sin
   try {
     const nextRev = (db.prepare('SELECT COALESCE(MAX(rev_number), 0) v FROM revisions WHERE track_id = ?').get(track.id).v) + 1;
     const r = db.prepare(`INSERT INTO revisions
-      (track_id, rev_number, stored_name, original_name, mime_type, size, duration, peaks, notes, uploaded_by,
+      (track_id, rev_number, stored_name, original_name, original_stored_name, mime_type, size, duration, peaks, notes, uploaded_by,
        lufs_i, lufs_lra, true_peak, st_interval, st_series, peak_interval, peak_series)
-      VALUES (?, ?, ?, ?, 'audio/mpeg', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(track.id, nextRev, a.storedName, a.origName, a.size, a.duration, JSON.stringify(a.wave.peaks),
+      VALUES (?, ?, ?, ?, ?, 'audio/mpeg', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(track.id, nextRev, a.storedName, a.origName, a.originalStoredName, a.size, a.duration, JSON.stringify(a.wave.peaks),
            String(req.body.notes || ''), req.session.user.username,
            a.loud.i, a.loud.lra, a.loud.tp, a.loud.st_interval, JSON.stringify(a.loud.st),
            a.wave.peakInterval, JSON.stringify(a.wave.peakSeries));
     db.prepare("UPDATE tracks SET updated_at = datetime('now') WHERE id = ?").run(track.id);
     res.json({ id: r.lastInsertRowid, rev_number: nextRev, duration: a.duration, stored_name: a.storedName });
   } catch (e) {
-    // DB write failed after the preview was stored — remove the now-orphaned file, leave no row behind.
-    if (a.finalPath && fs.existsSync(a.finalPath)) { try { fs.unlinkSync(a.finalPath); } catch {} }
+    // DB write failed after files were stored — remove the now-orphaned preview + kept original.
+    unlinkStored(a.storedName); unlinkStored(a.originalStoredName);
     console.error('[upload] db insert failed:', e.message);
     res.status(500).json({ error: 'Processing failed: ' + e.message });
   }
@@ -759,7 +790,7 @@ app.post('/api/revisions/:id/replace', requireProjectEngineer(pRev), upload.sing
 
   let a;
   try {
-    a = await processAudioUpload(req.file);
+    a = await processAudioUpload(req.file, settingOn('keep_lossless', false));
   } catch (e) {
     console.error('[replace] analysis failed:', e.message);
     return res.status(e.status || 500).json({ error: e.status ? e.message : 'Processing failed: ' + e.message });
@@ -767,10 +798,10 @@ app.post('/api/revisions/:id/replace', requireProjectEngineer(pRev), upload.sing
   try {
     // New stored_name UUID so the browser can't Range-serve the old bytes under the same URL.
     const tx = db.transaction(() => {
-      db.prepare(`UPDATE revisions SET stored_name = ?, original_name = ?, mime_type = 'audio/mpeg',
+      db.prepare(`UPDATE revisions SET stored_name = ?, original_name = ?, original_stored_name = ?, mime_type = 'audio/mpeg',
                     size = ?, duration = ?, peaks = ?, lufs_i = ?, lufs_lra = ?, true_peak = ?,
                     st_interval = ?, st_series = ?, peak_interval = ?, peak_series = ? WHERE id = ?`)
-        .run(a.storedName, a.origName, a.size, a.duration, JSON.stringify(a.wave.peaks),
+        .run(a.storedName, a.origName, a.originalStoredName, a.size, a.duration, JSON.stringify(a.wave.peaks),
              a.loud.i, a.loud.lra, a.loud.tp, a.loud.st_interval, JSON.stringify(a.loud.st),
              a.wave.peakInterval, JSON.stringify(a.wave.peakSeries), rev.id);
       // A shorter replacement can leave pins past the end — clamp them onto the new waveform.
@@ -779,16 +810,15 @@ app.post('/api/revisions/:id/replace', requireProjectEngineer(pRev), upload.sing
     });
     tx();
   } catch (e) {
-    // DB update failed — the freshly-stored preview is orphaned; remove it, leave the row intact.
-    if (a.finalPath && fs.existsSync(a.finalPath)) { try { fs.unlinkSync(a.finalPath); } catch {} }
+    // DB update failed — the freshly-stored files are orphaned; remove them, leave the row intact.
+    unlinkStored(a.storedName); unlinkStored(a.originalStoredName);
     console.error('[replace] db update failed:', e.message);
     return res.status(500).json({ error: 'Processing failed: ' + e.message });
   }
-  // Committed — the old preview is no longer referenced; unlink it (new UUID ⇒ never the same file).
-  if (rev.stored_name && rev.stored_name !== a.storedName) {
-    const p = path.join(UPLOADS_DIR, rev.stored_name);
-    if (fs.existsSync(p)) { try { fs.unlinkSync(p); } catch {} }
-  }
+  // Committed — the old preview + old kept original are no longer referenced (new UUIDs ⇒ never the
+  // same files); unlink both.
+  if (rev.stored_name !== a.storedName) unlinkStored(rev.stored_name);
+  if (rev.original_stored_name && rev.original_stored_name !== a.originalStoredName) unlinkStored(rev.original_stored_name);
   res.json({ id: rev.id, rev_number: rev.rev_number, duration: a.duration, stored_name: a.storedName });
 });
 
@@ -809,8 +839,7 @@ app.delete('/api/revisions/:id', requireProjectEngineer(pRev), (req, res) => {
     db.prepare('DELETE FROM revisions WHERE id = ?').run(req.params.id);
   });
   tx();
-  const p = path.join(UPLOADS_DIR, rev.stored_name);
-  if (fs.existsSync(p)) fs.unlinkSync(p);
+  unlinkStored(rev.stored_name); unlinkStored(rev.original_stored_name);
   res.json({ ok: true });
 });
 
@@ -832,16 +861,29 @@ app.get('/api/audio/:name', requireProjectAccess(pAudio), (req, res) => {
   if (!rev) return res.status(404).json({ error: 'Not found' });
   const p = path.join(UPLOADS_DIR, rev.stored_name);
   if (!fs.existsSync(p)) return res.status(404).json({ error: 'File missing' });
-  if (req.query.dl) return res.download(p, rev.original_name);
+  if (req.query.dl) {
+    // Serve the kept lossless original when present (keep_lossless), else the MP3 preview. The
+    // download name reuses the upload's base with the original's real extension (e.g. "Mix.wav").
+    const op = rev.original_stored_name && path.join(UPLOADS_DIR, rev.original_stored_name);
+    if (op && fs.existsSync(op)) {
+      const dn = path.basename(rev.original_name, path.extname(rev.original_name)) + path.extname(rev.original_stored_name);
+      return res.download(op, dn);
+    }
+    return res.download(p, rev.original_name);
+  }
   res.type('audio/mpeg');
   res.sendFile(p); // `send` adds Accept-Ranges + handles Range requests for seeking
 });
 
 // ── Comments ─────────────────────────────────────────────────
 app.get('/api/tracks/:id/comments', requireProjectAccess(pTrack), (req, res) => {
+  // Soft-deleted notes are hidden from everyone — except an admin when show_deleted_notes is on,
+  // who sees them (greyed, with who/when) so deletions are reviewable/recoverable. The fragment is
+  // a fixed literal, not user input.
+  const seeDeleted = settingOn('show_deleted_notes', false) && req.session.user.role === 'admin';
   res.json(db.prepare(`SELECT c.*, r.rev_number FROM comments c
                        LEFT JOIN revisions r ON c.revision_id = r.id
-                       WHERE c.track_id = ? ORDER BY c.created_at`).all(req.params.id));
+                       WHERE c.track_id = ? ${seeDeleted ? '' : 'AND c.deleted_at IS NULL'} ORDER BY c.created_at`).all(req.params.id));
 });
 
 app.post('/api/tracks/:id/comments', requireProjectAccess(pTrack), (req, res) => {
@@ -852,8 +894,8 @@ app.post('/api/tracks/:id/comments', requireProjectAccess(pTrack), (req, res) =>
   const parentId = req.body.parent_id ? Number(req.body.parent_id) : null;
   if (parentId != null) {
     // Reply: parent must exist, live on this track, and itself be a top-level note (one level deep).
-    const parent = db.prepare('SELECT track_id, parent_id FROM comments WHERE id = ?').get(parentId);
-    if (!parent) return res.status(400).json({ error: 'Parent note not found' });
+    const parent = db.prepare('SELECT track_id, parent_id, deleted_at FROM comments WHERE id = ?').get(parentId);
+    if (!parent || parent.deleted_at != null) return res.status(400).json({ error: 'Parent note not found' });
     if (parent.track_id !== Number(req.params.id)) return res.status(400).json({ error: 'Parent note is on a different track' });
     if (parent.parent_id != null) return res.status(400).json({ error: 'Cannot reply to a reply' });
     ts = null; revisionId = null; // replies are never pinned and never carry a revision
@@ -873,6 +915,7 @@ app.post('/api/tracks/:id/comments', requireProjectAccess(pTrack), (req, res) =>
 app.put('/api/comments/:id', requireProjectAccess(pComment), (req, res) => {
   const c = db.prepare('SELECT * FROM comments WHERE id = ?').get(req.params.id);
   if (!c) return res.status(404).json({ error: 'Not found' });
+  if (c.deleted_at != null) return res.status(400).json({ error: 'Note was deleted' });
   if (req.body.resolved !== undefined) {
     if (c.parent_id != null) return res.status(400).json({ error: 'Replies cannot be resolved' });
     db.prepare('UPDATE comments SET resolved = ? WHERE id = ?').run(req.body.resolved ? 1 : 0, req.params.id);
@@ -897,11 +940,12 @@ app.delete('/api/comments/:id', requireProjectAccess(pComment), (req, res) => {
   if (c.author !== req.session.user.username && req.session.user.role !== 'admin') {
     return res.status(403).json({ error: 'Not your comment' });
   }
-  // Deleting a note removes its replies too — done explicitly (no FK cascade) and atomically.
-  // For a reply, the children DELETE is a harmless no-op.
+  // Soft-delete (Phase 3d): stamp deleted_at instead of removing the row, so notes are recoverable
+  // and admins can review them (show_deleted_notes). A note's replies are soft-deleted with it; for
+  // a reply the children UPDATE is a harmless no-op. Already-deleted rows are left as-is (idempotent).
   const tx = db.transaction(() => {
-    db.prepare('DELETE FROM comments WHERE parent_id = ?').run(req.params.id);
-    db.prepare('DELETE FROM comments WHERE id = ?').run(req.params.id);
+    db.prepare("UPDATE comments SET deleted_at = datetime('now') WHERE parent_id = ? AND deleted_at IS NULL").run(req.params.id);
+    db.prepare("UPDATE comments SET deleted_at = datetime('now') WHERE id = ? AND deleted_at IS NULL").run(req.params.id);
   });
   tx();
   res.json({ ok: true });
@@ -959,7 +1003,7 @@ app.put('/api/users/:u', requireAdmin, (req, res) => {
 // ── Settings (admin) ─────────────────────────────────────────
 // Only null_test_visible is honored this session (player hides null UI when '0'); the rest land
 // with their wiring in Phase 3d. Keep the allowlist tight so PUT can't write arbitrary keys.
-const SETTING_KEYS = new Set(['null_test_visible']);
+const SETTING_KEYS = new Set(['null_test_visible', 'keep_lossless', 'show_deleted_notes', 'video_enabled']);
 app.get('/api/settings', requireAdmin, (req, res) => {
   const out = {};
   for (const k of SETTING_KEYS) out[k] = settingOn(k) ? '1' : '0';
