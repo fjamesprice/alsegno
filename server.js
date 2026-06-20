@@ -192,6 +192,22 @@ db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('video_enabled',
   if (!ucols.includes('last_project_id')) db.exec('ALTER TABLE users ADD COLUMN last_project_id INTEGER');
 }
 
+// Migration (Phase 6): video revisions. For a video revision, `stored_name` holds the HQ
+// H.264/AAC mp4 preview (the streamed asset — the draft schema's separate `video_stored_name`
+// is folded into the existing `stored_name`, so the audio serve/download/cleanup paths work
+// unchanged), `video_proxy_name` holds the 480p instant-scrub proxy, and fps/width/height
+// describe the source. `media_kind` distinguishes 'audio' (default — every existing row) from
+// 'video'. The audio loudness/peak columns are still populated from the video's audio track.
+{
+  const cols = db.prepare('PRAGMA table_info(revisions)').all().map(c => c.name);
+  const add = (name, decl) => { if (!cols.includes(name)) db.exec(`ALTER TABLE revisions ADD COLUMN ${name} ${decl}`); };
+  add('media_kind', "TEXT NOT NULL DEFAULT 'audio'"); // 'audio' | 'video'
+  add('video_proxy_name', 'TEXT');                    // low-q proxy for instant scrub (Phase 6c)
+  add('fps', 'REAL');
+  add('width', 'INTEGER');
+  add('height', 'INTEGER');
+}
+
 // Indexes for the project-scoped lookups added in Phase 3b (membership-by-user, tracks-by-project).
 // Created after the ALTER above so tracks.project_id exists; idempotent.
 db.exec(`
@@ -281,9 +297,20 @@ async function computeWaveAndPeaks(file, buckets = 1000, peakIntervalSec = 0.05)
   const RATE = 44100, CH = 2;
   const fallback = { peaks: [], peakSeries: [], peakInterval: peakIntervalSec };
   let pcm;
+  // Decode to a temp file rather than a stdout pipe: piping hits execFile's maxBuffer ceiling
+  // (~512 MB ⇒ ~25 min of 44.1k stereo), past which run() rejects and the waveform is silently
+  // lost — a real risk for longer video. A temp file lifts that to the Buffer max (~95 min+), then
+  // still degrades gracefully. Full rate/stereo is kept so sample-peak metering stays accurate.
+  const pcmFile = path.join(UPLOADS_DIR, '.wavtmp-' + crypto.randomUUID() + '.f32');
   try {
-    pcm = await run('ffmpeg', ['-v', 'error', '-i', file, '-ac', String(CH), '-ar', String(RATE), '-f', 'f32le', '-']);
-  } catch { return fallback; }
+    await run('ffmpeg', ['-v', 'error', '-i', file, '-ac', String(CH), '-ar', String(RATE), '-f', 'f32le', pcmFile]);
+    pcm = fs.readFileSync(pcmFile);
+  } catch (e) {
+    console.warn('[wave] decode failed (waveform will be empty):', e.message);
+    try { fs.unlinkSync(pcmFile); } catch {}
+    return fallback;
+  }
+  try { fs.unlinkSync(pcmFile); } catch {}
   const frames = Math.floor(pcm.length / 4 / CH);
   if (frames === 0) return fallback;
   const ab = pcm.buffer.slice(pcm.byteOffset, pcm.byteOffset + frames * CH * 4);
@@ -365,6 +392,81 @@ function analyzeLoudness(file) {
   });
 }
 
+// ── Video helpers (Phase 6) ──────────────────────────────────
+// Probe the first video stream for dimensions + frame rate. Returns null when there is no video
+// stream (⇒ the upload isn't a video), so the caller can reject it as a 400.
+async function ffprobeVideo(file) {
+  try {
+    const out = await run('ffprobe', ['-v', 'error', '-select_streams', 'v:0',
+      '-show_entries', 'stream=width,height,r_frame_rate', '-of', 'json', file]);
+    const s = (JSON.parse(out.toString()).streams || [])[0];
+    if (!s || !s.width || !s.height) return null;
+    let fps = null;
+    if (s.r_frame_rate && s.r_frame_rate.includes('/')) {
+      const [n, d] = s.r_frame_rate.split('/').map(Number);
+      if (d) fps = Math.round((n / d) * 1000) / 1000;
+    }
+    return { width: s.width, height: s.height, fps };
+  } catch { return null; }
+}
+
+// HQ web-playable preview: H.264 high-profile + AAC, faststart (moov atom up front so it streams
+// before fully downloaded), pixel format yuv420p for universal browser decode, width capped at
+// 1920 (height auto-even via -2) to bound file size. Mirrors the audio pipeline's "always make a
+// browser-friendly preview that streams; keep the original only for download" rule.
+async function transcodeToVideoPreview(input, output) {
+  await run('ffmpeg', ['-y', '-i', input, '-vf', "scale='min(1920,iw)':-2",
+    '-c:v', 'libx264', '-preset', 'medium', '-crf', '20', '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', output]);
+}
+
+// Low-quality 480p proxy for instant scrubbing (Phase 6c shows it under the HQ video until HQ is
+// ready). Smaller/faster to seek; faststart so it streams immediately.
+async function transcodeToVideoProxy(input, output) {
+  await run('ffmpeg', ['-y', '-i', input, '-vf', 'scale=-2:480',
+    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '30', '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac', '-b:a', '96k', '-movflags', '+faststart', output]);
+}
+
+// Video upload pipeline — the video analogue of processAudioUpload, sharing the same audio analysis
+// (computeWaveAndPeaks + analyzeLoudness run on the video's audio track; a silent video yields empty
+// series, handled by the meters). Produces the HQ preview (stored_name) + the 480p proxy, probes
+// fps/width/height, and keeps the ORIGINAL video only for download when keep_lossless is on (else
+// discards it — the HQ preview is the kept asset). Returns the same shape as processAudioUpload plus
+// the video fields. Cleans up its own temp/output files on failure; throws .status=400 for non-video.
+async function processVideoUpload(file, keepLossless = false) {
+  const inputPath = file.path;
+  // Fresh UUIDs for the outputs — NEVER derive from the input's name: a video is always transcoded,
+  // and an .mp4 upload would otherwise produce stored_name === the input path, which ffmpeg refuses
+  // to edit in-place. Distinct names also keep the HQ preview, proxy, and kept original separate.
+  const storedName = crypto.randomUUID() + '.mp4';        // HQ preview (streamed)
+  const proxyName = crypto.randomUUID() + '_proxy.mp4';   // 480p instant-scrub proxy
+  const finalPath = path.join(UPLOADS_DIR, storedName);
+  const proxyPath = path.join(UPLOADS_DIR, proxyName);
+  try {
+    const v = await ffprobeVideo(inputPath);
+    if (!v) { const e = new Error('File does not appear to be a video'); e.status = 400; throw e; }
+    await transcodeToVideoPreview(inputPath, finalPath);
+    await transcodeToVideoProxy(inputPath, proxyPath);
+    const duration = await getDuration(finalPath);
+    if (!duration) { const e = new Error('Video has no decodable duration'); e.status = 400; throw e; }
+    // Analyze the original's audio track (best source, present here regardless of keep_lossless).
+    const [wave, loud] = await Promise.all([computeWaveAndPeaks(inputPath), analyzeLoudness(inputPath)]);
+    let originalStoredName = null;
+    if (keepLossless) originalStoredName = file.filename;          // keep original video for download
+    else { try { fs.unlinkSync(inputPath); } catch {} }            // else discard; HQ preview is the asset
+    const size = fs.statSync(finalPath).size;
+    const origName = path.basename(file.originalname, path.extname(file.originalname)) + '.mp4';
+    return { storedName, finalPath, duration, size, origName, wave, loud, originalStoredName,
+             mediaKind: 'video', videoProxyName: proxyName, fps: v.fps, width: v.width, height: v.height };
+  } catch (e) {
+    for (const p of [inputPath, finalPath, proxyPath]) {
+      if (p && fs.existsSync(p)) { try { fs.unlinkSync(p); } catch {} }
+    }
+    throw e;
+  }
+}
+
 // Shared upload→preview pipeline (used by both revision-create and revision-replace).
 // Transcodes anything non-mp3 to a 320k MP3 preview, probes duration, then computes the
 // waveform/peaks on the PREVIEW (so the drawn waveform matches playback) and loudness/true-peak
@@ -405,7 +507,9 @@ async function processAudioUpload(file, keepLossless = false) {
     const size = fs.statSync(finalPath).size;
     // Strip the real-case extension (ext is lowercased, so basename(name, ext) would miss e.g. ".WAV").
     const origName = path.basename(file.originalname, path.extname(file.originalname)) + '.mp3';
-    return { storedName, finalPath, duration, size, origName, wave, loud, originalStoredName };
+    // media_kind/video_* are NULL for audio so create/replace can share one INSERT/UPDATE with video.
+    return { storedName, finalPath, duration, size, origName, wave, loud, originalStoredName,
+             mediaKind: 'audio', videoProxyName: null, fps: null, width: null, height: null };
   } catch (e) {
     if (fs.existsSync(inputPath)) { try { fs.unlinkSync(inputPath); } catch {} }
     if (finalPath && finalPath !== inputPath && fs.existsSync(finalPath)) { try { fs.unlinkSync(finalPath); } catch {} }
@@ -472,7 +576,7 @@ const projectExists      = id => !!db.prepare('SELECT 1 FROM projects WHERE id =
 const projectIdForTrack    = id => db.prepare('SELECT project_id FROM tracks WHERE id = ?').get(id)?.project_id ?? null;
 const projectIdForRevision = id => db.prepare('SELECT t.project_id AS p FROM revisions r JOIN tracks t ON r.track_id = t.id WHERE r.id = ?').get(id)?.p ?? null;
 const projectIdForComment  = id => db.prepare('SELECT t.project_id AS p FROM comments c JOIN tracks t ON c.track_id = t.id WHERE c.id = ?').get(id)?.p ?? null;
-const projectIdForAudio    = name => db.prepare('SELECT t.project_id AS p FROM revisions r JOIN tracks t ON r.track_id = t.id WHERE r.stored_name = ?').get(name)?.p ?? null;
+const projectIdForAudio    = name => db.prepare('SELECT t.project_id AS p FROM revisions r JOIN tracks t ON r.track_id = t.id WHERE r.stored_name = ? OR r.video_proxy_name = ?').get(name, name)?.p ?? null;
 const isMember = (username, projectId) => !!db.prepare('SELECT 1 FROM project_users WHERE project_id = ? AND username = ?').get(projectId, username);
 
 // Resolvers (req → projectId|null). Param ids are the project itself; others look the project up.
@@ -592,7 +696,8 @@ app.get('/api/events', requireAuth, (req, res) => {
 function projectTracks(username, projectId) {
   const tracks = db.prepare('SELECT * FROM tracks WHERE project_id = ? ORDER BY sort_order, id').all(projectId);
   const revStmt = db.prepare(`SELECT id, rev_number, stored_name, original_name, duration, notes, uploaded_by, size, created_at,
-                                     lufs_i, lufs_lra, true_peak, (original_stored_name IS NOT NULL) AS has_lossless
+                                     lufs_i, lufs_lra, true_peak, (original_stored_name IS NOT NULL) AS has_lossless,
+                                     media_kind, video_proxy_name, fps, width, height
                               FROM revisions WHERE track_id = ? ORDER BY rev_number`);
   const seenStmt = db.prepare('SELECT last_seen_rev FROM seen WHERE username = ? AND track_id = ?');
   // Badges count top-level notes only — replies (parent_id NOT NULL) don't inflate the count.
@@ -652,7 +757,8 @@ app.get('/api/bootstrap', requireAuth, (req, res) => {
   const last_project_id = (last != null && projects.some(p => p.id === last)) ? last : null;
   res.json({ user, projects, last_project_id,
     null_test_visible: settingOn('null_test_visible'),
-    keep_lossless: settingOn('keep_lossless', false) });
+    keep_lossless: settingOn('keep_lossless', false),
+    video_enabled: settingOn('video_enabled', false) });
 });
 
 // Full payload for one project. requireProjectAccess proves membership/admin BEFORE we record it
@@ -677,10 +783,12 @@ app.post('/api/projects', requireAdmin, (req, res) => {
   const type = req.body.type === 'song' ? 'song' : 'album';
   const title = String(req.body.title || '').trim();
   if (!title) return res.status(400).json({ error: 'Title required' });
+  // Video projects only when the instance has video enabled; otherwise silently fall back to audio.
+  const mediaType = (req.body.media_type === 'video' && settingOn('video_enabled', false)) ? 'video' : 'audio';
   const members = Array.isArray(req.body.users) ? req.body.users.map(u => String(u).trim().toLowerCase()).filter(Boolean) : [];
   const owner = req.session.user.username;
   const id = db.transaction(() => {
-    const pid = db.prepare("INSERT INTO projects (type, media_type, title, owner) VALUES (?, 'audio', ?, ?)").run(type, title, owner).lastInsertRowid;
+    const pid = db.prepare("INSERT INTO projects (type, media_type, title, owner) VALUES (?, ?, ?, ?)").run(type, mediaType, title, owner).lastInsertRowid;
     const grant = db.prepare('INSERT OR IGNORE INTO project_users (project_id, username) VALUES (?, ?)');
     grant.run(pid, owner); // creator keeps access even if later demoted from admin
     for (const u of members) if (db.prepare('SELECT 1 FROM users WHERE username = ?').get(u)) grant.run(pid, u);
@@ -707,14 +815,14 @@ app.put('/api/projects/:id', requireAdmin, (req, res) => {
 app.delete('/api/projects/:id', requireAdmin, (req, res) => {
   const pid = Number(req.params.id);
   if (!projectExists(pid)) return res.status(404).json({ error: 'Not found' });
-  const revs = db.prepare('SELECT r.stored_name, r.original_stored_name FROM revisions r JOIN tracks t ON r.track_id = t.id WHERE t.project_id = ?').all(pid);
+  const revs = db.prepare('SELECT r.stored_name, r.video_proxy_name, r.original_stored_name FROM revisions r JOIN tracks t ON r.track_id = t.id WHERE t.project_id = ?').all(pid);
   db.transaction(() => {
     db.prepare('DELETE FROM seen WHERE track_id IN (SELECT id FROM tracks WHERE project_id = ?)').run(pid);
     db.prepare('DELETE FROM tracks WHERE project_id = ?').run(pid);   // cascades revisions + comments
     db.prepare('UPDATE users SET last_project_id = NULL WHERE last_project_id = ?').run(pid);
     db.prepare('DELETE FROM projects WHERE id = ?').run(pid);          // cascades project_users
   })();
-  for (const r of revs) { unlinkStored(r.stored_name); unlinkStored(r.original_stored_name); }
+  for (const r of revs) { unlinkStored(r.stored_name); unlinkStored(r.video_proxy_name); unlinkStored(r.original_stored_name); }
   // Membership is gone now, so anyone who had it open re-validates via the projects ping → 404 → list.
   broadcastProjects();
   res.json({ ok: true });
@@ -772,9 +880,9 @@ app.put('/api/tracks/:id', requireProjectEngineer(pTrack), (req, res) => {
 });
 
 app.delete('/api/tracks/:id', requireProjectEngineer(pTrack), (req, res) => {
-  const revs = db.prepare('SELECT stored_name, original_stored_name FROM revisions WHERE track_id = ?').all(req.params.id);
+  const revs = db.prepare('SELECT stored_name, video_proxy_name, original_stored_name FROM revisions WHERE track_id = ?').all(req.params.id);
   db.prepare('DELETE FROM tracks WHERE id = ?').run(req.params.id); // cascades revisions/comments
-  for (const r of revs) { unlinkStored(r.stored_name); unlinkStored(r.original_stored_name); }
+  for (const r of revs) { unlinkStored(r.stored_name); unlinkStored(r.video_proxy_name); unlinkStored(r.original_stored_name); }
   broadcastChange(req.projectId);
   res.json({ ok: true });
 });
@@ -828,7 +936,8 @@ app.post('/api/tracks/:id/revisions', requireProjectEngineer(pTrack), upload.sin
 
   let a;
   try {
-    a = await processAudioUpload(req.file, settingOn('keep_lossless', false));
+    const isVideo = db.prepare('SELECT media_type FROM projects WHERE id = ?').get(req.projectId)?.media_type === 'video';
+    a = await (isVideo ? processVideoUpload : processAudioUpload)(req.file, settingOn('keep_lossless', false));
   } catch (e) {
     console.error('[upload] analysis failed:', e.message);
     return res.status(e.status || 500).json({ error: e.status ? e.message : 'Processing failed: ' + e.message });
@@ -837,18 +946,21 @@ app.post('/api/tracks/:id/revisions', requireProjectEngineer(pTrack), upload.sin
     const nextRev = (db.prepare('SELECT COALESCE(MAX(rev_number), 0) v FROM revisions WHERE track_id = ?').get(track.id).v) + 1;
     const r = db.prepare(`INSERT INTO revisions
       (track_id, rev_number, stored_name, original_name, original_stored_name, mime_type, size, duration, peaks, notes, uploaded_by,
-       lufs_i, lufs_lra, true_peak, st_interval, st_series, peak_interval, peak_series)
-      VALUES (?, ?, ?, ?, ?, 'audio/mpeg', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(track.id, nextRev, a.storedName, a.origName, a.originalStoredName, a.size, a.duration, JSON.stringify(a.wave.peaks),
+       lufs_i, lufs_lra, true_peak, st_interval, st_series, peak_interval, peak_series,
+       media_kind, video_proxy_name, fps, width, height)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(track.id, nextRev, a.storedName, a.origName, a.originalStoredName,
+           a.mediaKind === 'video' ? 'video/mp4' : 'audio/mpeg', a.size, a.duration, JSON.stringify(a.wave.peaks),
            String(req.body.notes || ''), req.session.user.username,
            a.loud.i, a.loud.lra, a.loud.tp, a.loud.st_interval, JSON.stringify(a.loud.st),
-           a.wave.peakInterval, JSON.stringify(a.wave.peakSeries));
+           a.wave.peakInterval, JSON.stringify(a.wave.peakSeries),
+           a.mediaKind, a.videoProxyName, a.fps, a.width, a.height);
     db.prepare("UPDATE tracks SET updated_at = datetime('now') WHERE id = ?").run(track.id);
     broadcastChange(req.projectId); // a new revision: reviewers' "NEW", rev count, latest all change
     res.json({ id: r.lastInsertRowid, rev_number: nextRev, duration: a.duration, stored_name: a.storedName });
   } catch (e) {
-    // DB write failed after files were stored — remove the now-orphaned preview + kept original.
-    unlinkStored(a.storedName); unlinkStored(a.originalStoredName);
+    // DB write failed after files were stored — remove the now-orphaned preview, proxy + kept original.
+    unlinkStored(a.storedName); unlinkStored(a.videoProxyName); unlinkStored(a.originalStoredName);
     console.error('[upload] db insert failed:', e.message);
     res.status(500).json({ error: 'Processing failed: ' + e.message });
   }
@@ -863,7 +975,8 @@ app.post('/api/revisions/:id/replace', requireProjectEngineer(pRev), upload.sing
 
   let a;
   try {
-    a = await processAudioUpload(req.file, settingOn('keep_lossless', false));
+    const isVideo = db.prepare('SELECT media_type FROM projects WHERE id = ?').get(req.projectId)?.media_type === 'video';
+    a = await (isVideo ? processVideoUpload : processAudioUpload)(req.file, settingOn('keep_lossless', false));
   } catch (e) {
     console.error('[replace] analysis failed:', e.message);
     return res.status(e.status || 500).json({ error: e.status ? e.message : 'Processing failed: ' + e.message });
@@ -871,12 +984,15 @@ app.post('/api/revisions/:id/replace', requireProjectEngineer(pRev), upload.sing
   try {
     // New stored_name UUID so the browser can't Range-serve the old bytes under the same URL.
     const tx = db.transaction(() => {
-      db.prepare(`UPDATE revisions SET stored_name = ?, original_name = ?, original_stored_name = ?, mime_type = 'audio/mpeg',
+      db.prepare(`UPDATE revisions SET stored_name = ?, original_name = ?, original_stored_name = ?, mime_type = ?,
                     size = ?, duration = ?, peaks = ?, lufs_i = ?, lufs_lra = ?, true_peak = ?,
-                    st_interval = ?, st_series = ?, peak_interval = ?, peak_series = ? WHERE id = ?`)
-        .run(a.storedName, a.origName, a.originalStoredName, a.size, a.duration, JSON.stringify(a.wave.peaks),
+                    st_interval = ?, st_series = ?, peak_interval = ?, peak_series = ?,
+                    media_kind = ?, video_proxy_name = ?, fps = ?, width = ?, height = ? WHERE id = ?`)
+        .run(a.storedName, a.origName, a.originalStoredName, a.mediaKind === 'video' ? 'video/mp4' : 'audio/mpeg',
+             a.size, a.duration, JSON.stringify(a.wave.peaks),
              a.loud.i, a.loud.lra, a.loud.tp, a.loud.st_interval, JSON.stringify(a.loud.st),
-             a.wave.peakInterval, JSON.stringify(a.wave.peakSeries), rev.id);
+             a.wave.peakInterval, JSON.stringify(a.wave.peakSeries),
+             a.mediaKind, a.videoProxyName, a.fps, a.width, a.height, rev.id);
       // A shorter replacement can leave pins past the end — clamp them onto the new waveform.
       db.prepare('UPDATE comments SET ts = ? WHERE revision_id = ? AND ts > ?').run(a.duration, rev.id, a.duration);
       db.prepare("UPDATE tracks SET updated_at = datetime('now') WHERE id = ?").run(rev.track_id);
@@ -884,13 +1000,14 @@ app.post('/api/revisions/:id/replace', requireProjectEngineer(pRev), upload.sing
     tx();
   } catch (e) {
     // DB update failed — the freshly-stored files are orphaned; remove them, leave the row intact.
-    unlinkStored(a.storedName); unlinkStored(a.originalStoredName);
+    unlinkStored(a.storedName); unlinkStored(a.videoProxyName); unlinkStored(a.originalStoredName);
     console.error('[replace] db update failed:', e.message);
     return res.status(500).json({ error: 'Processing failed: ' + e.message });
   }
-  // Committed — the old preview + old kept original are no longer referenced (new UUIDs ⇒ never the
-  // same files); unlink both.
+  // Committed — the old preview, proxy + kept original are no longer referenced (new UUIDs ⇒ never the
+  // same files); unlink all three.
   if (rev.stored_name !== a.storedName) unlinkStored(rev.stored_name);
+  if (rev.video_proxy_name && rev.video_proxy_name !== a.videoProxyName) unlinkStored(rev.video_proxy_name);
   if (rev.original_stored_name && rev.original_stored_name !== a.originalStoredName) unlinkStored(rev.original_stored_name);
   broadcastChange(req.projectId); // analysis/waveform/stored_name changed — listeners refetch metadata
   res.json({ id: rev.id, rev_number: rev.rev_number, duration: a.duration, stored_name: a.storedName });
@@ -914,7 +1031,7 @@ app.delete('/api/revisions/:id', requireProjectEngineer(pRev), (req, res) => {
     db.prepare('DELETE FROM revisions WHERE id = ?').run(req.params.id);
   });
   tx();
-  unlinkStored(rev.stored_name); unlinkStored(rev.original_stored_name);
+  unlinkStored(rev.stored_name); unlinkStored(rev.video_proxy_name); unlinkStored(rev.original_stored_name);
   broadcastChange(req.projectId);
   res.json({ ok: true });
 });
@@ -931,14 +1048,20 @@ app.get('/api/revisions/:id/peaks', requireProjectAccess(pRev), (req, res) => {
   });
 });
 
-// ── Audio streaming / download ───────────────────────────────
+// ── Media streaming / download ───────────────────────────────
+// Serves audio (mp3) and video (HQ mp4 + 480p proxy) revisions by stored name. :name is the
+// revision's stored_name (HQ preview) OR its video_proxy_name (the proxy is a separate URL so the
+// player can swap qualities); access is checked against whichever owns the project (pAudio matches
+// both). Content type is set by extension so <audio>/<video> + Range seeking work for either kind.
+const MEDIA_TYPES = { '.mp3': 'audio/mpeg', '.mp4': 'video/mp4', '.webm': 'video/webm', '.m4a': 'audio/mp4' };
 app.get('/api/audio/:name', requireProjectAccess(pAudio), (req, res) => {
-  const rev = db.prepare('SELECT * FROM revisions WHERE stored_name = ?').get(req.params.name);
+  const name = req.params.name;
+  const rev = db.prepare('SELECT * FROM revisions WHERE stored_name = ? OR video_proxy_name = ?').get(name, name);
   if (!rev) return res.status(404).json({ error: 'Not found' });
-  const p = path.join(UPLOADS_DIR, rev.stored_name);
+  const p = path.join(UPLOADS_DIR, name);
   if (!fs.existsSync(p)) return res.status(404).json({ error: 'File missing' });
   if (req.query.dl) {
-    // Serve the kept lossless original when present (keep_lossless), else the MP3 preview. The
+    // Download the kept lossless/original when present (keep_lossless), else the served preview. The
     // download name reuses the upload's base with the original's real extension (e.g. "Mix.wav").
     const op = rev.original_stored_name && path.join(UPLOADS_DIR, rev.original_stored_name);
     if (op && fs.existsSync(op)) {
@@ -947,7 +1070,7 @@ app.get('/api/audio/:name', requireProjectAccess(pAudio), (req, res) => {
     }
     return res.download(p, rev.original_name);
   }
-  res.type('audio/mpeg');
+  res.type(MEDIA_TYPES[path.extname(name).toLowerCase()] || 'application/octet-stream');
   res.sendFile(p); // `send` adds Accept-Ranges + handles Range requests for seeking
 });
 

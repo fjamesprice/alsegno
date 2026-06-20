@@ -99,6 +99,11 @@
   #playerBar{position:fixed;left:0;right:0;bottom:0;z-index:30;background:rgba(18,20,28,.97);backdrop-filter:blur(12px);border-top:1px solid var(--line)}
   .pb-inner{max-width:940px;margin:0 auto;padding:10px 16px calc(10px + env(safe-area-inset-bottom))}
   .wave-wrap{position:relative;height:64px;margin-bottom:8px}
+  /* Video stage (Phase 6) — shown only for video projects, above the waveform in the player bar. */
+  .vstage{display:none;justify-content:center;align-items:center;background:#000;border-radius:8px;margin-bottom:8px}
+  .vstage.show{display:flex}
+  .vstage video{max-width:100%;max-height:38vh;border-radius:8px;background:#000;display:block}
+  .vstage video.vhide{display:none}
   #wave{width:100%;height:100%;display:block;border-radius:8px;background:var(--panel);cursor:pointer}
   .pins{position:absolute;inset:0;pointer-events:none}
   .pin{position:absolute;top:-2px;transform:translateX(-50%);pointer-events:auto;cursor:pointer;font-size:11px;color:var(--warn)}
@@ -326,7 +331,7 @@
       <div class="setrow"><label class="toggle"><input type="checkbox" id="set_null_test_visible"> <b>Null-test button</b></label><div class="faint small">Show the null-test (A − B) button in the player.</div></div>
       <div class="setrow"><label class="toggle"><input type="checkbox" id="set_keep_lossless"> <b>Keep lossless originals</b></label><div class="faint small">Keep each uploaded file for lossless download. Playback still uses a 320k MP3 preview. Off = the original is discarded after conversion (saves space). Applies to new uploads.</div></div>
       <div class="setrow"><label class="toggle"><input type="checkbox" id="set_show_deleted_notes"> <b>Show deleted notes</b></label><div class="faint small">Admins see soft-deleted notes (greyed, with who &amp; when) so deletions can be reviewed.</div></div>
-      <div class="setrow"><label class="toggle"><input type="checkbox" id="set_video_enabled"> <b>Video projects</b></label><div class="faint small">Enable video projects — coming in a later update; has no effect yet.</div></div>
+      <div class="setrow"><label class="toggle"><input type="checkbox" id="set_video_enabled"> <b>Video projects</b></label><div class="faint small">Allow creating video projects (video playback with the audio waveform, comments &amp; doneness). When off, all new projects are audio.</div></div>
     </div>
   </div>
 </div>
@@ -336,6 +341,10 @@
   <div class="pb-inner">
     <div id="pbEmpty" class="pb-empty">Select a track to play</div>
     <div id="pbActive" class="hidden">
+      <div class="vstage" id="vstage">
+        <video id="videoA" playsinline preload="auto"></video>
+        <video id="videoB" playsinline preload="auto" class="vhide"></video>
+      </div>
       <div class="wave-wrap">
         <canvas id="wave"></canvas>
         <div class="pins" id="pins"></div>
@@ -400,6 +409,7 @@ let PROJECTS=[];                                // project summaries for the lan
 let PROJECT=null;                              // the currently-open project ({id,type,title,...}) or null
 let NULL_VIS=true;                             // instance setting: null-test button visible in player
 let KEEP_LOSSLESS=false;                        // instance setting: uploads keep the lossless original
+let VIDEO_ENABLED=false;                        // instance setting: video projects may be created (Phase 6)
 let curTrackId=null, curRevId=null;           // what's loaded in the player
 const peaksCache={};                           // revId -> {duration,peaks}
 let comments=[];                               // comments for the open track
@@ -409,7 +419,12 @@ let replyingId=null;                           // id of the note whose reply edi
 let autoAdvance=false;
 // Two audio elements so revision switches can crossfade gaplessly. `audio` always
 // points at the active element; the inactive one preloads the compare revision.
-const players=[document.getElementById('audioA'), document.getElementById('audioB')];
+// Video projects (Phase 6) drive a parallel pair of <video> elements instead — `players` is
+// repointed at the right pair per open project (applyMediaMode); everything downstream reads the
+// active element via `audio`, which is media-agnostic (HTMLVideoElement shares the same API).
+const audioEls=[document.getElementById('audioA'), document.getElementById('audioB')];
+const videoEls=[document.getElementById('videoA'), document.getElementById('videoB')];
+let players=audioEls;
 let act=0, audio=players[0];
 let userVol = (()=>{ const v=parseFloat(localStorage.getItem('at_vol')); return isFinite(v)?v:1; })();
 let crossing=false, xfRaf=null, pendingRev=null;
@@ -442,11 +457,32 @@ const canManage = () => !!ME && (ME.role==='admin' || ME.role==='engineer'); // 
 const displayName = u => (u && (u.display_name||u.username)) || '';
 // Stable per-author color from a username hash (replaces the old hardcoded james/noah rules).
 function userColor(name){ let h=0; const s=String(name||''); for(let i=0;i<s.length;i++) h=(h*31+s.charCodeAt(i))>>>0; return `hsl(${h%360},62%,68%)`; }
-function applyNullVis(){ $('#nullBox').classList.toggle('hidden', !NULL_VIS); }
+// Null test is an audio-only (PCM phase-inversion) feature, so the null button is hidden for video.
+// But the compare <select> lives in the same box and the A/B ⇄ swap still uses it, so for video we
+// keep the box visible and hide ONLY the null button; for audio the whole box follows the setting.
+function applyNullVis(){
+  const vid=isVideoProject();
+  $('#nullBox').classList.toggle('hidden', !vid && !NULL_VIS);
+  $('#nullToggle').classList.toggle('hidden', vid);
+}
+function isVideoProject(){ return !!(PROJECT && PROJECT.media_type==='video'); }
+// Point the transport at the audio or video element pair for the open project, and reflect it in
+// the UI (video stage + null-test visibility). Called when a project is opened.
+function applyMediaMode(){
+  players = isVideoProject() ? videoEls : audioEls;
+  act=0; audio=players[act];
+  applyNullVis(); updateStage();
+}
+// Show the video stage only for a video project with a loaded revision; show just the active <video>.
+function updateStage(){
+  const v=isVideoProject();
+  $('#vstage').classList.toggle('show', v && !!curRevId);
+  videoEls.forEach((el,i)=>el.classList.toggle('vhide', i!==act));
+}
 
 async function boot(){
   const data=await api('bootstrap');
-  ME=data.user; PROJECTS=data.projects||[]; NULL_VIS=data.null_test_visible!==false; KEEP_LOSSLESS=data.keep_lossless===true;
+  ME=data.user; PROJECTS=data.projects||[]; NULL_VIS=data.null_test_visible!==false; KEEP_LOSSLESS=data.keep_lossless===true; VIDEO_ENABLED=data.video_enabled===true;
   $('#loginView').classList.add('hidden'); $('#mainView').classList.remove('hidden');
   $('#who').textContent=displayName(ME);
   $('#newProjectBtn').classList.toggle('hidden', ME.role!=='admin');
@@ -464,7 +500,7 @@ async function boot(){
 // ───────── projects list ─────────
 async function loadProjects(){
   const data=await api('bootstrap');
-  ME=data.user; PROJECTS=data.projects||[]; NULL_VIS=data.null_test_visible!==false; KEEP_LOSSLESS=data.keep_lossless===true;
+  ME=data.user; PROJECTS=data.projects||[]; NULL_VIS=data.null_test_visible!==false; KEEP_LOSSLESS=data.keep_lossless===true; VIDEO_ENABLED=data.video_enabled===true;
   applyNullVis(); renderProjects();
 }
 function renderProjects(){
@@ -476,7 +512,7 @@ function renderProjects(){
     const open=p.open_comment_count?`<span>💬 ${p.open_comment_count} open</span>`:'';
     card.innerHTML=`
       <div class="pt">
-        <div class="pname"><span class="nm">${esc(p.title)}</span>${unseen}<span class="badge type">${esc(p.type)}</span></div>
+        <div class="pname"><span class="nm">${esc(p.title)}</span>${unseen}<span class="badge type">${esc(p.type)}</span>${p.media_type==='video'?'<span class="badge type">video</span>':''}</div>
         <div class="pmeta"><span>${p.track_count} track${p.track_count===1?'':'s'}</span>${open}</div>
       </div>
       <div class="pprog">
@@ -492,6 +528,7 @@ async function openProject(id){
   const data=await api('projects/'+id);   // throws on 403/404 → caller drops to the list
   if(PROJECT && PROJECT.id!==data.project.id) stopAll();
   PROJECT=data.project; TRACKS=data.tracks; ALBUM=PROJECT.title;
+  applyMediaMode();   // audio vs video transport + stage/null visibility for this project
   setView('player'); render();
 }
 
@@ -648,6 +685,7 @@ async function loadTrack(trackId, revId, {play=false, keepPos=null}={}){
   $('#nowTitle').textContent=t.title;
   updateRevNote(rev);
   peakMaxHold=-Infinity;
+  updateStage();   // reveal the <video> for a video project / hide for audio
   await ensurePeaks(rev.id); drawWave();
   if(!nullOn) updateMeters(startAt||0); else blankMeters();
   // mark seen + open comments + clear NEW
@@ -693,7 +731,7 @@ async function ensurePeaks(revId){
 }
 
 function togglePlay(){ if(nullOn){ toggleNull(); return;} if(audio.paused){ audio.volume=userVol; audio.play().catch(()=>{}); } else audio.pause(); }
-function stopAll(){ players.forEach(p=>{try{p.pause()}catch{}}); stopNull(); curTrackId=null; curRevId=null; $('#pbActive').classList.add('hidden'); $('#pbEmpty').classList.remove('hidden'); $('#cpanel').classList.add('hidden'); render(); }
+function stopAll(){ players.forEach(p=>{try{p.pause()}catch{}}); stopNull(); curTrackId=null; curRevId=null; $('#pbActive').classList.add('hidden'); $('#pbEmpty').classList.remove('hidden'); $('#cpanel').classList.add('hidden'); updateStage(); render(); }
 
 $('#playBtn').addEventListener('click',togglePlay);
 $('#prevBtn').addEventListener('click',()=>step(-1));
@@ -704,8 +742,8 @@ function step(dir){
   const nt=TRACKS[ni]; const latest=nt.revisions[nt.revisions.length-1];
   if(latest) loadTrack(nt.id,latest.id,{play:true});
 }
-// Media events fire on both elements; only the active one drives the UI.
-players.forEach(el=>{
+// Media events fire on every element (audio + video pairs); only the active one drives the UI.
+[...audioEls, ...videoEls].forEach(el=>{
   el.addEventListener('play',()=>{ if(el!==audio)return; $('#playBtn').textContent='⏸'; render(); raf(); });
   el.addEventListener('pause',()=>{ if(el!==audio||crossing)return; $('#playBtn').textContent='▶'; render(); });
   el.addEventListener('timeupdate',()=>{ if(el!==audio)return; if(!nullOn) updateTime(audio.currentTime, audio.duration); });
@@ -719,6 +757,9 @@ $('#swapBtn').addEventListener('click',()=>requestRev(+$('#cmpSel').value));  //
 // <select>s mutated-but-unsynced, eventually wedging swap (a===b) and the dropdown until reload.
 function requestRev(revId){
   if(!revId || revId===curRevId) return;
+  // Video A/B is a hard cut at the matched playhead (the audio crossfade doesn't translate to video):
+  // reload the active <video> at the current position, preserving play state. No gapless fade (6c).
+  if(isVideoProject()){ loadTrack(curTrackId, revId, {play:!audio.paused, keepPos:audio.currentTime}); return; }
   if(crossing){ pendingRev=revId; return; }
   crossfadeTo(revId);
 }
@@ -733,7 +774,7 @@ $('#dlBtn').addEventListener('click',()=>{ const t=trackById(curTrackId); const 
 
 // ── volume ──────────────────────────────────────────────────
 $('#vol').value=Math.round(userVol*100);
-players.forEach((p,i)=>p.volume = i===act?userVol:0);
+[...audioEls, ...videoEls].forEach(p=>p.volume=userVol);
 setLufsTick();
 $('#vol').addEventListener('input',e=>{
   userVol=e.target.value/100; localStorage.setItem('at_vol',userVol);
@@ -743,6 +784,7 @@ $('#vol').addEventListener('input',e=>{
 
 // ── gapless A/B crossfade (keep one element playing while the other catches up) ──
 function preloadInactive(){
+  if(isVideoProject()) return;   // video A/B reloads the active element (no second-element preload)
   const t=trackById(curTrackId); if(!t)return;
   const other=players[1-act];
   let cmp=+$('#cmpSel').value;
@@ -1249,12 +1291,18 @@ function buildStudioBody(el,t){
   el.appendChild(tools);
 
   // uploader — above the revisions list so "Upload new revision" is the first thing you reach (1.4)
+  const isVid=isVideoProject();
+  const upAccept = isVid ? 'video/*,.mp4,.mov,.mkv,.webm,.m4v' : 'audio/*,.wav,.aif,.aiff,.flac,.mp3';
   const up=document.createElement('div'); up.className='uploader';
-  const upLabel = KEEP_LOSSLESS
-    ? 'Upload new revision (original kept for lossless download; a 320k MP3 preview is generated for playback)'
-    : 'Upload new revision (WAV → converted to 320k MP3 preview; original is discarded)';
+  const upLabel = isVid
+    ? (KEEP_LOSSLESS
+        ? 'Upload new revision (original video kept for download; an H.264 MP4 preview + 480p proxy are generated for playback)'
+        : 'Upload new revision (re-encoded to an H.264 MP4 preview + 480p proxy; the original is discarded)')
+    : (KEEP_LOSSLESS
+        ? 'Upload new revision (original kept for lossless download; a 320k MP3 preview is generated for playback)'
+        : 'Upload new revision (WAV → converted to 320k MP3 preview; original is discarded)');
   up.innerHTML=`<div class="field"><label>${upLabel}</label>
-      <input type="file" class="ufile" accept="audio/*,.wav,.aif,.aiff,.flac,.mp3"></div>
+      <input type="file" class="ufile" accept="${upAccept}"></div>
     <div class="field"><label>Change notes (optional)</label><textarea class="unotes" rows="2" placeholder="What changed in this revision?"></textarea></div>
     <div class="row"><button class="btn primary uup">Upload revision</button><span class="ustat faint small"></span></div>`;
   const fileEl=up.querySelector('.ufile'), stat=up.querySelector('.ustat'), btn=up.querySelector('.uup');
@@ -1282,8 +1330,8 @@ function buildStudioBody(el,t){
       <button class="btn sm rrepl">↻ Replace audio</button>
       <a class="btn sm" href="api/audio/${r.stored_name}?dl=1">⬇ Download${r.has_lossless?' (original)':''}</a></div>
       <div class="uploader rrepl-box hidden" style="margin-top:9px">
-        <div class="field"><label>Replace this revision's audio — keeps v${r.rev_number}, its notes &amp; comments (${KEEP_LOSSLESS?'original kept for download; 320k MP3 preview generated':'WAV → 320k MP3 preview; original is discarded'})</label>
-          <input type="file" class="rfile" accept="audio/*,.wav,.aif,.aiff,.flac,.mp3"></div>
+        <div class="field"><label>Replace this revision's ${isVid?'video':'audio'} — keeps v${r.rev_number}, its notes &amp; comments (${isVid?(KEEP_LOSSLESS?'original kept for download; MP4 preview + proxy generated':'re-encoded to MP4 preview + proxy; original discarded'):(KEEP_LOSSLESS?'original kept for download; 320k MP3 preview generated':'WAV → 320k MP3 preview; original is discarded')})</label>
+          <input type="file" class="rfile" accept="${upAccept}"></div>
         <div class="row"><button class="btn primary sm rupload">Upload replacement</button>
           <button class="btn sm ghost rcancel">Cancel</button>
           <span class="rstat faint small"></span></div>
@@ -1343,6 +1391,7 @@ SETTING_TOGGLES.forEach(k=>{
       await api('settings',{method:'PUT',body:{[k]:on}});
       if(k==='null_test_visible'){ NULL_VIS=on; applyNullVis(); }
       if(k==='keep_lossless'){ KEEP_LOSSLESS=on; if(VIEW==='studio') renderStudio(); }
+      if(k==='video_enabled'){ VIDEO_ENABLED=on; }   // gates the media-type prompt in newProjectFlow
       // Re-fetch the open track's notes so toggling deleted-note visibility takes effect live
       // (the server filters per the new setting) instead of waiting for a page reload.
       if(k==='show_deleted_notes' && panelTrackId){
@@ -1444,8 +1493,10 @@ $('#newProjectBtn').addEventListener('click',newProjectFlow);
 async function newProjectFlow(){
   const type = confirm('Create which kind of project?\n\nOK = Album (multiple tracks)\nCancel = Single song')? 'album':'song';
   const title = prompt(type==='album'?'Album title:':'Song title:'); if(title===null||!title.trim())return;
+  // Video is opt-in per instance (video_enabled). When off, projects are always audio.
+  const media_type = VIDEO_ENABLED && confirm('Media type for this project?\n\nOK = Video\nCancel = Audio') ? 'video' : 'audio';
   try{
-    const r=await api('projects',{method:'POST',body:{type,title:title.trim()}});
+    const r=await api('projects',{method:'POST',body:{type,title:title.trim(),media_type}});
     toast(type==='album'?'Album created':'Song created');
     if(VIEW==='admin'){ renderAdmin(); }
     else { await loadProjects(); if(r&&r.id) await openProject(r.id); }
