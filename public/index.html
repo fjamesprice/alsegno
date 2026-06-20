@@ -149,6 +149,13 @@
   .cmt .cact button{font-size:11.5px;color:var(--faint)} .cmt .cact button:hover{color:var(--text)}
   .cmt .cedit{font-size:11px;color:var(--faint);font-style:italic;margin-left:6px;white-space:nowrap}
   .cmt .cedit-ta{display:block;width:100%;box-sizing:border-box;margin-top:6px;font:inherit;font-size:13.5px;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:7px;padding:6px 8px;resize:vertical}
+  /* Threaded replies (Phase 2.2) */
+  .thread{display:flex;flex-direction:column;gap:6px}
+  .thread.resolved .cmt.reply:not(.editing){opacity:.5}  /* dim replies with their resolved parent note (but not the active editor) */
+  .cmt.reply{margin-left:22px;border-left:2px solid var(--line);padding-left:10px}
+  .cmt .rcount{font-size:11px;color:var(--faint);margin-left:6px}
+  .creply{margin-left:22px}
+  .creply-ta{display:block;width:100%;box-sizing:border-box;font:inherit;font-size:13.5px;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:7px;padding:6px 8px;resize:vertical}
   .addc{display:flex;flex-direction:column;gap:8px}
   .addc .arow{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 
@@ -322,7 +329,8 @@ let curTrackId=null, curRevId=null;           // what's loaded in the player
 const peaksCache={};                           // revId -> {duration,peaks}
 let comments=[];                               // comments for the open track
 let panelTrackId=null;                         // track whose comments are shown in the panel
-let editingId=null;                            // id of the note currently being edited inline
+let editingId=null;                            // id of the note/reply currently being edited inline
+let replyingId=null;                           // id of the note whose reply editor is open (null = none)
 let autoAdvance=false;
 // Two audio elements so revision switches can crossfade gaplessly. `audio` always
 // points at the active element; the inactive one preloads the compare revision.
@@ -748,7 +756,7 @@ window.addEventListener('resize',()=>{ if(curRevId){ layoutCanvas(); drawBars();
 function drawPins(){
   const wrap=$('#pins'); wrap.innerHTML='';
   const dur=(nullOn?nullDur():(audio.duration||peaksCache[curRevId]?.duration))||1;
-  comments.filter(c=>c.ts!=null && c.revision_id===curRevId).forEach(c=>{
+  comments.filter(c=>c.ts!=null && c.parent_id==null && c.revision_id===curRevId).forEach(c=>{
     const el=document.createElement('div'); el.className='pin'; el.textContent='▾';
     el.style.left=Math.max(0,Math.min(1,c.ts/dur))*100+'%';
     el.title=`${c.author} @ ${fmt(c.ts)}: ${c.body}`;
@@ -839,7 +847,7 @@ function stopNull(){ stopNullSources(); for(const k in decoded) delete decoded[k
 async function openTrack(trackId, fromPlayer){
   const t=trackById(trackId); if(!t)return;
   panelTrackId=trackId;
-  editingId=null;
+  editingId=null; replyingId=null;
   $('#cpanel').classList.remove('hidden');
   $('#cTitle').textContent='Notes — '+t.title;
   comments=await api('tracks/'+trackId+'/comments');
@@ -851,21 +859,29 @@ async function openTrack(trackId, fromPlayer){
 }
 function renderComments(){
   const box=$('#clist');
-  // Preserve any in-progress edit text across re-renders (resolve/del/send on other notes
-  // re-render the whole list; without this the open editor would reset to the stored body).
+  // Preserve any in-progress edit AND reply text across re-renders (resolve/del/send on other
+  // notes re-render the whole list; without this an open editor would reset to the stored body).
   const liveTa=box.querySelector('.cedit-ta'); const draft=(liveTa && Number(liveTa.dataset.cid)===editingId)?liveTa.value:null;
+  const liveRep=box.querySelector('.creply-ta'); const replyDraft=(liveRep && Number(liveRep.dataset.pid)===replyingId)?liveRep.value:null;
+  let toFocus=null; // textarea to focus once it's connected — focus() is a no-op while the subtree is detached
   box.innerHTML='';
   if(!comments.length){ box.innerHTML='<div class="faint small">No notes yet.</div>'; return; }
-  comments.forEach(c=>{
+
+  // Pass 1: partition into top-level notes and replies grouped by parent (created_at order kept).
+  const notes=comments.filter(c=>c.parent_id==null);
+  const repliesByParent={};
+  comments.forEach(c=>{ if(c.parent_id!=null) (repliesByParent[c.parent_id]||(repliesByParent[c.parent_id]=[])).push(c); });
+
+  // Build a single comment row. `isReply` strips the timestamp/resolve/rev affordances — replies
+  // are plain authored text that reuse the same inline-edit machinery (keyed on editingId).
+  const buildRow=(c,isReply)=>{
     const div=document.createElement('div');
-    div.className='cmt'+(c.resolved?' resolved':'')+(c.revision_id===curRevId?' cur':'');
-    const tsHtml = c.ts!=null ? `<button class="tsbtn">${fmt(c.ts)}</button>` : `<span class="gen">general</span>`;
     const canEdit = c.author===ME.username || ME.role==='admin';
 
     if(c.id===editingId){
-      // timestamp shown but inert here — the row is the editor; seeking belongs to the static view
-      const tsStatic = c.ts!=null ? `<span class="tsbtn" style="cursor:default">${fmt(c.ts)}</span>` : `<span class="gen">general</span>`;
+      const tsStatic = (!isReply && c.ts!=null) ? `<span class="tsbtn" style="cursor:default">${fmt(c.ts)}</span>` : '';
       const initial = draft!=null ? draft : c.body;
+      div.className='cmt'+(isReply?' reply editing':'');
       div.innerHTML=`${tsStatic}
         <div class="cbody"><span class="cwho ${c.author}">${esc(c.author)}</span>
           <textarea class="cedit-ta" data-cid="${c.id}" rows="2">${esc(initial)}</textarea>
@@ -876,7 +892,7 @@ function renderComments(){
         </div>`;
       const ta=div.querySelector('.cedit-ta');
       const save=async()=>{
-        const nb=ta.value.trim(); if(!nb){ toast('Note cannot be empty',true); return; }
+        const nb=ta.value.trim(); if(!nb){ toast((isReply?'Reply':'Note')+' cannot be empty',true); return; }
         try{
           await api('comments/'+c.id,{method:'PUT',body:{body:nb}});
           editingId=null;
@@ -886,35 +902,95 @@ function renderComments(){
       div.querySelector('.esave').addEventListener('click',save);
       div.querySelector('.ecancel').addEventListener('click',()=>{ editingId=null; renderComments(); });
       ta.addEventListener('keydown',e=>{ if((e.metaKey||e.ctrlKey)&&e.key==='Enter'){ e.preventDefault(); save(); } else if(e.key==='Escape'){ editingId=null; renderComments(); } });
-      box.appendChild(div);
-      // Focus only when first opening the editor (draft==null); on incidental re-renders keep the user's focus where it is.
-      if(draft==null){ ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }
-      return;
+      // Focus only when first opening the editor (draft==null); on incidental re-renders keep focus where it is.
+      // Deferred to after append — the row is still detached here, and focus() does nothing while detached.
+      if(draft==null) toFocus=ta;
+      return div;
     }
 
     const editedHtml = c.edited_at ? `<span class="cedit" title="last edited ${esc(fmtDate(c.edited_at))}">(last edited ${esc(fmtDate(c.edited_at))})</span>` : '';
-    div.innerHTML=`${tsHtml}
-      <div class="cbody"><span class="cwho ${c.author}">${esc(c.author)}</span>${esc(c.body)}
-        <span class="crev">${c.rev_number?('· v'+c.rev_number):''}</span>${editedHtml}</div>
-      <div class="cact">
-        <button class="res">${c.resolved?'reopen':'resolve'}</button>
-        ${canEdit?'<button class="edit">edit</button>':''}
-        ${canEdit?'<button class="del danger">del</button>':''}
-      </div>`;
-    if(c.ts!=null) div.querySelector('.tsbtn').addEventListener('click',()=>{
-      if(curTrackId!==c.track_id){ const t=trackById(c.track_id); const rv=revById(t,c.revision_id)||t.revisions.at(-1); loadTrack(c.track_id, rv.id,{play:true,keepPos:c.ts}); }
-      else if(c.revision_id && c.revision_id!==curRevId){ loadTrack(c.track_id,c.revision_id,{play:true,keepPos:c.ts}); }
-      else if(nullOn){ nullSeek(c.ts); } else if(audio.duration){ audio.currentTime=c.ts; audio.play().catch(()=>{}); }
-    });
-    div.querySelector('.res').addEventListener('click',async()=>{ await api('comments/'+c.id,{method:'PUT',body:{resolved:c.resolved?0:1}}); c.resolved=c.resolved?0:1; renderComments(); refreshCounts(); });
+    if(isReply){
+      div.className='cmt reply';
+      div.innerHTML=`<div class="cbody"><span class="cwho ${c.author}">${esc(c.author)}</span>${esc(c.body)}${editedHtml}</div>
+        <div class="cact">
+          ${canEdit?'<button class="edit">edit</button>':''}
+          ${canEdit?'<button class="del danger">del</button>':''}
+        </div>`;
+    } else {
+      const tsHtml = c.ts!=null ? `<button class="tsbtn">${fmt(c.ts)}</button>` : `<span class="gen">general</span>`;
+      const nReplies=(repliesByParent[c.id]||[]).length;
+      const rcountHtml = nReplies ? `<span class="rcount">${nReplies} repl${nReplies===1?'y':'ies'}</span>` : '';
+      div.className='cmt'+(c.resolved?' resolved':'')+(c.revision_id===curRevId?' cur':'');
+      div.innerHTML=`${tsHtml}
+        <div class="cbody"><span class="cwho ${c.author}">${esc(c.author)}</span>${esc(c.body)}
+          <span class="crev">${c.rev_number?('· v'+c.rev_number):''}</span>${editedHtml}${rcountHtml}</div>
+        <div class="cact">
+          <button class="res">${c.resolved?'reopen':'resolve'}</button>
+          <button class="reply">reply</button>
+          ${canEdit?'<button class="edit">edit</button>':''}
+          ${canEdit?'<button class="del danger">del</button>':''}
+        </div>`;
+      if(c.ts!=null) div.querySelector('.tsbtn').addEventListener('click',()=>{
+        if(curTrackId!==c.track_id){ const t=trackById(c.track_id); const rv=revById(t,c.revision_id)||t.revisions.at(-1); loadTrack(c.track_id, rv.id,{play:true,keepPos:c.ts}); }
+        else if(c.revision_id && c.revision_id!==curRevId){ loadTrack(c.track_id,c.revision_id,{play:true,keepPos:c.ts}); }
+        else if(nullOn){ nullSeek(c.ts); } else if(audio.duration){ audio.currentTime=c.ts; audio.play().catch(()=>{}); }
+      });
+      div.querySelector('.res').addEventListener('click',async()=>{ await api('comments/'+c.id,{method:'PUT',body:{resolved:c.resolved?0:1}}); c.resolved=c.resolved?0:1; renderComments(); refreshCounts(); });
+      div.querySelector('.reply').addEventListener('click',()=>{ replyingId=(replyingId===c.id?null:c.id); renderComments(); });
+    }
     const ed=div.querySelector('.edit'); if(ed) ed.addEventListener('click',()=>{ editingId=c.id; renderComments(); });
-    const del=div.querySelector('.del'); if(del) del.addEventListener('click',async()=>{ if(!confirm('Delete this note?\n\n"'+c.body+'"\n— '+c.author))return; await api('comments/'+c.id,{method:'DELETE'}); comments=comments.filter(x=>x.id!==c.id); renderComments(); drawPins(); refreshCounts(); });
-    box.appendChild(div);
+    const del=div.querySelector('.del'); if(del) del.addEventListener('click',async()=>{
+      const n=(repliesByParent[c.id]||[]).length;
+      const msg = isReply ? ('Delete this reply?\n\n"'+c.body+'"\n— '+c.author)
+                : n ? ('Delete this note AND its '+n+' repl'+(n===1?'y':'ies')+'?\n\n"'+c.body+'"\n— '+c.author)
+                    : ('Delete this note?\n\n"'+c.body+'"\n— '+c.author);
+      if(!confirm(msg))return;
+      try{ await api('comments/'+c.id,{method:'DELETE'}); }catch(e){ toast(e.message,true); return; }
+      // Server cascade-deletes a note's replies; mirror that locally (drop the row and its children).
+      comments=comments.filter(x=>x.id!==c.id && x.parent_id!==c.id);
+      renderComments(); drawPins(); refreshCounts();
+    });
+    return div;
+  };
+
+  // Pass 2: render each note, its replies, then its reply editor (if open), inside a thread wrapper.
+  notes.forEach(note=>{
+    const thread=document.createElement('div');
+    thread.className='thread'+(note.resolved?' resolved':'');
+    thread.appendChild(buildRow(note,false));
+    (repliesByParent[note.id]||[]).forEach(rep=>thread.appendChild(buildRow(rep,true)));
+    if(replyingId===note.id){
+      const ed=document.createElement('div'); ed.className='creply';
+      ed.innerHTML=`<textarea class="creply-ta" data-pid="${note.id}" rows="2" placeholder="Reply…"></textarea>
+        <div class="row" style="margin-top:6px;gap:8px">
+          <button class="btn sm primary rsave">Reply</button>
+          <button class="btn sm ghost rcancel">Cancel</button>
+        </div>`;
+      const ta=ed.querySelector('.creply-ta');
+      ta.value = replyDraft!=null ? replyDraft : '';
+      const save=async()=>{
+        const nb=ta.value.trim(); if(!nb){ toast('Reply cannot be empty',true); return; }
+        try{
+          await api('tracks/'+panelTrackId+'/comments',{method:'POST',body:{parent_id:note.id, body:nb}});
+          replyingId=null;
+          comments=await api('tracks/'+panelTrackId+'/comments'); renderComments(); refreshCounts();
+        }catch(e){ toast(e.message,true); }
+      };
+      ed.querySelector('.rsave').addEventListener('click',save);
+      ed.querySelector('.rcancel').addEventListener('click',()=>{ replyingId=null; renderComments(); });
+      ta.addEventListener('keydown',e=>{ if((e.metaKey||e.ctrlKey)&&e.key==='Enter'){ e.preventDefault(); save(); } else if(e.key==='Escape'){ replyingId=null; renderComments(); } });
+      thread.appendChild(ed);
+      if(replyDraft==null) toFocus=ta; // focus only on first open; keep cursor on incidental re-renders
+    }
+    box.appendChild(thread);
   });
+  // Every editor is now connected; focus the freshly-opened one (edit places the cursor at end).
+  if(toFocus){ toFocus.focus(); if(toFocus.classList.contains('cedit-ta')) toFocus.setSelectionRange(toFocus.value.length, toFocus.value.length); }
 }
 async function refreshCounts(){ // light refresh of badges
   const t=trackById(panelTrackId); if(!t)return;
-  t.comment_count=comments.length; t.open_comment_count=comments.filter(c=>!c.resolved).length; render();
+  const notes=comments.filter(c=>c.parent_id==null); // badges count top-level notes only, not replies
+  t.comment_count=notes.length; t.open_comment_count=notes.filter(c=>!c.resolved).length; render();
 }
 $('#cSend').addEventListener('click',sendComment);
 $('#cInput').addEventListener('keydown',e=>{ if((e.metaKey||e.ctrlKey)&&e.key==='Enter') sendComment(); });

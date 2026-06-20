@@ -105,10 +105,15 @@ db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('album_title', ?
   add('peak_series', "TEXT DEFAULT '[]'"); // fine-grained sample-peak series (dBFS)
 }
 
-// Migration: edited_at on comments (NULL until a note's body is edited)
+// Migration: edited_at + parent_id on comments
+//   edited_at — NULL until a note's body is edited
+//   parent_id — NULL = top-level note; non-NULL = reply pointing at its parent note (Phase 2.2).
+//   Bare INTEGER (no REFERENCES): reply cleanup is handled explicitly in the DELETE route,
+//   matching the explicit-orphan philosophy used for revision deletes below.
 {
   const cols = db.prepare('PRAGMA table_info(comments)').all().map(c => c.name);
   if (!cols.includes('edited_at')) db.exec('ALTER TABLE comments ADD COLUMN edited_at TEXT');
+  if (!cols.includes('parent_id')) db.exec('ALTER TABLE comments ADD COLUMN parent_id INTEGER');
 }
 
 // ── Auth (trust-on-first-use) ────────────────────────────────
@@ -345,8 +350,9 @@ function trackPayload(username) {
                                      lufs_i, lufs_lra, true_peak
                               FROM revisions WHERE track_id = ? ORDER BY rev_number`);
   const seenStmt = db.prepare('SELECT last_seen_rev FROM seen WHERE username = ? AND track_id = ?');
-  const cCount = db.prepare('SELECT COUNT(*) v FROM comments WHERE track_id = ?');
-  const cOpen = db.prepare('SELECT COUNT(*) v FROM comments WHERE track_id = ? AND resolved = 0');
+  // Badges count top-level notes only — replies (parent_id NOT NULL) don't inflate the count.
+  const cCount = db.prepare('SELECT COUNT(*) v FROM comments WHERE track_id = ? AND parent_id IS NULL');
+  const cOpen = db.prepare('SELECT COUNT(*) v FROM comments WHERE track_id = ? AND resolved = 0 AND parent_id IS NULL');
   for (const t of tracks) {
     t.revisions = revStmt.all(t.id);
     const latest = t.revisions[t.revisions.length - 1];
@@ -562,10 +568,19 @@ app.get('/api/tracks/:id/comments', requireAuth, (req, res) => {
 app.post('/api/tracks/:id/comments', requireAuth, (req, res) => {
   const body = String(req.body.body || '').trim();
   if (!body) return res.status(400).json({ error: 'Comment body required' });
-  const ts = (req.body.ts === null || req.body.ts === undefined || req.body.ts === '') ? null : Number(req.body.ts);
-  const revisionId = req.body.revision_id ? Number(req.body.revision_id) : null;
-  const r = db.prepare('INSERT INTO comments (track_id, revision_id, author, ts, body) VALUES (?, ?, ?, ?, ?)')
-    .run(req.params.id, revisionId, req.session.user.username, ts, body);
+  let ts = (req.body.ts === null || req.body.ts === undefined || req.body.ts === '') ? null : Number(req.body.ts);
+  let revisionId = req.body.revision_id ? Number(req.body.revision_id) : null;
+  const parentId = req.body.parent_id ? Number(req.body.parent_id) : null;
+  if (parentId != null) {
+    // Reply: parent must exist, live on this track, and itself be a top-level note (one level deep).
+    const parent = db.prepare('SELECT track_id, parent_id FROM comments WHERE id = ?').get(parentId);
+    if (!parent) return res.status(400).json({ error: 'Parent note not found' });
+    if (parent.track_id !== Number(req.params.id)) return res.status(400).json({ error: 'Parent note is on a different track' });
+    if (parent.parent_id != null) return res.status(400).json({ error: 'Cannot reply to a reply' });
+    ts = null; revisionId = null; // replies are never pinned and never carry a revision
+  }
+  const r = db.prepare('INSERT INTO comments (track_id, revision_id, author, ts, body, parent_id) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(req.params.id, revisionId, req.session.user.username, ts, body, parentId);
   res.json({ id: r.lastInsertRowid });
 });
 
@@ -573,6 +588,7 @@ app.put('/api/comments/:id', requireAuth, (req, res) => {
   const c = db.prepare('SELECT * FROM comments WHERE id = ?').get(req.params.id);
   if (!c) return res.status(404).json({ error: 'Not found' });
   if (req.body.resolved !== undefined) {
+    if (c.parent_id != null) return res.status(400).json({ error: 'Replies cannot be resolved' });
     db.prepare('UPDATE comments SET resolved = ? WHERE id = ?').run(req.body.resolved ? 1 : 0, req.params.id);
   }
   if (req.body.body !== undefined) {
@@ -595,7 +611,13 @@ app.delete('/api/comments/:id', requireAuth, (req, res) => {
   if (c.author !== req.session.user.username && req.session.user.role !== 'admin') {
     return res.status(403).json({ error: 'Not your comment' });
   }
-  db.prepare('DELETE FROM comments WHERE id = ?').run(req.params.id);
+  // Deleting a note removes its replies too — done explicitly (no FK cascade) and atomically.
+  // For a reply, the children DELETE is a harmless no-op.
+  const tx = db.transaction(() => {
+    db.prepare('DELETE FROM comments WHERE parent_id = ?').run(req.params.id);
+    db.prepare('DELETE FROM comments WHERE id = ?').run(req.params.id);
+  });
+  tx();
   res.json({ ok: true });
 });
 
