@@ -363,8 +363,7 @@
     <div id="pbEmpty" class="pb-empty">Select a track to play</div>
     <div id="pbActive" class="hidden">
       <div class="vstage" id="vstage">
-        <video id="videoA" playsinline preload="auto"></video>
-        <video id="videoB" playsinline preload="auto" class="vhide"></video>
+        <video id="vidpic" playsinline preload="auto" muted></video>
       </div>
       <div class="wave-wrap">
         <canvas id="wave"></canvas>
@@ -463,13 +462,14 @@ let replyingId=null;                           // id of the note whose reply edi
 let autoAdvance=false;
 // Two audio elements so revision switches can crossfade gaplessly. `audio` always
 // points at the active element; the inactive one preloads the compare revision.
-// Video projects (Phase 6) drive a parallel pair of <video> elements instead — `players` is
-// repointed at the right pair per open project (applyMediaMode); everything downstream reads the
-// active element via `audio`, which is media-agnostic (HTMLVideoElement shares the same API).
-const audioEls=[document.getElementById('audioA'), document.getElementById('audioB')];
-const videoEls=[document.getElementById('videoA'), document.getElementById('videoB')];
-let players=audioEls;
+// Audio-post model (Phase 6): a video TRACK plays its audio MIX through these audio elements exactly
+// like an audio project (crossfade A/B, waveform, meters, comments), with the track's picture shown
+// in a single muted <video> (`vid`) that's slaved to the active audio's clock. So the transport is
+// always audio; the video just follows.
+const players=[document.getElementById('audioA'), document.getElementById('audioB')];
 let act=0, audio=players[0];
+const vid=document.getElementById('vidpic');   // the picture for a video track (muted, follows audio)
+vid.muted=true;
 let userVol = (()=>{ const v=parseFloat(localStorage.getItem('at_vol')); return isFinite(v)?v:1; })();
 let crossing=false, xfRaf=null, pendingRev=null;
 let peakMaxHold=-Infinity;   // peak meter max-hold (resets on revision/track load)
@@ -501,31 +501,42 @@ const canManage = () => !!ME && (ME.role==='admin' || ME.role==='engineer'); // 
 const displayName = u => (u && (u.display_name||u.username)) || '';
 // Stable per-author color from a username hash (replaces the old hardcoded james/noah rules).
 function userColor(name){ let h=0; const s=String(name||''); for(let i=0;i<s.length;i++) h=(h*31+s.charCodeAt(i))>>>0; return `hsl(${h%360},62%,68%)`; }
-// Null test is an audio-only (PCM phase-inversion) feature, so the null button is hidden for video.
-// But the compare <select> lives in the same box and the A/B ⇄ swap still uses it, so for video we
-// keep the box visible and hide ONLY the null button; for audio the whole box follows the setting.
-function applyNullVis(){
-  const vid=isVideoProject();
-  $('#nullBox').classList.toggle('hidden', !vid && !NULL_VIS);
-  $('#nullToggle').classList.toggle('hidden', vid);
-}
 function isVideoProject(){ return !!(PROJECT && PROJECT.media_type==='video'); }
-// Point the transport at the audio or video element pair for the open project, and reflect it in
-// the UI (video stage + null-test visibility). Called when a project is opened.
-function applyMediaMode(){
-  players = isVideoProject() ? videoEls : audioEls;
-  act=0; audio=players[act];
-  applyNullVis(); updateStage();
-}
-// Show the video stage only for a video project with a loaded revision; show just the active <video>.
-function updateStage(){
+// Null test is an audio-only (PCM phase-inversion) feature; hide the button for video projects (the
+// compare <select> in the same box stays — the A/B ⇄ swap uses it). For audio the box follows NULL_VIS.
+function applyNullVis(){
   const v=isVideoProject();
-  const on = v && !!curRevId;
-  $('#vstage').classList.toggle('show', on);
-  $('#pbResize').classList.toggle('show', on);     // the resize handle only makes sense with a video
-  videoEls.forEach((el,i)=>el.classList.toggle('vhide', i!==act));
-  if(on) applyVideoH();
+  $('#nullBox').classList.toggle('hidden', !v && !NULL_VIS);
+  $('#nullToggle').classList.toggle('hidden', v);
+}
+function applyMediaMode(){ applyNullVis(); updateStage(); }
+
+// ── Video picture (audio-post model) ────────────────────────
+// The current track's video (the locked picture) plays MUTED in `vid`, slaved to the active audio
+// mix's clock. updateStage shows it for a video track, (re)loads the picture only when the track's
+// video changes, and reveals the resize handle.
+function curVideoName(){ const t=trackById(curTrackId); return (t && t.has_video) ? t.video_stored_name : null; }
+function updateStage(){
+  const vname = curVideoName();
+  const show = !!vname && !!curRevId;
+  $('#vstage').classList.toggle('show', show);
+  $('#pbResize').classList.toggle('show', show);
+  if(show){
+    if(vid._vname !== vname){ vid._vname=vname; vid.src='api/audio/'+vname; vid.muted=true; vid.load(); }
+    applyVideoH();
+  } else {
+    try{ vid.pause(); }catch{} if(vid._vname){ vid.removeAttribute('src'); vid._vname=null; }
+  }
   syncBottomPad();
+}
+// Keep the muted picture locked to the active audio mix: match play/pause and correct time drift.
+function syncVid(){
+  if(!curVideoName() || nullOn) return;
+  if(audio.paused){ if(!vid.paused){ try{ vid.pause(); }catch{} } }
+  else if(vid.paused && vid._vname){ vid.play().catch(()=>{}); }
+  if(vid.readyState>=1 && Math.abs((vid.currentTime||0)-(audio.currentTime||0)) > 0.25){
+    try{ vid.currentTime = Math.min(audio.currentTime, (vid.duration||audio.currentTime)); }catch{}
+  }
 }
 
 // ── Resizable video + dynamic player-bar clearance ──────────
@@ -761,7 +772,7 @@ async function loadTrack(trackId, revId, {play=false, keepPos=null}={}){
   audio.src='api/audio/'+rev.stored_name;
   audio.load();
   const startAt = keepPos!=null? keepPos : 0;
-  const begin=()=>{ if(startAt) audio.currentTime=Math.min(startAt, rev.duration||startAt); audio.volume=userVol; if(play) audio.play().catch(()=>{}); };
+  const begin=()=>{ if(startAt) audio.currentTime=Math.min(startAt, rev.duration||startAt); audio.volume=userVol; if(play) audio.play().catch(()=>{}); syncVid(); };
   audio.addEventListener('loadedmetadata',begin,{once:true});
   syncPlayerSelectors(t);
   $('#nowTitle').textContent=t.title;
@@ -777,11 +788,13 @@ async function loadTrack(trackId, revId, {play=false, keepPos=null}={}){
   render();
 }
 
+// A revision label: the video's own extracted audio shows as "Original audio", mixes as v1, v2…
+function revLabel(r){ return r && r.is_orig_audio ? 'Original audio' : ('v'+(r?r.rev_number:'')); }
 let selTrackId=null, selRevCount=-1;
 function syncPlayerSelectors(t){
   const revSel=$('#revSel'), cmpSel=$('#cmpSel');
   if(selTrackId!==t.id || selRevCount!==t.revisions.length){      // rebuild options only when needed
-    const opt=r=>`<option value="${r.id}">v${r.rev_number}</option>`;
+    const opt=r=>`<option value="${r.id}">${esc(revLabel(r))}</option>`;
     revSel.innerHTML=t.revisions.map(opt).join('');
     cmpSel.innerHTML=t.revisions.map(opt).join('');
     const others=t.revisions.filter(r=>r.id!==curRevId);          // default compare = previous revision
@@ -802,7 +815,7 @@ function syncPlayerSelectors(t){
 
 function updateRevNote(rev){
   const el=$('#revNote');
-  if(rev && rev.notes && rev.notes.trim()){ el.classList.remove('hidden'); el.innerHTML=`<b>v${rev.rev_number} notes:</b> ${esc(rev.notes)}`; }
+  if(rev && rev.notes && rev.notes.trim()){ el.classList.remove('hidden'); el.innerHTML=`<b>${esc(revLabel(rev))} notes:</b> ${esc(rev.notes)}`; }
   else el.classList.add('hidden');
 }
 
@@ -824,11 +837,12 @@ function step(dir){
   const nt=TRACKS[ni]; const latest=nt.revisions[nt.revisions.length-1];
   if(latest) loadTrack(nt.id,latest.id,{play:true});
 }
-// Media events fire on every element (audio + video pairs); only the active one drives the UI.
-[...audioEls, ...videoEls].forEach(el=>{
-  el.addEventListener('play',()=>{ if(el!==audio)return; $('#playBtn').textContent='⏸'; render(); raf(); });
-  el.addEventListener('pause',()=>{ if(el!==audio||crossing)return; $('#playBtn').textContent='▶'; render(); });
+// Media events fire on both audio elements; only the active one drives the UI (and the picture).
+players.forEach(el=>{
+  el.addEventListener('play',()=>{ if(el!==audio)return; $('#playBtn').textContent='⏸'; syncVid(); render(); raf(); });
+  el.addEventListener('pause',()=>{ if(el!==audio||crossing)return; $('#playBtn').textContent='▶'; syncVid(); render(); });
   el.addEventListener('timeupdate',()=>{ if(el!==audio)return; if(!nullOn) updateTime(audio.currentTime, audio.duration); });
+  el.addEventListener('seeked',()=>{ if(el!==audio)return; syncVid(); });   // keep the picture on the playhead even while paused
   el.addEventListener('ended',()=>{ if(el!==audio)return; if(autoAdvance && !nullOn) step(1); });
 });
 
@@ -839,9 +853,8 @@ $('#swapBtn').addEventListener('click',()=>requestRev(+$('#cmpSel').value));  //
 // <select>s mutated-but-unsynced, eventually wedging swap (a===b) and the dropdown until reload.
 function requestRev(revId){
   if(!revId || revId===curRevId) return;
-  // Video A/B is a hard cut at the matched playhead (the audio crossfade doesn't translate to video):
-  // reload the active <video> at the current position, preserving play state. No gapless fade (6c).
-  if(isVideoProject()){ loadTrack(curTrackId, revId, {play:!audio.paused, keepPos:audio.currentTime}); return; }
+  // A/B is always an AUDIO crossfade — for a video track the picture is locked, so comparing mixes is
+  // a gapless audio swap against the same (still-playing) video. The picture isn't touched.
   if(crossing){ pendingRev=revId; return; }
   crossfadeTo(revId);
 }
@@ -856,7 +869,7 @@ $('#dlBtn').addEventListener('click',()=>{ const t=trackById(curTrackId); const 
 
 // ── volume ──────────────────────────────────────────────────
 $('#vol').value=Math.round(userVol*100);
-[...audioEls, ...videoEls].forEach(p=>p.volume=userVol);
+players.forEach((p,i)=>p.volume = i===act?userVol:0);
 setLufsTick();
 $('#vol').addEventListener('input',e=>{
   userVol=e.target.value/100; localStorage.setItem('at_vol',userVol);
@@ -866,7 +879,6 @@ $('#vol').addEventListener('input',e=>{
 
 // ── gapless A/B crossfade (keep one element playing while the other catches up) ──
 function preloadInactive(){
-  if(isVideoProject()) return;   // video A/B reloads the active element (no second-element preload)
   const t=trackById(curTrackId); if(!t)return;
   const other=players[1-act];
   let cmp=+$('#cmpSel').value;
@@ -1019,7 +1031,7 @@ let rafId=null;
 function raf(){ cancelAnimationFrame(rafId);
   const loop=()=>{
     if(nullOn){ updateTime(nullTime(),nullDur()); if(nullPlaying && nullTime()<nullDur()) rafId=requestAnimationFrame(loop); }
-    else if(!audio.paused){ updateTime(audio.currentTime,audio.duration); rafId=requestAnimationFrame(loop); }
+    else if(!audio.paused){ updateTime(audio.currentTime,audio.duration); syncVid(); rafId=requestAnimationFrame(loop); }
   };
   rafId=requestAnimationFrame(loop);
 }
@@ -1372,57 +1384,88 @@ function buildStudioBody(el,t){
   tools.querySelector('.tdel').addEventListener('click',async()=>{ if(!confirm('Delete "'+t.title+'" and all its revisions?'))return; await api('tracks/'+t.id,{method:'DELETE'}); openStudio.delete(t.id); await reload(); toast('Track deleted'); });
   el.appendChild(tools);
 
-  // uploader — above the revisions list so "Upload new revision" is the first thing you reach (1.4)
   const isVid=isVideoProject();
-  const upAccept = isVid ? 'video/*,.mp4,.mov,.mkv,.webm,.m4v' : 'audio/*,.wav,.aif,.aiff,.flac,.mp3';
+  const audioAccept='audio/*,.wav,.aif,.aiff,.flac,.mp3';
+  const videoAccept='video/*,.mp4,.mov,.mkv,.webm,.m4v';
+
+  // VIDEO (the picture) — a video track's locked video asset, replaceable independently of its audio.
+  if(isVid){
+    const vsec=document.createElement('div'); vsec.className='uploader';
+    const cur = t.has_video
+      ? `<div class="small" style="margin-bottom:6px">Current: <b>${esc(t.video_original_name||'video')}</b> · ${t.video_width||'?'}×${t.video_height||'?'}${t.video_fps?' · '+t.video_fps+' fps':''} · ${fmt(t.video_duration||0)}
+           <a class="btn sm" style="margin-left:8px" href="api/audio/${t.video_stored_name}?dl=1">⬇ Download</a></div>`
+      : `<div class="small faint" style="margin-bottom:6px">No video yet — upload the picture. Its own audio becomes the “Original audio” revision; then upload mixes below.</div>`;
+    vsec.innerHTML=`<div class="field"><label>${t.has_video?'Replace video (the picture)':'Upload video (the picture)'} — ${KEEP_LOSSLESS?'original kept for download; ':''}an H.264 MP4 preview + 480p proxy are generated${t.has_video?'. Your audio mixes are kept.':''}</label>
+        ${cur}<input type="file" class="vfile" accept="${videoAccept}"></div>
+      <div class="row"><button class="btn primary vup">${t.has_video?'Replace video':'Upload video'}</button><span class="vstat faint small"></span></div>`;
+    const vfile=vsec.querySelector('.vfile'), vstat=vsec.querySelector('.vstat'), vbtn=vsec.querySelector('.vup');
+    vbtn.addEventListener('click',async()=>{
+      if(!vfile.files[0]){ toast('Choose a video file',true); return; }
+      const fd=new FormData(); fd.append('file',vfile.files[0]);
+      vbtn.disabled=true; vstat.innerHTML='<span class="spin"></span> uploading & encoding…';
+      try{ await api('tracks/'+t.id+'/video',{method:'POST',body:fd}); await reload(); toast(t.has_video?'Video replaced':'Video set'); }
+      catch(e){ toast(e.message,true); vstat.textContent=''; vbtn.disabled=false; }
+    });
+    el.appendChild(vsec);
+  }
+
+  // AUDIO uploader — a new revision (an audio mix for a video track; an audio revision otherwise).
   const up=document.createElement('div'); up.className='uploader';
   const upLabel = isVid
     ? (KEEP_LOSSLESS
-        ? 'Upload new revision (original video kept for download; an H.264 MP4 preview + 480p proxy are generated for playback)'
-        : 'Upload new revision (re-encoded to an H.264 MP4 preview + 480p proxy; the original is discarded)')
+        ? 'Upload an audio mix (new revision, synced to the video; original kept for download, 320k MP3 preview generated)'
+        : 'Upload an audio mix (new revision, synced to the video; converted to a 320k MP3 preview)')
     : (KEEP_LOSSLESS
         ? 'Upload new revision (original kept for lossless download; a 320k MP3 preview is generated for playback)'
         : 'Upload new revision (WAV → converted to 320k MP3 preview; original is discarded)');
   up.innerHTML=`<div class="field"><label>${upLabel}</label>
-      <input type="file" class="ufile" accept="${upAccept}"></div>
+      <input type="file" class="ufile" accept="${audioAccept}"></div>
     <div class="field"><label>Change notes (optional)</label><textarea class="unotes" rows="2" placeholder="What changed in this revision?"></textarea></div>
-    <div class="row"><button class="btn primary uup">Upload revision</button><span class="ustat faint small"></span></div>`;
+    <div class="row"><button class="btn primary uup">Upload ${isVid?'mix':'revision'}</button><span class="ustat faint small"></span></div>`;
   const fileEl=up.querySelector('.ufile'), stat=up.querySelector('.ustat'), btn=up.querySelector('.uup');
   btn.addEventListener('click',async()=>{
     if(!fileEl.files[0]){ toast('Choose a file',true); return; }
     const fd=new FormData(); fd.append('file',fileEl.files[0]); fd.append('notes',up.querySelector('.unotes').value);
     btn.disabled=true; stat.innerHTML='<span class="spin"></span> uploading & converting…';
-    try{ await api('tracks/'+t.id+'/revisions',{method:'POST',body:fd}); await reload(); toast('Revision added'); }
+    try{ await api('tracks/'+t.id+'/revisions',{method:'POST',body:fd}); await reload(); toast(isVid?'Mix added':'Revision added'); }
     catch(e){ toast(e.message,true); stat.textContent=''; btn.disabled=false; }
   });
   el.appendChild(up);
 
-  // revisions (newest first)
+  // revisions (newest first). The "Original audio" (set by the video) can't be replaced or deleted
+  // directly — it's regenerated by replacing the video — so those controls are omitted for it.
   [...t.revisions].reverse().forEach(r=>{
     const d=document.createElement('div'); d.className='srev';
+    const orig=!!r.is_orig_audio, lbl=esc(revLabel(r));
     const lTxt = (r.lufs_i!=null||r.true_peak!=null)
       ? `<div class="sl">${r.lufs_i!=null?r.lufs_i.toFixed(1):'—'} LUFS integrated · LRA ${r.lufs_lra!=null?r.lufs_lra.toFixed(1):'—'} LU · true peak ${r.true_peak!=null?r.true_peak.toFixed(1):'—'} dBFS</div>` : '';
-    d.innerHTML=`<div class="sr-h"><span class="rn">v${r.rev_number}</span>
-      <span class="faint small">${fmt(r.duration)} · ${(r.size/1048576).toFixed(1)} MB · ${esc(r.uploaded_by||'')} · ${r.created_at} UTC${r.has_lossless?' · lossless ✓':''}</span>
-      <button class="btn ghost sm rdel danger" style="margin-left:auto">delete</button></div>
-      ${lTxt}
-      <div class="field"><label>Change notes (what you did in this revision)</label>
-      <textarea class="rnotes" rows="2" placeholder="e.g. brightened vocals, tightened low end, new master chain">${esc(r.notes)}</textarea></div>
-      <div class="row" style="margin-top:7px"><button class="btn sm nsave">Save notes</button>
-      <button class="btn sm rrepl">↻ Replace audio</button>
-      <a class="btn sm" href="api/audio/${r.stored_name}?dl=1">⬇ Download${r.has_lossless?' (original)':''}</a></div>
-      <div class="uploader rrepl-box hidden" style="margin-top:9px">
-        <div class="field"><label>Replace this revision's ${isVid?'video':'audio'} — keeps v${r.rev_number}, its notes &amp; comments (${isVid?(KEEP_LOSSLESS?'original kept for download; MP4 preview + proxy generated':'re-encoded to MP4 preview + proxy; original discarded'):(KEEP_LOSSLESS?'original kept for download; 320k MP3 preview generated':'WAV → 320k MP3 preview; original is discarded')})</label>
-          <input type="file" class="rfile" accept="${upAccept}"></div>
+    const actions = orig
+      ? `<button class="btn sm nsave">Save notes</button>
+         <a class="btn sm" href="api/audio/${r.stored_name}?dl=1">⬇ Download</a>
+         <span class="faint small" style="margin-left:auto">set by the video</span>`
+      : `<button class="btn sm nsave">Save notes</button>
+         <button class="btn sm rrepl">↻ Replace audio</button>
+         <a class="btn sm" href="api/audio/${r.stored_name}?dl=1">⬇ Download${r.has_lossless?' (original)':''}</a>`;
+    const replBox = orig ? '' : `<div class="uploader rrepl-box hidden" style="margin-top:9px">
+        <div class="field"><label>Replace this revision's audio — keeps ${lbl}, its notes &amp; comments (${KEEP_LOSSLESS?'original kept for download; 320k MP3 preview generated':'WAV → 320k MP3 preview; original is discarded'})</label>
+          <input type="file" class="rfile" accept="${audioAccept}"></div>
         <div class="row"><button class="btn primary sm rupload">Upload replacement</button>
           <button class="btn sm ghost rcancel">Cancel</button>
           <span class="rstat faint small"></span></div>
       </div>`;
+    d.innerHTML=`<div class="sr-h"><span class="rn">${lbl}</span>
+      <span class="faint small">${fmt(r.duration)} · ${(r.size/1048576).toFixed(1)} MB · ${esc(r.uploaded_by||'')} · ${r.created_at} UTC${r.has_lossless?' · lossless ✓':''}</span>
+      ${orig?'':'<button class="btn ghost sm rdel danger" style="margin-left:auto">delete</button>'}</div>
+      ${lTxt}
+      <div class="field"><label>Change notes (what you did in this revision)</label>
+      <textarea class="rnotes" rows="2" placeholder="e.g. brightened vocals, tightened low end, new master chain">${esc(r.notes)}</textarea></div>
+      <div class="row" style="margin-top:7px">${actions}</div>
+      ${replBox}`;
     d.querySelector('.nsave').addEventListener('click',async()=>{ await api('revisions/'+r.id,{method:'PUT',body:{notes:d.querySelector('.rnotes').value}}); r.notes=d.querySelector('.rnotes').value; if(curRevId===r.id)updateRevNote(r); toast('Notes saved'); });
-    const replBox=d.querySelector('.rrepl-box'), rfile=d.querySelector('.rfile'), rstat=d.querySelector('.rstat'), rup=d.querySelector('.rupload');
-    d.querySelector('.rrepl').addEventListener('click',()=>{ replBox.classList.toggle('hidden'); });
-    d.querySelector('.rcancel').addEventListener('click',()=>{ replBox.classList.add('hidden'); rfile.value=''; rstat.textContent=''; });
-    rup.addEventListener('click',async()=>{
+    const box=d.querySelector('.rrepl-box'), rfile=d.querySelector('.rfile'), rstat=d.querySelector('.rstat'), rup=d.querySelector('.rupload'), rreplBtn=d.querySelector('.rrepl'), rcancelBtn=d.querySelector('.rcancel'), rdelBtn=d.querySelector('.rdel');
+    if(rreplBtn) rreplBtn.addEventListener('click',()=>{ box.classList.toggle('hidden'); });
+    if(rcancelBtn) rcancelBtn.addEventListener('click',()=>{ box.classList.add('hidden'); rfile.value=''; rstat.textContent=''; });
+    if(rup) rup.addEventListener('click',async()=>{
       if(!rfile.files[0]){ toast('Choose a file',true); return; }
       const fd=new FormData(); fd.append('file',rfile.files[0]);
       rup.disabled=true; rstat.innerHTML='<span class="spin"></span> uploading & converting…';
@@ -1432,8 +1475,6 @@ function buildStudioBody(el,t){
         // its decoded buffer is keyed by the now-stale stored_name, so null would keep playing the old
         // audio and silently fail on the next play. (The loaded-rev case is also covered here.)
         if(nullOn && (r.id===curRevId || r.id===+$('#cmpSel').value)) stopNull();
-        // The rev id is unchanged but its audio + analysis are not: drop the cached peaks (keyed by id),
-        // any decoded null-test buffer (keyed by the now-stale stored_name), and any preloaded <audio> handle.
         const oldName=r.stored_name;
         delete peaksCache[r.id]; delete decoded[oldName];
         players.forEach(p=>{ if(p._revId===r.id) p._revId=null; });
@@ -1446,7 +1487,7 @@ function buildStudioBody(el,t){
         toast('Audio replaced');
       }catch(e){ toast(e.message,true); rstat.textContent=''; rup.disabled=false; }
     });
-    d.querySelector('.rdel').addEventListener('click',async()=>{ if(!confirm('Delete revision v'+r.rev_number+'?'))return;
+    if(rdelBtn) rdelBtn.addEventListener('click',async()=>{ if(!confirm('Delete '+revLabel(r)+'?'))return;
       await api('revisions/'+r.id,{method:'DELETE'});
       delete peaksCache[r.id];
       players.forEach(p=>{ if(p._revId===r.id) p._revId=null; });   // drop any preloaded handle on the deleted file
