@@ -428,7 +428,7 @@ async function api(path, opts={}){
 function toast(msg,isErr){ const t=$('#toast'); t.textContent=msg; t.className='toast show'+(isErr?' err':''); clearTimeout(t._t); t._t=setTimeout(()=>t.className='toast',2600); }
 
 // ───────── auth / boot ─────────
-function showLogin(){ $('#loginView').classList.remove('hidden'); $('#mainView').classList.add('hidden'); $('#playerBar').classList.add('hidden'); }
+function showLogin(){ disconnectEvents(); $('#loginView').classList.remove('hidden'); $('#mainView').classList.add('hidden'); $('#playerBar').classList.add('hidden'); }
 $('#loginForm').addEventListener('submit',async e=>{
   e.preventDefault(); $('#loginErr').textContent='';
   try{
@@ -436,7 +436,7 @@ $('#loginForm').addEventListener('submit',async e=>{
     $('#lpass').value=''; await boot();
   }catch(err){ $('#loginErr').textContent = err.message==='unauth'?'':'Invalid credentials'; }
 });
-$('#logoutBtn').addEventListener('click',async()=>{ try{audio.pause()}catch{}; await api('logout',{method:'POST'}); ME=null; location.reload(); });
+$('#logoutBtn').addEventListener('click',async()=>{ disconnectEvents(); try{audio.pause()}catch{}; await api('logout',{method:'POST'}); ME=null; location.reload(); });
 
 const canManage = () => !!ME && (ME.role==='admin' || ME.role==='engineer'); // may run Studio on an open project
 const displayName = u => (u && (u.display_name||u.username)) || '';
@@ -451,6 +451,7 @@ async function boot(){
   $('#who').textContent=displayName(ME);
   $('#newProjectBtn').classList.toggle('hidden', ME.role!=='admin');
   applyNullVis();
+  connectEvents(); // open the realtime stream once we're authenticated (before any early return below)
   // Jump straight back into the last-opened project (the server already re-verified access on the
   // bootstrap echo); any failure (e.g. access revoked mid-flight) just drops to the project list.
   const last=data.last_project_id;
@@ -523,7 +524,10 @@ function setView(v){
 $('#nav').addEventListener('click',e=>{ const b=e.target.closest('button'); if(b&&b.dataset.view) setView(b.dataset.view); });
 
 // ───────── render player ─────────
-function render(){
+// fromEvent=true marks an SSE-driven re-render: it must NEVER pause/seek the player, even if the
+// currently-playing track vanished from the refetched list (remote delete). Local callers omit it,
+// so a track/project the USER deleted still resets the transport as before.
+function render(fromEvent){
   if(!PROJECT) return;                              // nothing to draw without an open project
   const isSong = PROJECT.type==='song';
   $('.album-prog').classList.toggle('hidden', isSong);   // a single song has no album-level progress bar
@@ -538,7 +542,9 @@ function render(){
   const list=$('#trackList'); list.innerHTML='';
   TRACKS.forEach((t,i)=>list.appendChild(trackRow(t,i)));
   // keep player selectors in sync if current track changed
-  if(curTrackId){ const t=TRACKS.find(x=>x.id===curTrackId); if(!t){ stopAll(); } else { syncPlayerSelectors(t); } }
+  if(curTrackId){ const t=TRACKS.find(x=>x.id===curTrackId);
+    if(!t){ if(!fromEvent) stopAll(); }            // event-driven vanish: leave playback alone (invariant); it self-heals
+    else syncPlayerSelectors(t); }
 }
 
 function trackRow(t,i){
@@ -1006,7 +1012,13 @@ function renderComments(){
   // notes re-render the whole list; without this an open editor would reset to the stored body).
   const liveTa=box.querySelector('.cedit-ta'); const draft=(liveTa && Number(liveTa.dataset.cid)===editingId)?liveTa.value:null;
   const liveRep=box.querySelector('.creply-ta'); const replyDraft=(liveRep && Number(liveRep.dataset.pid)===replyingId)?liveRep.value:null;
+  // If an editor/reply box is focused, remember which one + its caret so a remote-triggered re-render
+  // (an SSE 'change' landing mid-type, Phase 4) doesn't steal focus or jump the cursor.
+  const ae=document.activeElement;
+  const focused=(ae&&(ae.classList.contains('cedit-ta')||ae.classList.contains('creply-ta')))
+    ? {edit:ae.classList.contains('cedit-ta'), id:Number(ae.dataset.cid||ae.dataset.pid), s:ae.selectionStart, e:ae.selectionEnd} : null;
   let toFocus=null; // textarea to focus once it's connected — focus() is a no-op while the subtree is detached
+  let caret=null;   // [start,end] to restore on toFocus (null ⇒ first open: place caret at end)
   box.innerHTML='';
   if(!comments.length){ box.innerHTML='<div class="faint small">No notes yet.</div>'; return; }
 
@@ -1054,7 +1066,8 @@ function renderComments(){
       ta.addEventListener('keydown',e=>{ if((e.metaKey||e.ctrlKey)&&e.key==='Enter'){ e.preventDefault(); save(); } else if(e.key==='Escape'){ editingId=null; renderComments(); } });
       // Focus only when first opening the editor (draft==null); on incidental re-renders keep focus where it is.
       // Deferred to after append — the row is still detached here, and focus() does nothing while detached.
-      if(draft==null) toFocus=ta;
+      if(draft==null) toFocus=ta;                                                            // first open → caret to end
+      else if(focused && focused.edit && focused.id===c.id){ toFocus=ta; caret=[focused.s,focused.e]; }  // keep focus+caret across a remote re-render
       return div;
     }
 
@@ -1131,12 +1144,16 @@ function renderComments(){
       ed.querySelector('.rcancel').addEventListener('click',()=>{ replyingId=null; renderComments(); });
       ta.addEventListener('keydown',e=>{ if((e.metaKey||e.ctrlKey)&&e.key==='Enter'){ e.preventDefault(); save(); } else if(e.key==='Escape'){ replyingId=null; renderComments(); } });
       thread.appendChild(ed);
-      if(replyDraft==null) toFocus=ta; // focus only on first open; keep cursor on incidental re-renders
+      if(replyDraft==null) toFocus=ta;                                                              // first open
+      else if(focused && !focused.edit && focused.id===note.id){ toFocus=ta; caret=[focused.s,focused.e]; }  // keep focus+caret across a remote re-render
     }
     box.appendChild(thread);
   });
-  // Every editor is now connected; focus the freshly-opened one (edit places the cursor at end).
-  if(toFocus){ toFocus.focus(); if(toFocus.classList.contains('cedit-ta')) toFocus.setSelectionRange(toFocus.value.length, toFocus.value.length); }
+  // Every editor is now connected; focus the freshly-opened one (edit places the cursor at end),
+  // or restore the exact caret if a remote re-render interrupted typing.
+  if(toFocus){ toFocus.focus();
+    if(caret) toFocus.setSelectionRange(caret[0],caret[1]);
+    else if(toFocus.classList.contains('cedit-ta')) toFocus.setSelectionRange(toFocus.value.length, toFocus.value.length); }
 }
 async function refreshCounts(){ // light refresh of badges
   const t=trackById(panelTrackId); if(!t)return;
@@ -1184,12 +1201,13 @@ async function addTrackFn(){
   catch(e){ toast(e.message,true); }
 }
 
-// Reload the OPEN project's payload (replaces the old album-wide bootstrap reload).
-async function reload(){
+// Reload the OPEN project's payload (replaces the old album-wide bootstrap reload). fromEvent is
+// threaded through to render() so an SSE-driven reload never pauses the player on a remote delete.
+async function reload(fromEvent){
   if(!PROJECT) return;
   const data=await api('projects/'+PROJECT.id);
   PROJECT=data.project; TRACKS=data.tracks; ALBUM=PROJECT.title;
-  render(); if(VIEW==='studio') renderStudio();
+  render(fromEvent); if(VIEW==='studio') renderStudio();
 }
 
 const openStudio=new Set();
@@ -1441,6 +1459,57 @@ document.addEventListener('keydown',e=>{
   else if(e.key==='ArrowRight' && e.shiftKey){ step(1); }
   else if(e.key==='ArrowLeft' && e.shiftKey){ step(-1); }
 });
+
+// ───────── realtime (SSE, Phase 4) ─────────
+// One server→client stream per tab. Events only ever trigger a data REFETCH + re-render — the
+// player (audio elements, playhead, null test) is never seeked/loaded/paused from here. A short
+// debounce coalesces bursts (e.g. a reorder followed by a doneness change) into one resync.
+let es=null, esWasOpen=false;
+let syncProj=false, syncList=false, syncT=null;
+function scheduleSync(){ if(syncT) return; syncT=setTimeout(async()=>{ syncT=null;
+  const list=syncList, proj=syncProj; syncList=syncProj=false;
+  try{ if(list) await resyncProjects(); else if(proj) await resyncOpenProject(); }catch{}
+}, 150); }
+// A change inside a project we have OPEN → refresh its contents + the open notes panel (preserving
+// any in-progress edit/reply via renderComments' draft+caret guard). The player is left alone.
+async function resyncOpenProject(){
+  if(!PROJECT) return;
+  const wasPlaying=curTrackId;
+  try{ await reload(true); }                                             // refetch + re-render WITHOUT pausing the player
+  catch(e){
+    if(e && e.message==='unauth') return;                               // session expired: api() already showed login — don't re-show projects
+    PROJECT=null; stopAll(); setView('projects'); return;              // access revoked / project deleted → leave it (whole project gone)
+  }
+  // The very track being played was deleted remotely: per the invariant we don't touch the transport
+  // here (it keeps its buffered audio and self-heals on the next action) — just say why the row vanished.
+  if(wasPlaying && !trackById(curTrackId)) toast('The track you were playing was removed');
+  if(panelTrackId && trackById(panelTrackId)){
+    try{ comments=await api('tracks/'+panelTrackId+'/comments'); renderComments(); drawPins(); }catch{}
+  }
+}
+// The set of projects / who can see them / a user's role changed → refresh whatever's on screen and
+// re-validate the open project (a revoked member is dropped to the list by resyncOpenProject).
+async function resyncProjects(){
+  if(VIEW==='projects'){ try{ await loadProjects(); }catch{} }
+  else if(VIEW==='admin'){ try{ await renderAdmin(); }catch{} }
+  if(PROJECT) await resyncOpenProject();
+}
+function connectEvents(){
+  if(es) return;
+  try{ es=new EventSource('api/events'); }catch{ return; }
+  es.addEventListener('change',e=>{ let d={}; try{d=JSON.parse(e.data)}catch{};
+    if(VIEW==='projects'){ syncList=true; scheduleSync(); }                       // list badges reflect the change
+    else if(PROJECT && d.projectId===PROJECT.id){ syncProj=true; scheduleSync(); } // the open project changed
+  });
+  es.addEventListener('projects',()=>{ syncList=true; scheduleSync(); });
+  // 'open' fires on first connect AND every reconnect; only a RECONNECT may have missed events → resync.
+  es.addEventListener('open',()=>{ if(esWasOpen){ syncList=true; scheduleSync(); } esWasOpen=true; });
+  // A transient drop leaves readyState=CONNECTING and EventSource auto-reconnects (the 'open' above
+  // then resyncs). readyState=CLOSED means the browser gave up — a non-200 at (re)connect, i.e. the
+  // session is no longer valid — so surface the login screen instead of dangling silently.
+  es.addEventListener('error',()=>{ if(es && es.readyState===EventSource.CLOSED){ showLogin(); } });
+}
+function disconnectEvents(){ if(es){ try{es.close()}catch{} es=null; } esWasOpen=false; }
 
 // ───────── init ─────────
 (async()=>{ try{ await boot(); }catch{ showLogin(); } })();

@@ -498,6 +498,34 @@ function requireProjectEngineer(resolve) {
   };
 }
 
+// ── Realtime (SSE, Phase 4) ──────────────────────────────────
+// Server→client only; the player is NEVER driven from events. Each open EventSource is one entry
+// keyed by username; access is re-evaluated LIVE on every broadcast (mirroring liveUser) so a
+// mid-stream deactivation, role change, or membership revoke takes effect at once — the long-lived
+// connection itself is only an authentication snapshot, never a standing authorization.
+const sseClients = new Set(); // { res, username }
+const isActiveUser = username => { const u = db.prepare('SELECT active FROM users WHERE username = ?').get(username); return !!u && u.active === 1; };
+function canSeeProject(username, projectId) {
+  const u = db.prepare('SELECT role, active FROM users WHERE username = ?').get(username);
+  if (!u || u.active === 0) return false;
+  return u.role === 'admin' || isMember(username, projectId);
+}
+function sseSend(client, type, data) {
+  try { client.res.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`); }
+  catch { sseClients.delete(client); }
+}
+// A change INSIDE one project (tracks/revisions/doneness/comments/title) → only its active members
+// (+admins). projectId === null is a no-op so callers needn't guard.
+function broadcastChange(projectId) {
+  if (projectId == null) return;
+  for (const c of [...sseClients]) if (canSeeProject(c.username, projectId)) sseSend(c, 'change', { projectId });
+}
+// The SET of projects, who can see them, or a user's role/active changed → every active client
+// refetches its own server-scoped list and re-validates whatever it has open.
+function broadcastProjects() {
+  for (const c of [...sseClients]) if (isActiveUser(c.username)) sseSend(c, 'projects', {});
+}
+
 // ── Auth routes ──────────────────────────────────────────────
 app.post('/api/login', (req, res) => {
   const username = String(req.body.username || '').trim().toLowerCase();
@@ -525,6 +553,23 @@ app.post('/api/logout', (req, res) => { req.session.destroy(() => res.json({ ok:
 app.get('/api/me', (req, res) => {
   if (!liveUser(req)) return res.status(401).json({ error: 'Not authenticated' });
   res.json(req.session.user);
+});
+
+// Server-sent events: one stream per browser tab. requireAuth proves the session at connect; the
+// per-broadcast access check above re-proves it live thereafter. X-Accel-Buffering:no makes nginx
+// stream this response unbuffered (no nginx config change needed); a :heartbeat comment every ~25s
+// keeps the proxy/browser from idling the connection shut. EventSource auto-reconnects on drop.
+app.get('/api/events', requireAuth, (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders();
+  res.write('retry: 5000\n\n'); // client waits 5s before reconnecting after a drop
+  const client = { res, username: req.session.user.username };
+  sseClients.add(client);
+  const hb = setInterval(() => { try { res.write(':hb\n\n'); } catch { clearInterval(hb); sseClients.delete(client); } }, 25000);
+  req.on('close', () => { clearInterval(hb); sseClients.delete(client); });
 });
 
 // ── Bootstrap + project payloads (Phase 3b) ──────────────────
@@ -629,6 +674,7 @@ app.post('/api/projects', requireAdmin, (req, res) => {
     if (type === 'song') db.prepare('INSERT INTO tracks (title, sort_order, project_id) VALUES (?, 1, ?)').run(title, pid);
     return pid;
   })();
+  broadcastProjects(); // a new project (and any granted members) appears in everyone's scoped list
   res.json({ id });
 });
 
@@ -637,6 +683,8 @@ app.put('/api/projects/:id', requireAdmin, (req, res) => {
   const title = String(req.body.title || '').trim();
   if (!title) return res.status(400).json({ error: 'Title required' });
   db.prepare("UPDATE projects SET title = ?, updated_at = datetime('now') WHERE id = ?").run(title, req.params.id);
+  broadcastChange(Number(req.params.id)); // members viewing it get the new title
+  broadcastProjects();                    // and it re-titles in everyone's list
   res.json({ ok: true });
 });
 
@@ -653,6 +701,8 @@ app.delete('/api/projects/:id', requireAdmin, (req, res) => {
     db.prepare('DELETE FROM projects WHERE id = ?').run(pid);          // cascades project_users
   })();
   for (const r of revs) { unlinkStored(r.stored_name); unlinkStored(r.original_stored_name); }
+  // Membership is gone now, so anyone who had it open re-validates via the projects ping → 404 → list.
+  broadcastProjects();
   res.json({ ok: true });
 });
 
@@ -662,6 +712,7 @@ app.post('/api/projects/:id/users', requireAdmin, (req, res) => {
   const username = String(req.body.username || '').trim().toLowerCase();
   if (!db.prepare('SELECT 1 FROM users WHERE username = ?').get(username)) return res.status(400).json({ error: 'No such user' });
   db.prepare('INSERT OR IGNORE INTO project_users (project_id, username) VALUES (?, ?)').run(pid, username);
+  broadcastProjects(); // the newly-granted member sees the project appear in their list
   res.json({ ok: true });
 });
 
@@ -671,6 +722,7 @@ app.delete('/api/projects/:id/users/:username', requireAdmin, (req, res) => {
   db.prepare('DELETE FROM project_users WHERE project_id = ? AND username = ?').run(pid, username);
   // Drop the stale auto-open hint for the revoked user (bootstrap also filters, but keep it clean).
   db.prepare('UPDATE users SET last_project_id = NULL WHERE username = ? AND last_project_id = ?').run(username, pid);
+  broadcastProjects(); // the revoked user re-validates → dropped from the project; list updates
   res.json({ ok: true });
 });
 
@@ -692,6 +744,8 @@ app.post('/api/projects/:id/tracks', requireProjectEngineer(pParam), (req, res) 
   }
   const max = db.prepare('SELECT COALESCE(MAX(sort_order), 0) v FROM tracks WHERE project_id = ?').get(pid).v;
   const r = db.prepare('INSERT INTO tracks (title, sort_order, project_id) VALUES (?, ?, ?)').run(title, max + 1, pid);
+  broadcastChange(pid);
+  if (promoted) broadcastProjects(); // song→album: the type/title badge changes in the project list too
   res.json({ id: r.lastInsertRowid, promoted });
 });
 
@@ -699,6 +753,7 @@ app.put('/api/tracks/:id', requireProjectEngineer(pTrack), (req, res) => {
   const title = String(req.body.title || '').trim();
   if (!title) return res.status(400).json({ error: 'Title required' });
   db.prepare("UPDATE tracks SET title = ?, updated_at = datetime('now') WHERE id = ?").run(title, req.params.id);
+  broadcastChange(req.projectId);
   res.json({ ok: true });
 });
 
@@ -706,6 +761,7 @@ app.delete('/api/tracks/:id', requireProjectEngineer(pTrack), (req, res) => {
   const revs = db.prepare('SELECT stored_name, original_stored_name FROM revisions WHERE track_id = ?').all(req.params.id);
   db.prepare('DELETE FROM tracks WHERE id = ?').run(req.params.id); // cascades revisions/comments
   for (const r of revs) { unlinkStored(r.stored_name); unlinkStored(r.original_stored_name); }
+  broadcastChange(req.projectId);
   res.json({ ok: true });
 });
 
@@ -715,6 +771,7 @@ app.put('/api/projects/:id/reorder', requireProjectAccess(pParam), (req, res) =>
   const order = Array.isArray(req.body.order) ? req.body.order : [];
   const stmt = db.prepare('UPDATE tracks SET sort_order = ? WHERE id = ? AND project_id = ?');
   db.transaction(ids => ids.forEach((id, i) => stmt.run(i + 1, id, req.projectId)))(order.map(Number));
+  broadcastChange(req.projectId);
   res.json({ ok: true });
 });
 
@@ -736,6 +793,7 @@ app.put('/api/tracks/:id/doneness', requireProjectAccess(pTrack), (req, res) => 
   }
   db.prepare("UPDATE tracks SET doneness = ?, done_revision_id = ?, updated_at = datetime('now') WHERE id = ?")
     .run(d, doneRev, req.params.id);
+  broadcastChange(req.projectId);
   res.json({ ok: true, doneness: d, done_revision_id: doneRev });
 });
 
@@ -772,6 +830,7 @@ app.post('/api/tracks/:id/revisions', requireProjectEngineer(pTrack), upload.sin
            a.loud.i, a.loud.lra, a.loud.tp, a.loud.st_interval, JSON.stringify(a.loud.st),
            a.wave.peakInterval, JSON.stringify(a.wave.peakSeries));
     db.prepare("UPDATE tracks SET updated_at = datetime('now') WHERE id = ?").run(track.id);
+    broadcastChange(req.projectId); // a new revision: reviewers' "NEW", rev count, latest all change
     res.json({ id: r.lastInsertRowid, rev_number: nextRev, duration: a.duration, stored_name: a.storedName });
   } catch (e) {
     // DB write failed after files were stored — remove the now-orphaned preview + kept original.
@@ -819,11 +878,13 @@ app.post('/api/revisions/:id/replace', requireProjectEngineer(pRev), upload.sing
   // same files); unlink both.
   if (rev.stored_name !== a.storedName) unlinkStored(rev.stored_name);
   if (rev.original_stored_name && rev.original_stored_name !== a.originalStoredName) unlinkStored(rev.original_stored_name);
+  broadcastChange(req.projectId); // analysis/waveform/stored_name changed — listeners refetch metadata
   res.json({ id: rev.id, rev_number: rev.rev_number, duration: a.duration, stored_name: a.storedName });
 });
 
 app.put('/api/revisions/:id', requireProjectEngineer(pRev), (req, res) => {
   db.prepare('UPDATE revisions SET notes = ? WHERE id = ?').run(String(req.body.notes || ''), req.params.id);
+  broadcastChange(req.projectId);
   res.json({ ok: true });
 });
 
@@ -840,6 +901,7 @@ app.delete('/api/revisions/:id', requireProjectEngineer(pRev), (req, res) => {
   });
   tx();
   unlinkStored(rev.stored_name); unlinkStored(rev.original_stored_name);
+  broadcastChange(req.projectId);
   res.json({ ok: true });
 });
 
@@ -909,6 +971,7 @@ app.post('/api/tracks/:id/comments', requireProjectAccess(pTrack), (req, res) =>
   }
   const r = db.prepare('INSERT INTO comments (track_id, revision_id, author, ts, body, parent_id) VALUES (?, ?, ?, ?, ?, ?)')
     .run(req.params.id, revisionId, req.session.user.username, ts, body, parentId);
+  broadcastChange(req.projectId);
   res.json({ id: r.lastInsertRowid });
 });
 
@@ -916,9 +979,11 @@ app.put('/api/comments/:id', requireProjectAccess(pComment), (req, res) => {
   const c = db.prepare('SELECT * FROM comments WHERE id = ?').get(req.params.id);
   if (!c) return res.status(404).json({ error: 'Not found' });
   if (c.deleted_at != null) return res.status(400).json({ error: 'Note was deleted' });
+  let mutated = false;
   if (req.body.resolved !== undefined) {
     if (c.parent_id != null) return res.status(400).json({ error: 'Replies cannot be resolved' });
     db.prepare('UPDATE comments SET resolved = ? WHERE id = ?').run(req.body.resolved ? 1 : 0, req.params.id);
+    mutated = true;
   }
   if (req.body.body !== undefined) {
     if (c.author !== req.session.user.username && req.session.user.role !== 'admin') {
@@ -929,8 +994,10 @@ app.put('/api/comments/:id', requireProjectAccess(pComment), (req, res) => {
     // Only stamp edited_at when the text actually changes (avoids a no-op edit marking the note).
     if (body !== c.body) {
       db.prepare("UPDATE comments SET body = ?, edited_at = datetime('now') WHERE id = ?").run(body, req.params.id);
+      mutated = true;
     }
   }
+  if (mutated) broadcastChange(req.projectId); // a no-op edit/resolve shouldn't wake everyone's clients
   res.json({ ok: true });
 });
 
@@ -943,11 +1010,11 @@ app.delete('/api/comments/:id', requireProjectAccess(pComment), (req, res) => {
   // Soft-delete (Phase 3d): stamp deleted_at instead of removing the row, so notes are recoverable
   // and admins can review them (show_deleted_notes). A note's replies are soft-deleted with it; for
   // a reply the children UPDATE is a harmless no-op. Already-deleted rows are left as-is (idempotent).
-  const tx = db.transaction(() => {
+  const changed = db.transaction(() => {
     db.prepare("UPDATE comments SET deleted_at = datetime('now') WHERE parent_id = ? AND deleted_at IS NULL").run(req.params.id);
-    db.prepare("UPDATE comments SET deleted_at = datetime('now') WHERE id = ? AND deleted_at IS NULL").run(req.params.id);
-  });
-  tx();
+    return db.prepare("UPDATE comments SET deleted_at = datetime('now') WHERE id = ? AND deleted_at IS NULL").run(req.params.id).changes;
+  })();
+  if (changed) broadcastChange(req.projectId); // idempotent re-delete of an already-gone note: nothing to announce
   res.json({ ok: true });
 });
 
@@ -970,6 +1037,7 @@ app.post('/api/users', requireAdmin, (req, res) => {
   if (db.prepare('SELECT 1 FROM users WHERE username = ?').get(username)) return res.status(400).json({ error: 'Username already exists' });
   // pw_hash NULL ⇒ TOFU: the new user's first login sets their password.
   db.prepare('INSERT INTO users (username, role, display_name, active) VALUES (?, ?, ?, 1)').run(username, role, display_name);
+  broadcastProjects(); // keep other admins' user tables in sync
   res.json({ ok: true });
 });
 
@@ -977,6 +1045,7 @@ app.post('/api/users/:u/reset', requireAdmin, (req, res) => {
   const username = String(req.params.u).trim().toLowerCase();
   if (!db.prepare('SELECT 1 FROM users WHERE username = ?').get(username)) return res.status(404).json({ error: 'Not found' });
   db.prepare('UPDATE users SET pw_hash = NULL WHERE username = ?').run(username); // back to TOFU
+  broadcastProjects(); // refresh the "password pending" pill on other admins' user tables
   res.json({ ok: true });
 });
 
@@ -997,6 +1066,9 @@ app.put('/api/users/:u', requireAdmin, (req, res) => {
   db.prepare('UPDATE users SET role = ?, active = ?, display_name = ? WHERE username = ?').run(role, active, display_name, username);
   // If admins edit their own role/name, refresh their live session so the UI stays in sync.
   if (username === req.session.user.username) req.session.user = sessionUser({ username, role, display_name });
+  // Role/active changes ripple through access (engineer↔client gating, deactivation) and the admin
+  // user table — every client re-validates its scoped view.
+  broadcastProjects();
   res.json({ ok: true });
 });
 
