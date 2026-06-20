@@ -13,8 +13,11 @@ const app = express();
 const PORT = process.env.PORT || 3458;
 
 // ── Directories ──────────────────────────────────────────────
-const DATA_DIR = path.join(__dirname, 'data');
-const UPLOADS_DIR = path.join(__dirname, 'uploads');
+// Env-overridable so a throwaway test instance can point at a temp DB/uploads dir
+// (DATA_DIR=/tmp/at-test/data UPLOADS_DIR=/tmp/at-test/uploads PORT=3999 node server.js)
+// without touching the live store. Unset in prod ⇒ the original __dirname paths.
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
+const UPLOADS_DIR = process.env.UPLOADS_DIR || path.join(__dirname, 'uploads');
 fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 
@@ -81,14 +84,42 @@ db.exec(`
     last_seen_rev INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (username, track_id)
   );
+
+  -- Phase 3a: projects model. A project owns a set of tracks; 'song' holds exactly one
+  -- track (no album title/ordering UI), 'album' holds many. art_stored_name backs album
+  -- art (singles + albums). The existing single album is folded in via the backfill below.
+  CREATE TABLE IF NOT EXISTS projects (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    type            TEXT NOT NULL DEFAULT 'album',      -- 'album' | 'song'
+    media_type      TEXT NOT NULL DEFAULT 'audio',      -- 'audio' | 'video'
+    title           TEXT NOT NULL,
+    art_stored_name TEXT,
+    owner           TEXT,                               -- engineer/admin who created it
+    created_at      TEXT DEFAULT (datetime('now')),
+    updated_at      TEXT DEFAULT (datetime('now'))
+  );
+
+  -- Access control: which users can reach which projects. Membership rows cascade away with
+  -- the project (new table ⇒ real FK, unlike the ALTER-added columns below). No FK on
+  -- username — users are deactivated, never hard-deleted, so memberships outlive nothing.
+  CREATE TABLE IF NOT EXISTS project_users (
+    project_id INTEGER NOT NULL,
+    username   TEXT NOT NULL,
+    PRIMARY KEY (project_id, username),
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+  );
 `);
 
-// Seed users (TOFU — pw_hash stays NULL until first login sets it)
-const seedUser = db.prepare('INSERT OR IGNORE INTO users (username, role) VALUES (?, ?)');
-seedUser.run('james', 'admin');
-seedUser.run('noah', 'artist');
+// Seed the initial admin (TOFU — pw_hash stays NULL until first login sets it).
+// A fresh install gets exactly one admin from ADMIN_USER (default 'james'); everyone else is
+// added later via the admin UI (Phase 3b/3c). On the existing prod DB this is a no-op (james
+// already exists), and noah is no longer seeded here — it already exists, and its legacy
+// 'artist' role is migrated to 'client' in the backfill below.
+const ADMIN_USER = (process.env.ADMIN_USER || 'james').trim().toLowerCase();
+db.prepare('INSERT OR IGNORE INTO users (username, role) VALUES (?, ?)').run(ADMIN_USER, 'admin');
 
-// Seed album title
+// Seed album title. Still read/written by the legacy /api/album + bootstrap routes until they
+// move to projects.title in Phase 3b/3c; the backfill copies it into the migrated album project.
 db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('album_title', ?)")
   .run('Noah Praise God — Album');
 
@@ -115,6 +146,53 @@ db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('album_title', ?
   if (!cols.includes('edited_at')) db.exec('ALTER TABLE comments ADD COLUMN edited_at TEXT');
   if (!cols.includes('parent_id')) db.exec('ALTER TABLE comments ADD COLUMN parent_id INTEGER');
 }
+
+// Migration (Phase 3a): projects model — new columns on existing tables.
+//   users.display_name — friendly name for the UI (NULL ⇒ fall back to username).
+//   users.active       — 0 deactivates login without hard-deleting (keeps authored comments).
+//   tracks.project_id  — which project a track belongs to. Bare INTEGER, no FK — deliberately
+//                        matching the comments.parent_id choice above: columns added via ALTER
+//                        get explicit cleanup in their routes, not a retro-fitted FK. So project
+//                        delete (Phase 3b) must cascade tracks→revisions→comments explicitly.
+{
+  const ucols = db.prepare('PRAGMA table_info(users)').all().map(c => c.name);
+  if (!ucols.includes('display_name')) db.exec('ALTER TABLE users ADD COLUMN display_name TEXT');
+  if (!ucols.includes('active')) db.exec('ALTER TABLE users ADD COLUMN active INTEGER NOT NULL DEFAULT 1');
+  const tcols = db.prepare('PRAGMA table_info(tracks)').all().map(c => c.name);
+  if (!tcols.includes('project_id')) db.exec('ALTER TABLE tracks ADD COLUMN project_id INTEGER');
+}
+
+// Indexes for the project-scoped lookups added in Phase 3b (membership-by-user, tracks-by-project).
+// Created after the ALTER above so tracks.project_id exists; idempotent.
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_tracks_project ON tracks(project_id);
+  CREATE INDEX IF NOT EXISTS idx_project_users_user ON project_users(username);
+`);
+
+// One-time backfill (Phase 3a): fold the original single album into the projects model.
+// Self-protecting + idempotent — it only fires when no project exists yet AND there are legacy
+// tracks with no project_id (i.e. exactly the pre-Phase-3 prod DB). A fresh install (no tracks)
+// creates nothing; once a project exists this branch is never taken again. The role rename runs
+// unconditionally but is itself idempotent (only matches rows still tagged 'artist').
+db.transaction(() => {
+  // artist→client. Safe to run before the frontend understands 'client': nothing keys off the
+  // 'artist' string — authorization checks only ever test role === 'admin'.
+  db.prepare("UPDATE users SET role = 'client' WHERE role = 'artist'").run();
+
+  const haveProjects = db.prepare('SELECT COUNT(*) AS v FROM projects').get().v;
+  const orphanTracks = db.prepare('SELECT COUNT(*) AS v FROM tracks WHERE project_id IS NULL').get().v;
+  if (!haveProjects && orphanTracks > 0) {
+    const title = db.prepare("SELECT value FROM settings WHERE key = 'album_title'").get()?.value || 'Album';
+    const owner = db.prepare("SELECT username FROM users WHERE role = 'admin' ORDER BY created_at, username LIMIT 1").get()?.username || ADMIN_USER;
+    const pid = db.prepare("INSERT INTO projects (type, media_type, title, owner) VALUES ('album', 'audio', ?, ?)")
+      .run(title, owner).lastInsertRowid;
+    db.prepare('UPDATE tracks SET project_id = ? WHERE project_id IS NULL').run(pid);
+    // Grant every existing user access to the migrated album (james + noah today).
+    const grant = db.prepare('INSERT OR IGNORE INTO project_users (project_id, username) VALUES (?, ?)');
+    for (const u of db.prepare('SELECT username FROM users').all()) grant.run(pid, u.username);
+    console.log(`[migrate 3a] folded ${orphanTracks} track(s) into album project #${pid} "${title}" (owner ${owner})`);
+  }
+})();
 
 // ── Auth (trust-on-first-use) ────────────────────────────────
 function hashPassword(pw) {
