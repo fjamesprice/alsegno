@@ -46,6 +46,21 @@
   .login-card .btn{width:100%}
   .login-err{color:var(--danger);font-size:13px;min-height:18px;margin-top:10px;text-align:center}
 
+  /* Modal (e.g. new-project form) + segmented control */
+  .modal-bg{position:fixed;inset:0;z-index:80;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:24px}
+  .modal-card{width:100%;max-width:440px;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:24px 24px 20px;box-shadow:0 18px 50px rgba(0,0,0,.5)}
+  .modal-card h2{font-size:17px;margin:0 0 18px;font-weight:600}
+  .mfield{margin-bottom:16px}
+  .mfield > label{display:block;font-size:13px;color:var(--muted);margin-bottom:7px}
+  .mfield input[type=text]{width:100%}
+  .segctl{display:flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--panel2)}
+  .segctl button{flex:1;padding:9px 10px;color:var(--muted);font-size:13px;border-right:1px solid var(--line);transition:.12s}
+  .segctl button:last-child{border-right:none}
+  .segctl button:hover{color:var(--text)}
+  .segctl button.on{background:var(--accent2);color:#fff;font-weight:600}
+  .modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:22px}
+  .badge.media{background:rgba(122,162,255,.16);color:var(--accent);border:1px solid var(--accent);text-transform:uppercase}
+
   /* Layout */
   #mainView{max-width:940px;margin:0 auto;padding:0 16px 180px}
   .topbar{position:sticky;top:0;z-index:20;background:rgba(13,14,18,.86);backdrop-filter:blur(10px);
@@ -395,6 +410,35 @@
 <audio id="audioB" preload="auto"></audio>
 <div class="toast" id="toast"></div>
 
+<!-- New-project modal — one form (name + kind + media type) replacing chained confirm()/prompt() -->
+<div id="newProjModal" class="modal-bg hidden">
+  <div class="modal-card" role="dialog" aria-modal="true" aria-label="New project">
+    <h2>New project</h2>
+    <div class="mfield">
+      <label for="npName">Project name</label>
+      <input type="text" id="npName" placeholder="e.g. a song title, or an album / EP name" autocomplete="off">
+    </div>
+    <div class="mfield">
+      <label>Kind</label>
+      <div class="segctl" id="npKind">
+        <button type="button" data-v="song">Single track</button>
+        <button type="button" data-v="album">Album (multiple tracks)</button>
+      </div>
+    </div>
+    <div class="mfield hidden" id="npMediaField">
+      <label>Media type</label>
+      <div class="segctl" id="npMedia">
+        <button type="button" data-v="audio">Audio</button>
+        <button type="button" data-v="video">Video</button>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn ghost" type="button" id="npCancel">Cancel</button>
+      <button class="btn primary" type="button" id="npCreate">Create project</button>
+    </div>
+  </div>
+</div>
+
 <script>
 "use strict";
 const $ = s => document.querySelector(s);
@@ -512,7 +556,7 @@ function renderProjects(){
     const open=p.open_comment_count?`<span>💬 ${p.open_comment_count} open</span>`:'';
     card.innerHTML=`
       <div class="pt">
-        <div class="pname"><span class="nm">${esc(p.title)}</span>${unseen}<span class="badge type">${esc(p.type)}</span>${p.media_type==='video'?'<span class="badge type">video</span>':''}</div>
+        <div class="pname"><span class="nm">${esc(p.title)}</span>${unseen}<span class="badge type">${p.type==='album'?'album':'single'}</span>${p.media_type==='video'?'<span class="badge media">video</span>':''}</div>
         <div class="pmeta"><span>${p.track_count} track${p.track_count===1?'':'s'}</span>${open}</div>
       </div>
       <div class="pprog">
@@ -1490,18 +1534,36 @@ $('#auAdd').addEventListener('click',async()=>{
   catch(e){ toast(e.message,true); }
 });
 $('#newProjectBtn').addEventListener('click',newProjectFlow);
-async function newProjectFlow(){
-  const type = confirm('Create which kind of project?\n\nOK = Album (multiple tracks)\nCancel = Single song')? 'album':'song';
-  const title = prompt(type==='album'?'Album title:':'Song title:'); if(title===null||!title.trim())return;
-  // Video is opt-in per instance (video_enabled). When off, projects are always audio.
-  const media_type = VIDEO_ENABLED && confirm('Media type for this project?\n\nOK = Video\nCancel = Audio') ? 'video' : 'audio';
+// New-project modal — a single form (name + kind + media type) instead of chained native dialogs.
+function segValue(id){ const b=$('#'+id+' button.on'); return b?b.dataset.v:null; }
+function setSeg(id,val){ $$('#'+id+' button').forEach(b=>b.classList.toggle('on', b.dataset.v===val)); }
+['npKind','npMedia'].forEach(id=>{ const box=$('#'+id);
+  box.addEventListener('click',e=>{ const b=e.target.closest('button'); if(b) setSeg(id,b.dataset.v); }); });
+let npAfter='projects';   // where to refresh after creating (the projects list vs the admin page)
+function newProjectFlow(){
+  npAfter = VIEW==='admin' ? 'admin' : 'projects';
+  $('#npName').value=''; setSeg('npKind','song'); setSeg('npMedia','audio');
+  $('#npMediaField').classList.toggle('hidden', !VIDEO_ENABLED);   // media choice only when video is enabled
+  $('#newProjModal').classList.remove('hidden');
+  setTimeout(()=>$('#npName').focus(),0);
+}
+function closeNewProject(){ $('#newProjModal').classList.add('hidden'); }
+$('#npCancel').addEventListener('click',closeNewProject);
+$('#newProjModal').addEventListener('click',e=>{ if(e.target===$('#newProjModal')) closeNewProject(); }); // click backdrop
+$('#npName').addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); $('#npCreate').click(); } });
+document.addEventListener('keydown',e=>{ if(e.key==='Escape' && !$('#newProjModal').classList.contains('hidden')) closeNewProject(); });
+$('#npCreate').addEventListener('click',async()=>{
+  const title=$('#npName').value.trim(); if(!title){ $('#npName').focus(); return; }
+  const type=segValue('npKind')||'song';
+  const media_type=(VIDEO_ENABLED && segValue('npMedia')==='video') ? 'video' : 'audio';
   try{
-    const r=await api('projects',{method:'POST',body:{type,title:title.trim(),media_type}});
-    toast(type==='album'?'Album created':'Song created');
-    if(VIEW==='admin'){ renderAdmin(); }
+    const r=await api('projects',{method:'POST',body:{type,title,media_type}});
+    closeNewProject();
+    toast(type==='album'?'Album created':'Project created');
+    if(npAfter==='admin') renderAdmin();
     else { await loadProjects(); if(r&&r.id) await openProject(r.id); }
   }catch(e){ toast(e.message,true); }
-}
+});
 
 // ───────── keyboard ─────────
 document.addEventListener('keydown',e=>{
