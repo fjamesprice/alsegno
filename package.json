@@ -1,0 +1,16 @@
+{
+  "name": "album-tracker",
+  "version": "1.0.0",
+  "description": "Mix/master revision tracker for Noah Praise God's album",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.6.0",
+    "dotenv": "^17.3.0",
+    "express": "^5.2.0",
+    "express-session": "^1.18.0",
+    "multer": "^2.1.0"
+  }
+}

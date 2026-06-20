@@ -1,0 +1,27 @@
+# ── Secrets / environment ──────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── Live runtime data (NEVER commit — real user data) ──
+data/
+uploads/
+
+# ── Dependencies ───────────────────────────────────────
+node_modules/
+
+# ── Local Claude Code state (machine-specific) ─────────
+.claude/settings.local.json
+.claude/*.lock
+
+# ── Logs / OS / editor cruft ───────────────────────────
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+*.swp
+
+# ── Local docs / planning (kept on disk, not in the repo) ──
+app-stuff.md
+CLAUDE.md
+ROADMAP.md

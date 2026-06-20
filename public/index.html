@@ -1,0 +1,1071 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0d0e12">
+<title>Album Tracker</title>
+<style>
+  :root{
+    --bg:#0d0e12; --panel:#15171f; --panel2:#1b1e29; --line:#272b38;
+    --text:#e8eaf0; --muted:#9aa0b4; --faint:#666c80;
+    --accent:#7aa2ff; --accent2:#5b86ff; --done:#3ad29f; --warn:#e3b341; --danger:#f0626b;
+    --radius:12px;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{
+    background:var(--bg); color:var(--text);
+    font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  button{font:inherit;color:inherit;cursor:pointer;border:none;background:none}
+  input,textarea,select{font:inherit;color:var(--text);background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:9px 11px;outline:none}
+  input:focus,textarea:focus,select:focus{border-color:var(--accent)}
+  textarea{resize:vertical;width:100%}
+  .btn{background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:8px 14px;color:var(--text);transition:.12s;white-space:nowrap}
+  .btn:hover{border-color:var(--accent);color:#fff}
+  .btn.primary{background:var(--accent2);border-color:var(--accent2);color:#fff;font-weight:600}
+  .btn.primary:hover{background:#6f93ff}
+  .btn.ghost{background:none;border:none;color:var(--muted);padding:6px 8px}
+  .btn.ghost:hover{color:var(--text)}
+  .btn.sm{padding:5px 10px;font-size:13px;border-radius:7px}
+  .btn:disabled{opacity:.45;cursor:default}
+  .danger{color:var(--danger)}
+  a{color:var(--accent)}
+  .hidden{display:none!important}
+  .row{display:flex;align-items:center;gap:10px}
+  .muted{color:var(--muted)} .faint{color:var(--faint)} .small{font-size:13px}
+
+  /* Login */
+  #loginView{min-height:100%;display:flex;align-items:center;justify-content:center;padding:24px}
+  .login-card{width:100%;max-width:340px;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:30px 26px}
+  .login-card h1{font-size:19px;margin:0 0 4px;font-weight:600}
+  .login-card .sub{color:var(--faint);font-size:13px;margin:0 0 22px}
+  .login-card input{width:100%;margin-bottom:12px}
+  .login-card .btn{width:100%}
+  .login-err{color:var(--danger);font-size:13px;min-height:18px;margin-top:10px;text-align:center}
+
+  /* Layout */
+  #mainView{max-width:940px;margin:0 auto;padding:0 16px 180px}
+  .topbar{position:sticky;top:0;z-index:20;background:rgba(13,14,18,.86);backdrop-filter:blur(10px);
+    display:flex;align-items:center;gap:14px;padding:14px 4px;margin-bottom:8px;border-bottom:1px solid var(--line)}
+  .topbar .title{font-weight:600;font-size:16px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .nav{display:flex;gap:4px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:3px}
+  .nav button{padding:6px 14px;border-radius:7px;color:var(--muted);font-size:14px}
+  .nav button.active{background:var(--accent2);color:#fff}
+  .who{font-size:13px;color:var(--muted)}
+
+  /* Album progress */
+  .album-prog{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:14px 16px;margin:10px 0 16px}
+  .album-prog .lbl{display:flex;justify-content:space-between;font-size:13px;color:var(--muted);margin-bottom:8px}
+  .barwrap{height:8px;background:#0a0b0f;border-radius:6px;overflow:hidden}
+  .barwrap > i{display:block;height:100%;background:linear-gradient(90deg,var(--accent2),var(--done));border-radius:6px;transition:width .3s}
+
+  /* Track list */
+  .tracks{display:flex;flex-direction:column;gap:8px}
+  .track{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:11px 12px;display:flex;align-items:center;gap:11px}
+  .track.playing{border-color:var(--accent)}
+  .track.dragging{opacity:.4}
+  .track.dragover{border-color:var(--accent);border-style:dashed}
+  .handle{color:var(--faint);cursor:grab;font-size:18px;line-height:1;user-select:none;padding:2px}
+  .ord{display:flex;flex-direction:column;gap:2px}
+  .ord button{font-size:10px;line-height:1;color:var(--faint);padding:1px 3px}
+  .ord button:hover{color:var(--text)}
+  .num{width:22px;text-align:center;color:var(--muted);font-variant-numeric:tabular-nums}
+  .play-btn{width:40px;height:40px;border-radius:50%;background:var(--panel2);border:1px solid var(--line);display:flex;align-items:center;justify-content:center;font-size:15px;flex:none}
+  .play-btn:hover{border-color:var(--accent);color:#fff}
+  .play-btn.on{background:var(--accent2);border-color:var(--accent2);color:#fff}
+  .tmid{flex:1;min-width:0}
+  .tname{font-weight:600;display:flex;align-items:center;gap:8px;min-width:0}
+  .tname span.nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .badge{font-size:10.5px;font-weight:700;letter-spacing:.4px;padding:2px 6px;border-radius:5px;flex:none}
+  .badge.new{background:var(--accent);color:#0b1020}
+  .badge.done{background:rgba(58,210,159,.16);color:var(--done)}
+  .badge.rev{background:var(--panel2);color:var(--muted);border:1px solid var(--line)}
+  .tmeta{font-size:12px;color:var(--faint);margin-top:2px;display:flex;gap:10px;flex-wrap:wrap}
+  .tmeta .cc{cursor:pointer} .tmeta .cc:hover{color:var(--muted)}
+  /* doneness */
+  .done-ctl{display:flex;flex-direction:column;align-items:flex-end;gap:5px;width:160px;flex:none}
+  .done-ctl .dl{font-size:11.5px;color:var(--muted)}
+  .done-ctl input[type=range]{width:150px}
+  input[type=range]{-webkit-appearance:none;appearance:none;height:6px;border-radius:5px;background:#0a0b0f;border:none;padding:0}
+  input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:15px;height:15px;border-radius:50%;background:var(--accent);border:2px solid #0d0e12;cursor:pointer}
+  input[type=range]::-moz-range-thumb{width:15px;height:15px;border-radius:50%;background:var(--accent);border:2px solid #0d0e12;cursor:pointer}
+  .dbar{height:5px;width:150px;background:#0a0b0f;border-radius:4px;overflow:hidden}
+  .dbar>i{display:block;height:100%;background:linear-gradient(90deg,var(--accent2),var(--done))}
+
+  /* Player bar */
+  #playerBar{position:fixed;left:0;right:0;bottom:0;z-index:30;background:rgba(18,20,28,.97);backdrop-filter:blur(12px);border-top:1px solid var(--line)}
+  .pb-inner{max-width:940px;margin:0 auto;padding:10px 16px calc(10px + env(safe-area-inset-bottom))}
+  .wave-wrap{position:relative;height:64px;margin-bottom:8px}
+  #wave{width:100%;height:100%;display:block;border-radius:8px;background:var(--panel);cursor:pointer}
+  .pins{position:absolute;inset:0;pointer-events:none}
+  .pin{position:absolute;top:-2px;transform:translateX(-50%);pointer-events:auto;cursor:pointer;font-size:11px;color:var(--warn)}
+  .pin:hover{color:#fff}
+  .pb-controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .transport{display:flex;align-items:center;gap:6px}
+  .tbtn{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:14px;background:var(--panel2);border:1px solid var(--line)}
+  .tbtn:hover{border-color:var(--accent);color:#fff}
+  .tbtn.big{width:42px;height:42px;background:var(--accent2);border-color:var(--accent2);color:#fff;font-size:16px}
+  .time{font-variant-numeric:tabular-nums;font-size:13px;color:var(--muted);min-width:88px}
+  .nowtitle{font-weight:600;flex:1;min-width:90px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .seg{display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--muted)}
+  .seg select{padding:5px 7px;font-size:12.5px}
+  .toggle{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:var(--muted);cursor:pointer;user-select:none}
+  .nullbox{display:flex;align-items:center;gap:8px;font-size:12.5px;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:5px 9px}
+  .nullbox.on{border-color:var(--warn)}
+  .nullbox .nb-btn.on{color:var(--warn);font-weight:700}
+  .pb-empty{color:var(--faint);text-align:center;padding:14px;font-size:14px}
+  /* meters */
+  .meters{display:flex;gap:16px;flex-wrap:wrap;margin:9px 0 3px}
+  .meter{display:flex;align-items:center;gap:8px;flex:1;min-width:240px}
+  .mk{color:var(--faint);font-weight:700;letter-spacing:.6px;font-size:10.5px;width:32px;flex:none}
+  .mbar{position:relative;flex:1;height:9px;border-radius:5px;overflow:hidden;background:#0a0b0f}
+  .mbar.peak{background:linear-gradient(90deg,#2c7d61 0%,#3ad29f 58%,var(--warn) 82%,var(--danger) 97%)}
+  .mbar.lufs{background:linear-gradient(90deg,#39406a 0%,#5b86ff 70%,#3ad29f 100%)}
+  .mbar .cover{position:absolute;right:0;top:0;bottom:0;width:100%;background:#0a0b0f}
+  .mbar .hold{position:absolute;top:0;bottom:0;width:2px;background:#fff;opacity:.85;left:0;display:none}
+  .mbar .tick{position:absolute;top:0;bottom:0;width:1px;background:#0d0e12;opacity:.85}
+  .mv{color:var(--muted);font-variant-numeric:tabular-nums;font-size:11.5px;white-space:nowrap;min-width:178px;text-align:right}
+  .srev .sl{font-size:11.5px;color:var(--muted);font-variant-numeric:tabular-nums;margin-top:5px}
+  .note-mini{font-size:12.5px;color:var(--muted);margin-top:7px;border-left:2px solid var(--line);padding-left:9px}
+
+  /* Comments */
+  .cpanel{margin-top:14px;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:14px 16px}
+  .cpanel h3{font-size:14px;margin:0 0 10px;font-weight:600;display:flex;align-items:center;gap:8px}
+  .clist{display:flex;flex-direction:column;gap:9px;margin-bottom:12px}
+  .cmt{display:flex;gap:9px;font-size:13.5px;padding:8px 10px;background:var(--panel2);border-radius:9px;border:1px solid transparent}
+  .cmt.resolved{opacity:.5}
+  .cmt.cur{border-color:var(--line)}
+  .cmt .tsbtn{flex:none;font-variant-numeric:tabular-nums;color:var(--warn);background:rgba(227,179,65,.12);border-radius:6px;padding:2px 7px;font-size:12px;height:fit-content}
+  .cmt .gen{flex:none;color:var(--faint);font-size:12px;padding:2px 4px}
+  .cmt .cbody{flex:1;min-width:0;word-wrap:break-word}
+  .cmt .cwho{font-weight:600;margin-right:6px}
+  .cmt .cwho.james{color:var(--accent)} .cmt .cwho.noah{color:var(--done)}
+  .cmt .crev{font-size:11px;color:var(--faint)}
+  .cmt .cact{display:flex;gap:6px;flex:none;opacity:.0;transition:.1s}
+  .cmt:hover .cact{opacity:1}
+  .cmt .cact button{font-size:11.5px;color:var(--faint)} .cmt .cact button:hover{color:var(--text)}
+  .cmt .cedit{font-size:11px;color:var(--faint);font-style:italic;margin-left:6px;white-space:nowrap}
+  .cmt .cedit-ta{display:block;width:100%;box-sizing:border-box;margin-top:6px;font:inherit;font-size:13.5px;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:7px;padding:6px 8px;resize:vertical}
+  .addc{display:flex;flex-direction:column;gap:8px}
+  .addc .arow{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+
+  /* Studio */
+  .stx{display:flex;flex-direction:column;gap:14px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:16px}
+  .card h2{font-size:15px;margin:0 0 12px;font-weight:600}
+  .strack{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden}
+  .strack-h{display:flex;align-items:center;gap:10px;padding:13px 15px;cursor:pointer}
+  .strack-h .stitle{font-weight:600;flex:1}
+  .strack-h .chev{color:var(--faint);transition:.15s}
+  .strack-h.open .chev{transform:rotate(90deg)}
+  .strack-body{padding:0 15px 15px;border-top:1px solid var(--line);display:flex;flex-direction:column;gap:12px}
+  .srev{background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:11px 12px}
+  .srev .sr-h{display:flex;align-items:center;gap:9px;margin-bottom:7px}
+  .srev .sr-h .rn{font-weight:600}
+  .uploader{display:flex;flex-direction:column;gap:9px;background:var(--panel2);border:1px dashed var(--line);border-radius:10px;padding:13px}
+  .field{display:flex;flex-direction:column;gap:5px}
+  .field label{font-size:12.5px;color:var(--muted)}
+  .toast{position:fixed;bottom:96px;left:50%;transform:translateX(-50%);background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:10px 16px;z-index:60;font-size:14px;box-shadow:0 8px 30px rgba(0,0,0,.5);opacity:0;transition:.2s;pointer-events:none}
+  .toast.show{opacity:1}
+  .toast.err{border-color:var(--danger);color:#ffd7da}
+  .spin{display:inline-block;width:14px;height:14px;border:2px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:sp .7s linear infinite;vertical-align:-2px}
+  @keyframes sp{to{transform:rotate(360deg)}}
+
+  @media(max-width:620px){
+    .done-ctl{width:120px} .done-ctl input[type=range],.dbar{width:110px}
+    .track{flex-wrap:wrap} .topbar .title{font-size:14px}
+    .nav button{padding:6px 10px}
+  }
+</style>
+</head>
+<body>
+
+<!-- ───────── LOGIN ───────── -->
+<div id="loginView" class="hidden">
+  <form class="login-card" id="loginForm">
+    <h1>Album Tracker</h1>
+    <p class="sub">Sign in</p>
+    <input id="luser" name="username" placeholder="Username" autocomplete="username" autocapitalize="none" spellcheck="false">
+    <input id="lpass" name="password" type="password" placeholder="Password" autocomplete="current-password">
+    <button class="btn primary" type="submit">Sign in</button>
+    <div class="login-err" id="loginErr"></div>
+  </form>
+</div>
+
+<!-- ───────── MAIN ───────── -->
+<div id="mainView" class="hidden">
+  <div class="topbar">
+    <div class="title" id="albumTitle">Album</div>
+    <div class="nav" id="nav">
+      <button data-view="player" class="active">Player</button>
+      <button data-view="studio" id="navStudio">Studio</button>
+    </div>
+    <span class="who" id="who"></span>
+    <button class="btn ghost sm" id="logoutBtn">Sign out</button>
+  </div>
+
+  <!-- PLAYER VIEW -->
+  <div id="playerView">
+    <div class="album-prog">
+      <div class="lbl"><span id="apDone">0 / 0 done</span><span id="apAvg">0%</span></div>
+      <div class="barwrap"><i id="apBar" style="width:0%"></i></div>
+    </div>
+    <div class="tracks" id="trackList"></div>
+    <div id="emptyHint" class="pb-empty hidden">No tracks yet. James can add them in the Studio tab.</div>
+
+    <!-- comments for currently-open track -->
+    <div class="cpanel hidden" id="cpanel">
+      <h3 id="cTitle">Notes</h3>
+      <div class="clist" id="clist"></div>
+      <div class="addc">
+        <textarea id="cInput" rows="2" placeholder="Leave a note…"></textarea>
+        <div class="arow">
+          <label class="toggle"><input type="checkbox" id="cPin"> Pin at <b id="cPinTime" style="margin-left:3px">0:00</b></label>
+          <span class="faint small" id="cRevTag"></span>
+          <button class="btn primary sm" id="cSend" style="margin-left:auto">Post note</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- STUDIO VIEW -->
+  <div id="studioView" class="hidden">
+    <div class="stx">
+      <div class="card">
+        <h2>Album</h2>
+        <div class="row">
+          <input id="albInput" style="flex:1" placeholder="Album title">
+          <button class="btn" id="albSave">Save</button>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Add a track</h2>
+        <div class="row">
+          <input id="newTrack" style="flex:1" placeholder="Track title">
+          <button class="btn primary" id="addTrack">Add track</button>
+        </div>
+      </div>
+      <div id="studioTracks" class="stx"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ───────── PLAYER BAR ───────── -->
+<div id="playerBar" class="hidden">
+  <div class="pb-inner">
+    <div id="pbEmpty" class="pb-empty">Select a track to play</div>
+    <div id="pbActive" class="hidden">
+      <div class="wave-wrap">
+        <canvas id="wave"></canvas>
+        <div class="pins" id="pins"></div>
+      </div>
+      <div class="meters" id="meters">
+        <div class="meter">
+          <span class="mk">PEAK</span>
+          <div class="mbar peak"><span class="cover" id="peakCover"></span><span class="hold" id="peakHold"></span></div>
+          <span class="mv" id="peakVal">—</span>
+        </div>
+        <div class="meter">
+          <span class="mk">LUFS</span>
+          <div class="mbar lufs"><span class="cover" id="lufsCover"></span><span class="tick" id="lufsTick"></span></div>
+          <span class="mv" id="lufsVal">—</span>
+        </div>
+      </div>
+      <div class="pb-controls">
+        <div class="transport">
+          <button class="tbtn" id="prevBtn" title="Previous">⏮</button>
+          <button class="tbtn big" id="playBtn" title="Play/Pause (space)">▶</button>
+          <button class="tbtn" id="nextBtn" title="Next">⏭</button>
+        </div>
+        <span class="time" id="timeLbl">0:00 / 0:00</span>
+        <span class="seg vol" title="Volume">🔊<input type="range" id="vol" min="0" max="100" value="100" style="width:78px"></span>
+        <span class="nowtitle" id="nowTitle"></span>
+        <span class="seg">Playing
+          <select id="revSel"></select>
+        </span>
+        <button class="btn ghost sm" id="swapBtn" title="Swap A/B at same spot">⇄</button>
+        <div class="nullbox" id="nullBox">
+          <button class="nb-btn" id="nullToggle" title="Null test: hear only what changed">⊘ Null vs</button>
+          <select id="cmpSel"></select>
+          <span id="boostWrap" class="row hidden" style="gap:6px">
+            <input type="range" id="boost" min="0" max="40" value="12" style="width:80px">
+            <span id="boostLbl" class="faint">+12 dB</span>
+          </span>
+        </div>
+        <label class="toggle" title="Auto-advance: when a track finishes, automatically play the next track in the list."><input type="checkbox" id="autoAdv"> Auto-advance</label>
+        <button class="btn ghost sm" id="dlBtn" title="Download preview MP3">⬇</button>
+      </div>
+      <div class="note-mini hidden" id="revNote"></div>
+      <div class="note-mini hidden" id="nullHint" style="border-color:var(--warn);color:var(--warn)"></div>
+    </div>
+  </div>
+</div>
+
+<audio id="audioA" preload="auto"></audio>
+<audio id="audioB" preload="auto"></audio>
+<div class="toast" id="toast"></div>
+
+<script>
+"use strict";
+const $ = s => document.querySelector(s);
+const $$ = s => Array.from(document.querySelectorAll(s));
+const esc = s => String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmt = t => { if(!isFinite(t)||t<0)t=0; const m=Math.floor(t/60),s=Math.floor(t%60); return m+':'+String(s).padStart(2,'0'); };
+// SQLite UTC timestamp ("YYYY-MM-DD HH:MM:SS") → compact local datetime
+const fmtDate = s => { if(!s) return ''; const d=new Date(String(s).replace(' ','T')+'Z'); return isNaN(d)?String(s):d.toLocaleString([],{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}); };
+
+let ME=null, TRACKS=[], ALBUM='Album', VIEW='player';
+let curTrackId=null, curRevId=null;           // what's loaded in the player
+const peaksCache={};                           // revId -> {duration,peaks}
+let comments=[];                               // comments for the open track
+let panelTrackId=null;                         // track whose comments are shown in the panel
+let editingId=null;                            // id of the note currently being edited inline
+let autoAdvance=false;
+// Two audio elements so revision switches can crossfade gaplessly. `audio` always
+// points at the active element; the inactive one preloads the compare revision.
+const players=[document.getElementById('audioA'), document.getElementById('audioB')];
+let act=0, audio=players[0];
+let userVol = (()=>{ const v=parseFloat(localStorage.getItem('at_vol')); return isFinite(v)?v:1; })();
+let crossing=false, xfRaf=null, pendingRev=null;
+let peakMaxHold=-Infinity;   // peak meter max-hold (resets on revision/track load)
+
+// ───────── API ─────────
+async function api(path, opts={}){
+  const o={headers:{},...opts};
+  if(o.body && !(o.body instanceof FormData)){ o.headers['Content-Type']='application/json'; o.body=JSON.stringify(o.body); }
+  const res=await fetch('api/'+path,o);
+  if(res.status===401){ showLogin(); throw new Error('unauth'); }
+  if(!res.ok){ let e={}; try{e=await res.json()}catch{}; throw new Error(e.error||('HTTP '+res.status)); }
+  const ct=res.headers.get('content-type')||'';
+  return ct.includes('application/json')?res.json():res;
+}
+function toast(msg,isErr){ const t=$('#toast'); t.textContent=msg; t.className='toast show'+(isErr?' err':''); clearTimeout(t._t); t._t=setTimeout(()=>t.className='toast',2600); }
+
+// ───────── auth / boot ─────────
+function showLogin(){ $('#loginView').classList.remove('hidden'); $('#mainView').classList.add('hidden'); $('#playerBar').classList.add('hidden'); }
+$('#loginForm').addEventListener('submit',async e=>{
+  e.preventDefault(); $('#loginErr').textContent='';
+  try{
+    ME=await api('login',{method:'POST',body:{username:$('#luser').value,password:$('#lpass').value}});
+    $('#lpass').value=''; await boot();
+  }catch(err){ $('#loginErr').textContent = err.message==='unauth'?'':'Invalid credentials'; }
+});
+$('#logoutBtn').addEventListener('click',async()=>{ try{audio.pause()}catch{}; await api('logout',{method:'POST'}); ME=null; location.reload(); });
+
+async function boot(){
+  const data=await api('bootstrap');
+  ME=data.user; ALBUM=data.album_title; TRACKS=data.tracks;
+  $('#loginView').classList.add('hidden'); $('#mainView').classList.remove('hidden'); $('#playerBar').classList.remove('hidden');
+  $('#who').textContent=ME.username;
+  $('#navStudio').classList.toggle('hidden', ME.role!=='admin');
+  $('#albumTitle').textContent=ALBUM; document.title=ALBUM;
+  if(ME.role!=='admin' && VIEW==='studio') setView('player');
+  render();
+}
+
+// ───────── view switching ─────────
+function setView(v){
+  VIEW=v;
+  $$('#nav button').forEach(b=>b.classList.toggle('active',b.dataset.view===v));
+  $('#playerView').classList.toggle('hidden',v!=='player');
+  $('#studioView').classList.toggle('hidden',v!=='studio');
+  if(v==='studio') renderStudio();
+}
+$('#nav').addEventListener('click',e=>{ const b=e.target.closest('button'); if(b&&b.dataset.view) setView(b.dataset.view); });
+
+// ───────── render player ─────────
+function render(){
+  $('#albumTitle').textContent=ALBUM; document.title=ALBUM;
+  // album progress
+  const total=TRACKS.length;
+  const done=TRACKS.filter(t=>t.doneness>=100).length;
+  const avg=total? Math.round(TRACKS.reduce((a,t)=>a+t.doneness,0)/total):0;
+  $('#apDone').textContent=`${done} / ${total} done`;
+  $('#apAvg').textContent=avg+'%';
+  $('#apBar').style.width=avg+'%';
+  $('#emptyHint').classList.toggle('hidden', total>0);
+
+  const list=$('#trackList'); list.innerHTML='';
+  TRACKS.forEach((t,i)=>list.appendChild(trackRow(t,i)));
+  // keep player selectors in sync if current track changed
+  if(curTrackId){ const t=TRACKS.find(x=>x.id===curTrackId); if(!t){ stopAll(); } else { syncPlayerSelectors(t); } }
+}
+
+function trackRow(t,i){
+  const li=document.createElement('div');
+  li.className='track'+(t.id===curTrackId?' playing':'');
+  li.dataset.id=t.id;
+  const latest=t.revisions[t.revisions.length-1];
+  const isPlayingThis=t.id===curTrackId && !audio.paused;
+  const doneBadge = t.doneness>=100
+    ? `<span class="badge done">✓ DONE${t.done_revision_id?` · r${(t.revisions.find(r=>r.id===t.done_revision_id)||{}).rev_number||''}`:''}</span>` : '';
+  const newBadge = (ME.username==='noah' && t.unseen && t.id!==curTrackId) ? '<span class="badge new">NEW</span>' : '';
+  const revBadge = latest ? `<span class="badge rev">${t.revisions.length} rev${t.revisions.length>1?'s':''}</span>`:'<span class="badge rev">no audio</span>';
+  li.innerHTML=`
+    <span class="handle" title="Drag to reorder">⋮⋮</span>
+    <span class="ord"><button class="up" title="Move up">▲</button><button class="dn" title="Move down">▼</button></span>
+    <span class="num">${i+1}</span>
+    <button class="play-btn ${isPlayingThis?'on':''}" ${latest?'':'disabled'}>${isPlayingThis?'⏸':'▶'}</button>
+    <div class="tmid">
+      <div class="tname"><span class="nm">${esc(t.title)}</span>${newBadge}${doneBadge}${revBadge}</div>
+      <div class="tmeta">
+        ${latest?`<span>${fmt(latest.duration)}</span>`:''}
+        <span class="cc">💬 ${t.comment_count}${t.open_comment_count?` (${t.open_comment_count} open)`:''}</span>
+      </div>
+    </div>
+    <div class="done-ctl">
+      <span class="dl">${ME.username==='noah'?'Your':'Noah’s'} progress · <b class="dval">${t.doneness}%</b></span>
+      <input type="range" min="0" max="100" step="5" value="${t.doneness}" ${latest?'':'disabled'}>
+      <div class="dbar"><i style="width:${t.doneness}%"></i></div>
+    </div>`;
+
+  li.querySelector('.play-btn').addEventListener('click',e=>{e.stopPropagation(); if(!latest)return;
+    if(t.id===curTrackId){ togglePlay(); } else { loadTrack(t.id, latest.id, {play:true}); } });
+  li.querySelector('.cc').addEventListener('click',e=>{e.stopPropagation(); if(latest) loadTrack(t.id, latest.id,{play:false}); else openTrack(t.id);});
+  li.querySelector('.up').addEventListener('click',e=>{e.stopPropagation(); move(i,-1);});
+  li.querySelector('.dn').addEventListener('click',e=>{e.stopPropagation(); move(i,1);});
+
+  const rng=li.querySelector('input[type=range]'), dval=li.querySelector('.dval'), dbar=li.querySelector('.dbar>i');
+  rng.addEventListener('input',()=>{ dval.textContent=rng.value+'%'; dbar.style.width=rng.value+'%'; });
+  rng.addEventListener('change',()=>setDoneness(t,parseInt(rng.value,10)));
+
+  setupDrag(li);
+  return li;
+}
+
+// ───────── reorder ─────────
+async function saveOrder(){
+  try{ await api('reorder',{method:'PUT',body:{order:TRACKS.map(t=>t.id)}}); }
+  catch(e){ toast(e.message,true); }
+}
+function move(i,dir){
+  const j=i+dir; if(j<0||j>=TRACKS.length)return;
+  [TRACKS[i],TRACKS[j]]=[TRACKS[j],TRACKS[i]];
+  render(); saveOrder();
+}
+let dragId=null;
+function setupDrag(li){
+  const h=li.querySelector('.handle');
+  h.addEventListener('mousedown',()=>{li.draggable=true;});
+  h.addEventListener('touchstart',()=>{li.draggable=true;},{passive:true});
+  li.addEventListener('dragstart',e=>{ dragId=+li.dataset.id; li.classList.add('dragging'); e.dataTransfer.effectAllowed='move'; });
+  li.addEventListener('dragend',()=>{ li.draggable=false; li.classList.remove('dragging'); $$('.track').forEach(x=>x.classList.remove('dragover')); });
+  li.addEventListener('dragover',e=>{ e.preventDefault(); li.classList.add('dragover'); });
+  li.addEventListener('dragleave',()=>li.classList.remove('dragover'));
+  li.addEventListener('drop',e=>{ e.preventDefault(); li.classList.remove('dragover');
+    const from=TRACKS.findIndex(t=>t.id===dragId), to=TRACKS.findIndex(t=>t.id===+li.dataset.id);
+    if(from<0||to<0||from===to)return;
+    const [m]=TRACKS.splice(from,1); TRACKS.splice(to,0,m); render(); saveOrder();
+  });
+}
+
+async function setDoneness(t,val){
+  t.doneness=val;
+  const body={doneness:val};
+  if(val>=100){ const latest=t.revisions[t.revisions.length-1]; if(latest) body.revision_id=latest.id; }
+  try{ const r=await api(`tracks/${t.id}/doneness`,{method:'PUT',body}); t.done_revision_id=r.done_revision_id; render(); }
+  catch(e){ toast(e.message,true); }
+}
+
+// ───────── player engine ─────────
+function trackById(id){ return TRACKS.find(t=>t.id===id); }
+function revById(t,id){ return t && t.revisions.find(r=>r.id===id); }
+
+async function loadTrack(trackId, revId, {play=false, keepPos=null}={}){
+  const t=trackById(trackId); if(!t)return;
+  const rev=revById(t,revId)||t.revisions[t.revisions.length-1]; if(!rev)return;
+  if(nullOn) stopNull();
+  const other=players[1-act]; try{other.pause();}catch{} other.volume=0; other._revId=null;
+  curTrackId=trackId; curRevId=rev.id;
+  $('#pbEmpty').classList.add('hidden'); $('#pbActive').classList.remove('hidden');
+  audio.volume=userVol;
+  audio.src='api/audio/'+rev.stored_name;
+  audio.load();
+  const startAt = keepPos!=null? keepPos : 0;
+  const begin=()=>{ if(startAt) audio.currentTime=Math.min(startAt, rev.duration||startAt); audio.volume=userVol; if(play) audio.play().catch(()=>{}); };
+  audio.addEventListener('loadedmetadata',begin,{once:true});
+  syncPlayerSelectors(t);
+  $('#nowTitle').textContent=t.title;
+  updateRevNote(rev);
+  peakMaxHold=-Infinity;
+  await ensurePeaks(rev.id); drawWave();
+  if(!nullOn) updateMeters(startAt||0); else blankMeters();
+  // mark seen + open comments + clear NEW
+  markSeen(t, rev.id);
+  openTrack(trackId, /*fromPlayer*/true);
+  preloadInactive();
+  render();
+}
+
+let selTrackId=null, selRevCount=-1;
+function syncPlayerSelectors(t){
+  const revSel=$('#revSel'), cmpSel=$('#cmpSel');
+  if(selTrackId!==t.id || selRevCount!==t.revisions.length){      // rebuild options only when needed
+    const opt=r=>`<option value="${r.id}">v${r.rev_number}</option>`;
+    revSel.innerHTML=t.revisions.map(opt).join('');
+    cmpSel.innerHTML=t.revisions.map(opt).join('');
+    const others=t.revisions.filter(r=>r.id!==curRevId);          // default compare = previous revision
+    if(others.length){ const prev=[...t.revisions].reverse().find(r=>r.id<curRevId)||others[others.length-1]; cmpSel.value=prev.id; }
+    selTrackId=t.id; selRevCount=t.revisions.length;
+  }
+  if(curRevId) revSel.value=curRevId;
+  // Keep the compare/swap target distinct from what's playing — otherwise ⇄ swap (a===b guard)
+  // and the null test ("pick two different revisions") silently wedge until reload.
+  if(curRevId && t.revisions.length>1 && +cmpSel.value===curRevId){
+    const alt=[...t.revisions].reverse().find(r=>r.id!==curRevId);
+    if(alt) cmpSel.value=alt.id;
+  }
+  const single=t.revisions.length<2;
+  $('#nullBox').style.opacity=single?'.5':'1';
+  $('#nullToggle').disabled=single; cmpSel.disabled=single; $('#swapBtn').disabled=single;
+}
+
+function updateRevNote(rev){
+  const el=$('#revNote');
+  if(rev && rev.notes && rev.notes.trim()){ el.classList.remove('hidden'); el.innerHTML=`<b>v${rev.rev_number} notes:</b> ${esc(rev.notes)}`; }
+  else el.classList.add('hidden');
+}
+
+async function ensurePeaks(revId){
+  if(peaksCache[revId])return peaksCache[revId];
+  try{ peaksCache[revId]=await api('revisions/'+revId+'/peaks'); }catch{ peaksCache[revId]={duration:0,peaks:[]}; }
+  return peaksCache[revId];
+}
+
+function togglePlay(){ if(nullOn){ toggleNull(); return;} if(audio.paused){ audio.volume=userVol; audio.play().catch(()=>{}); } else audio.pause(); }
+function stopAll(){ players.forEach(p=>{try{p.pause()}catch{}}); stopNull(); curTrackId=null; curRevId=null; $('#pbActive').classList.add('hidden'); $('#pbEmpty').classList.remove('hidden'); $('#cpanel').classList.add('hidden'); render(); }
+
+$('#playBtn').addEventListener('click',togglePlay);
+$('#prevBtn').addEventListener('click',()=>step(-1));
+$('#nextBtn').addEventListener('click',()=>step(1));
+function step(dir){
+  const idx=TRACKS.findIndex(t=>t.id===curTrackId); if(idx<0)return;
+  const ni=idx+dir; if(ni<0||ni>=TRACKS.length)return;
+  const nt=TRACKS[ni]; const latest=nt.revisions[nt.revisions.length-1];
+  if(latest) loadTrack(nt.id,latest.id,{play:true});
+}
+// Media events fire on both elements; only the active one drives the UI.
+players.forEach(el=>{
+  el.addEventListener('play',()=>{ if(el!==audio)return; $('#playBtn').textContent='⏸'; render(); raf(); });
+  el.addEventListener('pause',()=>{ if(el!==audio||crossing)return; $('#playBtn').textContent='▶'; render(); });
+  el.addEventListener('timeupdate',()=>{ if(el!==audio)return; if(!nullOn) updateTime(audio.currentTime, audio.duration); });
+  el.addEventListener('ended',()=>{ if(el!==audio)return; if(autoAdvance && !nullOn) step(1); });
+});
+
+$('#revSel').addEventListener('change',e=>requestRev(+e.target.value));
+$('#swapBtn').addEventListener('click',()=>requestRev(+$('#cmpSel').value));  // play the compare rev; selectors update on completion
+// Coalesce rapid switch/swap clicks: while a crossfade is mid-flight, remember only the LATEST
+// target and run it once the fade settles. Dropping requests outright (the old behavior) left the
+// <select>s mutated-but-unsynced, eventually wedging swap (a===b) and the dropdown until reload.
+function requestRev(revId){
+  if(!revId || revId===curRevId) return;
+  if(crossing){ pendingRev=revId; return; }
+  crossfadeTo(revId);
+}
+function drainPendingRev(){ const p=pendingRev; pendingRev=null; if(p && p!==curRevId) requestRev(p); }
+// Resolve once no A/B crossfade is in flight, so a forced reload (e.g. after replacing audio) doesn't
+// fight crossfadeTo over the active element. Bounded — the fade is ~80ms, hard-capped ~1.2s.
+function settleCrossfade(){ return new Promise(res=>{ if(!crossing) return res(); const t0=performance.now();
+  const iv=setInterval(()=>{ if(!crossing || performance.now()-t0>1500){ clearInterval(iv); res(); } },40); }); }
+$('#cmpSel').addEventListener('change',()=>preloadInactive());
+$('#autoAdv').addEventListener('change',e=>autoAdvance=e.target.checked);
+$('#dlBtn').addEventListener('click',()=>{ const t=trackById(curTrackId); const r=revById(t,curRevId); if(r) window.location='api/audio/'+r.stored_name+'?dl=1'; });
+
+// ── volume ──────────────────────────────────────────────────
+$('#vol').value=Math.round(userVol*100);
+players.forEach((p,i)=>p.volume = i===act?userVol:0);
+setLufsTick();
+$('#vol').addEventListener('input',e=>{
+  userVol=e.target.value/100; localStorage.setItem('at_vol',userVol);
+  if(!crossing){ audio.volume=userVol; players.forEach(p=>{ if(p!==audio) p.volume=0; }); }  // mid-fade, let crossfadeVolumes own both element volumes
+  if(nMaster) nMaster.gain.value=userVol;
+});
+
+// ── gapless A/B crossfade (keep one element playing while the other catches up) ──
+function preloadInactive(){
+  const t=trackById(curTrackId); if(!t)return;
+  const other=players[1-act];
+  let cmp=+$('#cmpSel').value;
+  if(!cmp||cmp===curRevId){ const o=t.revisions.find(r=>r.id!==curRevId); cmp=o?o.id:0; }
+  const rev=revById(t,cmp); if(!rev) return;
+  if(other._revId!==cmp){ other.src='api/audio/'+rev.stored_name; other._revId=cmp; other.volume=0; other.load(); }
+}
+function elReadyAt(el, t){
+  return new Promise(res=>{
+    let done=false, to=null;
+    const finish=()=>{ if(done)return; done=true; el.removeEventListener('seeked',onSeeked); el.removeEventListener('canplay',onSeeked); clearTimeout(to); res(); };
+    const onSeeked=()=>finish();
+    const trySeek=()=>{
+      if(el.readyState>=2 && Math.abs(el.currentTime-t)<0.05){ finish(); return; }  // already at position — assigning currentTime fires no 'seeked'
+      try{ el.currentTime=t; }catch{}
+      el.addEventListener('seeked',onSeeked,{once:true}); el.addEventListener('canplay',onSeeked,{once:true});
+    };
+    to=setTimeout(finish, 1500); // set BEFORE trySeek — a synchronous finish() must be able to clearTimeout(to)
+    if(el.readyState>=1){ trySeek(); }
+    else { el.addEventListener('loadedmetadata',trySeek,{once:true}); }
+  });
+}
+function crossfadeVolumes(outEl, inEl, done){
+  cancelAnimationFrame(xfRaf);
+  const D=80, t0=performance.now();
+  const setVol=(el,v)=>{ el.volume = v<0?0 : v>1?1 : v; };   // HTMLMediaElement.volume must stay in [0,1] or it throws
+  const tick=now=>{
+    // clamp BOTH ends: a rAF frame timestamp earlier than t0 makes (now-t0) negative,
+    // which would drive sin()/cos() — and thus volume — below 0 and throw IndexSizeError.
+    const k=Math.max(0, Math.min(1,(now-t0)/D));
+    setVol(inEl,  userVol*Math.sin(k*Math.PI/2));   // equal-power
+    setVol(outEl, userVol*Math.cos(k*Math.PI/2));
+    if(k<1){ xfRaf=requestAnimationFrame(tick); }
+    else { setVol(inEl,userVol); setVol(outEl,0); done&&done(); }
+  };
+  xfRaf=requestAnimationFrame(tick);
+}
+// Wait for a crossfade to finish, but NEVER longer than `ms` — guards against a stalled
+// requestAnimationFrame (backgrounded tab, throttling) leaving the fade — and `crossing` — hung.
+function runFade(outgoing, incoming){
+  return new Promise(resolve=>{
+    let settled=false; const done=()=>{ if(settled)return; settled=true; resolve(); };
+    crossfadeVolumes(outgoing, incoming, done);
+    setTimeout(done, 1200);   // hard ceiling; the fade itself is ~80ms
+  });
+}
+async function crossfadeTo(revId){
+  if(crossing){ pendingRev=revId; return; }   // coalesce — run after the in-flight fade settles
+  const t=trackById(curTrackId); if(!t) return;
+  const target=revById(t,revId); if(!target || revId===curRevId) return;
+  if(nullOn) stopNull();
+  const fromRev=curRevId;   // the rev we're leaving — becomes the natural swap-back / compare target
+  if(audio.paused){ loadTrack(curTrackId, revId, {play:false, keepPos:audio.currentTime}); return; }
+  crossing=true;
+  const other=players[1-act], pos=audio.currentTime, outgoing=audio;
+  // Everything below runs under try/finally so `crossing` is ALWAYS released — a thrown error or a
+  // hung fade can never again strand the A/B button + dropdown (the "stuck until reload" bug).
+  try{
+    if(other._revId!==revId){ other.src='api/audio/'+target.stored_name; other._revId=revId; other.load(); }
+    other.volume=0;
+    try{ other.play().catch(()=>{}); }catch{}   // start silent within the gesture (iOS autoplay)
+    await elReadyAt(other, pos);
+    await runFade(outgoing, other);
+    if(other.paused){                            // incoming never started (autoplay blocked) — stay on outgoing
+      outgoing.volume=userVol; $('#revSel').value=curRevId;
+    }else{
+      try{ outgoing.pause(); }catch{}
+      other.volume=userVol;                      // ensure audible even if the fade hit the time ceiling mid-ramp
+      act=1-act; audio=players[act]; curRevId=revId;
+      peakMaxHold=-Infinity;
+      $('#revSel').value=revId;
+      if(fromRev && +$('#cmpSel').value===revId) $('#cmpSel').value=fromRev;   // never let compare === playing
+      updateRevNote(target);
+      $('#nowTitle').textContent=t.title;
+      ensurePeaks(revId).then(()=>{ drawWave(); if(!nullOn) updateMeters(audio.currentTime); });
+      preloadInactive();
+      openTrack(curTrackId, true);
+      markSeen(t, revId);
+      render();
+    }
+  }catch(e){ /* swallow — finally guarantees the controls recover */ }
+  finally{ crossing=false; drainPendingRev(); }
+}
+
+function updateTime(cur,dur){ $('#timeLbl').textContent=fmt(cur)+' / '+fmt(dur||0); $('#cPinTime').textContent=fmt(cur); drawBars(); if(nullOn) blankMeters(); else updateMeters(cur); }
+
+// ── meters: peak dBFS (current + max-hold) and EBU R128 LUFS (short-term + integrated) ──
+// Values come from the file (volume-independent program level), read at the playhead.
+function dbToPct(db,min,max){ if(!isFinite(db))return 0; return Math.max(0,Math.min(100,(db-min)/(max-min)*100)); }
+function fdb(db){ return isFinite(db)? db.toFixed(1) : '−∞'; }
+function setLufsTick(){ const t=$('#lufsTick'); if(t) t.style.left=dbToPct(-14,-36,0)+'%'; } // -14 LUFS streaming-target reference
+function blankMeters(){ $('#peakCover').style.width='100%'; $('#lufsCover').style.width='100%'; $('#peakHold').style.display='none'; $('#peakVal').textContent='—'; $('#lufsVal').textContent='—'; }
+function updateMeters(cur){
+  const d=peaksCache[curRevId]; if(!d){ blankMeters(); return; }
+  // sample peak in dBFS: prefer the dedicated fine series; fall back to waveform buckets
+  let curDb=-Infinity;
+  if(d.peakSeries && d.peakSeries.length && d.peakInterval){
+    const v=d.peakSeries[Math.max(0,Math.min(d.peakSeries.length-1,Math.floor(cur/d.peakInterval)))];
+    curDb = v<=-90 ? -Infinity : v;
+  } else {
+    const pk=d.peaks||[];
+    if(pk.length && d.duration){ const idx=Math.max(0,Math.min(pk.length-1,Math.floor(cur/d.duration*pk.length))); const lin=pk[idx]||0; curDb=lin>0?20*Math.log10(lin):-Infinity; }
+  }
+  if(curDb>peakMaxHold) peakMaxHold=curDb;
+  $('#peakCover').style.width=(100-dbToPct(curDb,-60,0))+'%';
+  const hold=$('#peakHold');
+  if(isFinite(peakMaxHold)){ hold.style.display='block'; hold.style.left=dbToPct(peakMaxHold,-60,0)+'%'; } else hold.style.display='none';
+  const L=d.loudness||{};
+  $('#peakVal').textContent = `${fdb(curDb)} · max ${fdb(peakMaxHold)}${L.tp!=null?' · TP '+L.tp.toFixed(1):''}`;
+  // short-term LUFS at playhead + static integrated/LRA
+  let s=null;
+  if(L.st && L.st.length && L.interval) s=L.st[Math.max(0,Math.min(L.st.length-1,Math.floor(cur/L.interval)))];
+  if(L.i!=null || s!=null){
+    $('#lufsCover').style.width=(100-dbToPct(s!=null?s:-70,-36,0))+'%';
+    $('#lufsVal').textContent = `S ${s!=null?s.toFixed(1):'—'} · I ${L.i!=null?L.i.toFixed(1):'—'}${L.lra!=null?' · LRA '+L.lra.toFixed(1):''}`;
+  } else {
+    $('#lufsCover').style.width='100%'; $('#lufsVal').textContent='not analyzed';
+  }
+}
+
+// ───────── waveform ─────────
+const cv=$('#wave'); const ctx=cv.getContext('2d');
+let waveW=0, waveH=0, accentCol='#7aa2ff';
+function getCss(v){ return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+function layoutCanvas(){ const r=cv.getBoundingClientRect(); if(!r.width)return false; const dpr=window.devicePixelRatio||1;
+  waveW=r.width; waveH=r.height; cv.width=r.width*dpr; cv.height=r.height*dpr; ctx.setTransform(dpr,0,0,dpr,0,0);
+  accentCol=getCss('--accent')||'#7aa2ff'; return true; }
+function drawBars(){                                  // bars + playhead only (called every frame)
+  const data=peaksCache[curRevId]; if(!data)return;
+  if(!waveW && !layoutCanvas())return;
+  const W=waveW,H=waveH,mid=H/2;
+  ctx.clearRect(0,0,W,H);
+  const peaks=data.peaks||[]; const n=peaks.length||1;
+  const cur=nullOn?nullTime():audio.currentTime; const dur=(nullOn?nullDur():audio.duration)||data.duration||1;
+  const prog=Math.max(0,Math.min(1,cur/dur));
+  for(let x=0;x<W;x++){
+    const p=peaks[Math.floor(x/W*n)]||0; const h=Math.max(1.5,p*(H*0.92));
+    ctx.fillStyle = (x/W)<=prog ? accentCol : '#3a3f52';
+    ctx.fillRect(x, mid-h/2, 1, h);
+  }
+  const px=prog*W; ctx.fillStyle='#fff'; ctx.fillRect(px-0.5,0,1.5,H);
+}
+function drawWave(){ layoutCanvas(); drawBars(); drawPins(); }   // full redraw incl. pins (on data change)
+cv.addEventListener('click',e=>{
+  const r=cv.getBoundingClientRect(); const frac=(e.clientX-r.left)/r.width;
+  if(nullOn){ nullSeek(frac*nullDur()); return; }
+  if(audio.duration) audio.currentTime=frac*audio.duration;
+});
+let rafId=null;
+function raf(){ cancelAnimationFrame(rafId);
+  const loop=()=>{
+    if(nullOn){ updateTime(nullTime(),nullDur()); if(nullPlaying && nullTime()<nullDur()) rafId=requestAnimationFrame(loop); }
+    else if(!audio.paused){ updateTime(audio.currentTime,audio.duration); rafId=requestAnimationFrame(loop); }
+  };
+  rafId=requestAnimationFrame(loop);
+}
+window.addEventListener('resize',()=>{ if(curRevId){ layoutCanvas(); drawBars(); } });
+
+// pins (timestamped comments for current revision)
+function drawPins(){
+  const wrap=$('#pins'); wrap.innerHTML='';
+  const dur=(nullOn?nullDur():(audio.duration||peaksCache[curRevId]?.duration))||1;
+  comments.filter(c=>c.ts!=null && c.revision_id===curRevId).forEach(c=>{
+    const el=document.createElement('div'); el.className='pin'; el.textContent='▾';
+    el.style.left=Math.max(0,Math.min(1,c.ts/dur))*100+'%';
+    el.title=`${c.author} @ ${fmt(c.ts)}: ${c.body}`;
+    el.addEventListener('click',()=>{ if(nullOn){nullSeek(c.ts)}else if(audio.duration){audio.currentTime=c.ts; audio.play().catch(()=>{});} });
+    wrap.appendChild(el);
+  });
+}
+
+// ───────── NULL TEST (Web Audio: A minus phase-inverted B) ─────────
+let actx=null, nullOn=false, nullPlaying=false;
+let nSrcA=null,nSrcB=null,nGainB=null,nMakeup=null,nMaster=null;
+let nStartCtx=0,nOffset=0,nDur=0;
+const decoded={}; // storedName -> AudioBuffer
+function ensureActx(){
+  if(!actx){ actx=new (window.AudioContext||window.webkitAudioContext)(); nMaster=actx.createGain(); nMaster.gain.value=userVol; nMaster.connect(actx.destination); }
+  if(actx.state==='suspended')actx.resume();
+}
+async function getDecoded(name){ if(decoded[name])return decoded[name]; const res=await fetch('api/audio/'+name); const ab=await res.arrayBuffer(); decoded[name]=await actx.decodeAudioData(ab); return decoded[name]; }
+function boostLinear(){ return Math.pow(10, (+$('#boost').value)/20); }
+function nullTime(){ return nullPlaying? nOffset+(actx.currentTime-nStartCtx) : nOffset; }
+function nullDur(){ return nDur; }
+
+$('#nullToggle').addEventListener('click',()=>toggleNullMode());
+$('#boost').addEventListener('input',()=>{ $('#boostLbl').textContent='+'+$('#boost').value+' dB'; if(nMakeup) nMakeup.gain.value=boostLinear(); });
+
+async function toggleNullMode(){
+  const t=trackById(curTrackId); if(!t||t.revisions.length<2)return;
+  if(nullOn){
+    // Exit gaplessly: carry the null playhead + play-state back onto the <audio> element.
+    // Capture BEFORE stopNull() zeroes nOffset/nullPlaying. This restore MUST live here (the
+    // user-toggle path), NOT inside stopNull() — loadTrack()/stopAll() also call stopNull() and
+    // must never seek or resume the element (ROADMAP 1.1).
+    const pos=nullTime(), wasPlaying=nullPlaying;
+    stopNull();
+    const seekTo=Math.max(0, Math.min(pos, audio.duration||pos));   // clamp ≥0: the ~30ms start look-ahead can make nullTime() momentarily negative
+    audio.currentTime=seekTo;
+    if(wasPlaying){ audio.volume=userVol; audio.play().catch(()=>{}); }   // play → 'play' event → raf redraws the meters
+    else updateMeters(seekTo);   // paused exit: null mode blanked the meters and no raf runs to redraw them (mirrors loadTrack/crossfadeTo)
+    drawWave(); return;
+  }
+  // turn on
+  const a=revById(t,+$('#revSel').value), b=revById(t,+$('#cmpSel').value);
+  if(!a||!b||a.id===b.id){ toast('Pick two different revisions',true); return; }
+  // Capture the playhead + play-state BEFORE pausing so null starts where playback was (ROADMAP 1.1).
+  const pos=audio.currentTime, wasPlaying=!audio.paused;
+  ensureActx(); audio.pause();
+  nullOn=true; $('#nullBox').classList.add('on'); $('#nullToggle').classList.add('on'); $('#boostWrap').classList.remove('hidden');
+  $('#nullHint').classList.remove('hidden');
+  $('#nullHint').innerHTML='Null: <b>v'+a.rev_number+' − v'+b.rev_number+'</b> — you hear only what changed. Previews are MP3 so a faint hiss remains where nothing changed; real mix moves sit above it. Raise boost for quiet differences.';
+  $('#nowTitle').textContent=t.title+'  (null v'+a.rev_number+'−v'+b.rev_number+')';
+  try{
+    $('#playBtn').innerHTML='<span class="spin"></span>';
+    const [bufA,bufB]=await Promise.all([getDecoded(a.stored_name),getDecoded(b.stored_name)]);
+    nDur=Math.min(bufA.duration,bufB.duration);
+    nOffset=Math.min(pos, nDur);                       // continue at the playback playhead, clamped to null length
+    if(wasPlaying){ startNull(nOffset); }              // was playing → keep playing the null
+    else { nullPlaying=false; updateTime(nOffset,nDur); $('#playBtn').textContent='▶'; }   // was paused → stay paused at nOffset
+  }catch(e){ toast('Null decode failed: '+e.message,true); stopNull(); $('#nowTitle').textContent=(trackById(curTrackId)||{}).title||''; }
+}
+function buildNullGraph(bufA,bufB){
+  nSrcA=actx.createBufferSource(); nSrcA.buffer=bufA;
+  nSrcB=actx.createBufferSource(); nSrcB.buffer=bufB;
+  nGainB=actx.createGain(); nGainB.gain.value=-1;          // phase invert B
+  nMakeup=actx.createGain(); nMakeup.gain.value=boostLinear();
+  nSrcA.connect(nMakeup); nSrcB.connect(nGainB).connect(nMakeup); nMakeup.connect(nMaster);
+}
+function startNull(offset){
+  const t=trackById(curTrackId); const a=revById(t,+$('#revSel').value), b=revById(t,+$('#cmpSel').value);
+  const bufA=decoded[a.stored_name], bufB=decoded[b.stored_name]; if(!bufA||!bufB)return;
+  buildNullGraph(bufA,bufB);
+  nStartCtx=actx.currentTime+0.03; nOffset=offset; nullPlaying=true;
+  const playLen=Math.max(0,nDur-offset);   // hard-stop both at nDur so the longer rev can't sound past the (shorter) null length
+  nSrcA.start(nStartCtx,offset,playLen); nSrcB.start(nStartCtx,offset,playLen);
+  nSrcA.onended=()=>{ if(nullPlaying && nullTime()>=nDur-0.05){ nullPlaying=false; nOffset=0; $('#playBtn').textContent='▶'; updateTime(0,nDur);} };
+  $('#playBtn').textContent='⏸'; raf();
+}
+function stopNullSources(){ nullPlaying=false; [nSrcA,nSrcB].forEach(s=>{ if(s){ try{s.onended=null;s.stop()}catch{} } }); nSrcA=nSrcB=null; }
+function toggleNull(){ // play/pause within null mode
+  if(nullPlaying){ nOffset=nullTime(); stopNullSources(); $('#playBtn').textContent='▶'; }
+  else { ensureActx(); startNull(Math.min(nOffset,Math.max(0,nDur-0.05))); }
+}
+function nullSeek(sec){ const was=nullPlaying; stopNullSources(); nOffset=Math.max(0,Math.min(sec,nDur)); if(was) startNull(nOffset); else { updateTime(nOffset,nDur);} }
+function resetNullUI(){ $('#nullBox').classList.remove('on'); $('#nullToggle').classList.remove('on'); $('#boostWrap').classList.add('hidden'); $('#nullHint').classList.add('hidden'); }
+// Full exit from null mode: stop sources, free decoded PCM (bounded to current session), reset all null UI.
+function stopNull(){ stopNullSources(); for(const k in decoded) delete decoded[k]; nullOn=false; nDur=0; nOffset=0; $('#playBtn').textContent='▶'; resetNullUI(); }
+
+// ───────── comments ─────────
+async function openTrack(trackId, fromPlayer){
+  const t=trackById(trackId); if(!t)return;
+  panelTrackId=trackId;
+  editingId=null;
+  $('#cpanel').classList.remove('hidden');
+  $('#cTitle').textContent='Notes — '+t.title;
+  comments=await api('tracks/'+trackId+'/comments');
+  renderComments();
+  drawPins();
+  // tag which revision new comments attach to
+  const r=revById(t, (trackId===curTrackId && curRevId) ? curRevId : t.revisions[t.revisions.length-1]?.id);
+  $('#cRevTag').textContent = r? ('→ attaches to v'+r.rev_number) : '';
+}
+function renderComments(){
+  const box=$('#clist');
+  // Preserve any in-progress edit text across re-renders (resolve/del/send on other notes
+  // re-render the whole list; without this the open editor would reset to the stored body).
+  const liveTa=box.querySelector('.cedit-ta'); const draft=(liveTa && Number(liveTa.dataset.cid)===editingId)?liveTa.value:null;
+  box.innerHTML='';
+  if(!comments.length){ box.innerHTML='<div class="faint small">No notes yet.</div>'; return; }
+  comments.forEach(c=>{
+    const div=document.createElement('div');
+    div.className='cmt'+(c.resolved?' resolved':'')+(c.revision_id===curRevId?' cur':'');
+    const tsHtml = c.ts!=null ? `<button class="tsbtn">${fmt(c.ts)}</button>` : `<span class="gen">general</span>`;
+    const canEdit = c.author===ME.username || ME.role==='admin';
+
+    if(c.id===editingId){
+      // timestamp shown but inert here — the row is the editor; seeking belongs to the static view
+      const tsStatic = c.ts!=null ? `<span class="tsbtn" style="cursor:default">${fmt(c.ts)}</span>` : `<span class="gen">general</span>`;
+      const initial = draft!=null ? draft : c.body;
+      div.innerHTML=`${tsStatic}
+        <div class="cbody"><span class="cwho ${c.author}">${esc(c.author)}</span>
+          <textarea class="cedit-ta" data-cid="${c.id}" rows="2">${esc(initial)}</textarea>
+          <div class="row" style="margin-top:6px;gap:8px">
+            <button class="btn sm esave">Save</button>
+            <button class="btn sm ghost ecancel">Cancel</button>
+          </div>
+        </div>`;
+      const ta=div.querySelector('.cedit-ta');
+      const save=async()=>{
+        const nb=ta.value.trim(); if(!nb){ toast('Note cannot be empty',true); return; }
+        try{
+          await api('comments/'+c.id,{method:'PUT',body:{body:nb}});
+          editingId=null;
+          comments=await api('tracks/'+panelTrackId+'/comments'); renderComments(); drawPins();
+        }catch(e){ toast(e.message,true); }
+      };
+      div.querySelector('.esave').addEventListener('click',save);
+      div.querySelector('.ecancel').addEventListener('click',()=>{ editingId=null; renderComments(); });
+      ta.addEventListener('keydown',e=>{ if((e.metaKey||e.ctrlKey)&&e.key==='Enter'){ e.preventDefault(); save(); } else if(e.key==='Escape'){ editingId=null; renderComments(); } });
+      box.appendChild(div);
+      // Focus only when first opening the editor (draft==null); on incidental re-renders keep the user's focus where it is.
+      if(draft==null){ ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }
+      return;
+    }
+
+    const editedHtml = c.edited_at ? `<span class="cedit" title="last edited ${esc(fmtDate(c.edited_at))}">(last edited ${esc(fmtDate(c.edited_at))})</span>` : '';
+    div.innerHTML=`${tsHtml}
+      <div class="cbody"><span class="cwho ${c.author}">${esc(c.author)}</span>${esc(c.body)}
+        <span class="crev">${c.rev_number?('· v'+c.rev_number):''}</span>${editedHtml}</div>
+      <div class="cact">
+        <button class="res">${c.resolved?'reopen':'resolve'}</button>
+        ${canEdit?'<button class="edit">edit</button>':''}
+        ${canEdit?'<button class="del danger">del</button>':''}
+      </div>`;
+    if(c.ts!=null) div.querySelector('.tsbtn').addEventListener('click',()=>{
+      if(curTrackId!==c.track_id){ const t=trackById(c.track_id); const rv=revById(t,c.revision_id)||t.revisions.at(-1); loadTrack(c.track_id, rv.id,{play:true,keepPos:c.ts}); }
+      else if(c.revision_id && c.revision_id!==curRevId){ loadTrack(c.track_id,c.revision_id,{play:true,keepPos:c.ts}); }
+      else if(nullOn){ nullSeek(c.ts); } else if(audio.duration){ audio.currentTime=c.ts; audio.play().catch(()=>{}); }
+    });
+    div.querySelector('.res').addEventListener('click',async()=>{ await api('comments/'+c.id,{method:'PUT',body:{resolved:c.resolved?0:1}}); c.resolved=c.resolved?0:1; renderComments(); refreshCounts(); });
+    const ed=div.querySelector('.edit'); if(ed) ed.addEventListener('click',()=>{ editingId=c.id; renderComments(); });
+    const del=div.querySelector('.del'); if(del) del.addEventListener('click',async()=>{ if(!confirm('Delete this note?\n\n"'+c.body+'"\n— '+c.author))return; await api('comments/'+c.id,{method:'DELETE'}); comments=comments.filter(x=>x.id!==c.id); renderComments(); drawPins(); refreshCounts(); });
+    box.appendChild(div);
+  });
+}
+async function refreshCounts(){ // light refresh of badges
+  const t=trackById(panelTrackId); if(!t)return;
+  t.comment_count=comments.length; t.open_comment_count=comments.filter(c=>!c.resolved).length; render();
+}
+$('#cSend').addEventListener('click',sendComment);
+$('#cInput').addEventListener('keydown',e=>{ if((e.metaKey||e.ctrlKey)&&e.key==='Enter') sendComment(); });
+async function sendComment(){
+  const body=$('#cInput').value.trim(); if(!body)return;
+  const tId=panelTrackId; if(!tId){ toast('Open a track first',true); return; }
+  const t=trackById(tId); const revId=(tId===curTrackId && curRevId) ? curRevId : t.revisions.at(-1)?.id;
+  const pin=$('#cPin').checked;
+  const ts = (pin && tId===curTrackId) ? (nullOn?nullTime():audio.currentTime) : null;
+  try{
+    await api('tracks/'+tId+'/comments',{method:'POST',body:{revision_id:revId, ts, body}});
+    $('#cInput').value=''; $('#cPin').checked=false;
+    comments=await api('tracks/'+tId+'/comments'); renderComments(); drawPins(); refreshCounts();
+  }catch(e){ toast(e.message,true); }
+}
+
+async function markSeen(t,revId){
+  if(ME.role==='admin')return; // seen-tracking is for Noah's "NEW" badges
+  try{ await api('tracks/'+t.id+'/seen',{method:'POST',body:{revision_id:revId}}); if(revId===t.revisions.at(-1)?.id) t.unseen=false; }catch{}
+}
+
+// ───────── STUDIO (admin) ─────────
+$('#albSave').addEventListener('click',async()=>{ const v=$('#albInput').value.trim(); if(!v)return; await api('album',{method:'PUT',body:{title:v}}); ALBUM=v; render(); toast('Album title saved'); });
+$('#addTrack').addEventListener('click',addTrackFn);
+$('#newTrack').addEventListener('keydown',e=>{ if(e.key==='Enter') addTrackFn(); });
+async function addTrackFn(){ const v=$('#newTrack').value.trim(); if(!v)return; try{ const r=await api('tracks',{method:'POST',body:{title:v}}); $('#newTrack').value=''; if(r&&r.id) openStudio.add(r.id); await reload(); setView('studio'); }catch(e){toast(e.message,true);} }
+
+async function reload(){ const data=await api('bootstrap'); TRACKS=data.tracks; ALBUM=data.album_title; render(); if(VIEW==='studio') renderStudio(); }
+
+const openStudio=new Set();
+function renderStudio(){
+  $('#albInput').value=ALBUM;
+  const box=$('#studioTracks'); box.innerHTML='';
+  if(!TRACKS.length){ box.innerHTML='<div class="card faint">No tracks yet — add one above.</div>'; return; }
+  TRACKS.forEach((t,i)=>{
+    const card=document.createElement('div'); card.className='strack';
+    const open=openStudio.has(t.id);
+    card.innerHTML=`
+      <div class="strack-h ${open?'open':''}">
+        <span class="chev">▶</span>
+        <span class="num">${i+1}</span>
+        <span class="stitle">${esc(t.title)}</span>
+        <span class="badge rev">${t.revisions.length} rev${t.revisions.length!==1?'s':''}</span>
+        ${t.doneness>=100?'<span class="badge done">✓ DONE</span>':`<span class="faint small">${t.doneness}%</span>`}
+      </div>
+      <div class="strack-body ${open?'':'hidden'}"></div>`;
+    const head=card.querySelector('.strack-h'), bodyEl=card.querySelector('.strack-body');
+    head.addEventListener('click',()=>{ if(open)openStudio.delete(t.id); else openStudio.add(t.id); renderStudio(); });
+    if(open) buildStudioBody(bodyEl,t);
+    box.appendChild(card);
+  });
+}
+function buildStudioBody(el,t){
+  el.innerHTML='';
+  // rename / delete
+  const tools=document.createElement('div'); tools.className='row'; tools.style.flexWrap='wrap';
+  tools.innerHTML=`<input class="rn" value="${esc(t.title)}" style="flex:1;min-width:160px">
+    <button class="btn sm rnsave">Rename</button>
+    <button class="btn sm danger tdel" style="margin-left:auto">Delete track</button>`;
+  tools.querySelector('.rnsave').addEventListener('click',async()=>{ const v=tools.querySelector('.rn').value.trim(); if(!v)return; await api('tracks/'+t.id,{method:'PUT',body:{title:v}}); await reload(); toast('Renamed'); });
+  tools.querySelector('.tdel').addEventListener('click',async()=>{ if(!confirm('Delete "'+t.title+'" and all its revisions?'))return; await api('tracks/'+t.id,{method:'DELETE'}); openStudio.delete(t.id); await reload(); toast('Track deleted'); });
+  el.appendChild(tools);
+
+  // uploader — above the revisions list so "Upload new revision" is the first thing you reach (1.4)
+  const up=document.createElement('div'); up.className='uploader';
+  up.innerHTML=`<div class="field"><label>Upload new revision (WAV → converted to 320k MP3 preview; original is discarded)</label>
+      <input type="file" class="ufile" accept="audio/*,.wav,.aif,.aiff,.flac,.mp3"></div>
+    <div class="field"><label>Change notes (optional)</label><textarea class="unotes" rows="2" placeholder="What changed in this revision?"></textarea></div>
+    <div class="row"><button class="btn primary uup">Upload revision</button><span class="ustat faint small"></span></div>`;
+  const fileEl=up.querySelector('.ufile'), stat=up.querySelector('.ustat'), btn=up.querySelector('.uup');
+  btn.addEventListener('click',async()=>{
+    if(!fileEl.files[0]){ toast('Choose a file',true); return; }
+    const fd=new FormData(); fd.append('file',fileEl.files[0]); fd.append('notes',up.querySelector('.unotes').value);
+    btn.disabled=true; stat.innerHTML='<span class="spin"></span> uploading & converting…';
+    try{ await api('tracks/'+t.id+'/revisions',{method:'POST',body:fd}); await reload(); toast('Revision added'); }
+    catch(e){ toast(e.message,true); stat.textContent=''; btn.disabled=false; }
+  });
+  el.appendChild(up);
+
+  // revisions (newest first)
+  [...t.revisions].reverse().forEach(r=>{
+    const d=document.createElement('div'); d.className='srev';
+    const lTxt = (r.lufs_i!=null||r.true_peak!=null)
+      ? `<div class="sl">${r.lufs_i!=null?r.lufs_i.toFixed(1):'—'} LUFS integrated · LRA ${r.lufs_lra!=null?r.lufs_lra.toFixed(1):'—'} LU · true peak ${r.true_peak!=null?r.true_peak.toFixed(1):'—'} dBFS</div>` : '';
+    d.innerHTML=`<div class="sr-h"><span class="rn">v${r.rev_number}</span>
+      <span class="faint small">${fmt(r.duration)} · ${(r.size/1048576).toFixed(1)} MB · ${esc(r.uploaded_by||'')} · ${r.created_at} UTC</span>
+      <button class="btn ghost sm rdel danger" style="margin-left:auto">delete</button></div>
+      ${lTxt}
+      <div class="field"><label>Change notes (what you did in this revision)</label>
+      <textarea class="rnotes" rows="2" placeholder="e.g. brightened vocals, tightened low end, new master chain">${esc(r.notes)}</textarea></div>
+      <div class="row" style="margin-top:7px"><button class="btn sm nsave">Save notes</button>
+      <button class="btn sm rrepl">↻ Replace audio</button>
+      <a class="btn sm" href="api/audio/${r.stored_name}?dl=1">⬇ Download</a></div>
+      <div class="uploader rrepl-box hidden" style="margin-top:9px">
+        <div class="field"><label>Replace this revision's audio — keeps v${r.rev_number}, its notes &amp; comments (WAV → 320k MP3 preview; original is discarded)</label>
+          <input type="file" class="rfile" accept="audio/*,.wav,.aif,.aiff,.flac,.mp3"></div>
+        <div class="row"><button class="btn primary sm rupload">Upload replacement</button>
+          <button class="btn sm ghost rcancel">Cancel</button>
+          <span class="rstat faint small"></span></div>
+      </div>`;
+    d.querySelector('.nsave').addEventListener('click',async()=>{ await api('revisions/'+r.id,{method:'PUT',body:{notes:d.querySelector('.rnotes').value}}); r.notes=d.querySelector('.rnotes').value; if(curRevId===r.id)updateRevNote(r); toast('Notes saved'); });
+    const replBox=d.querySelector('.rrepl-box'), rfile=d.querySelector('.rfile'), rstat=d.querySelector('.rstat'), rup=d.querySelector('.rupload');
+    d.querySelector('.rrepl').addEventListener('click',()=>{ replBox.classList.toggle('hidden'); });
+    d.querySelector('.rcancel').addEventListener('click',()=>{ replBox.classList.add('hidden'); rfile.value=''; rstat.textContent=''; });
+    rup.addEventListener('click',async()=>{
+      if(!rfile.files[0]){ toast('Choose a file',true); return; }
+      const fd=new FormData(); fd.append('file',rfile.files[0]);
+      rup.disabled=true; rstat.innerHTML='<span class="spin"></span> uploading & converting…';
+      try{
+        await api('revisions/'+r.id+'/replace',{method:'POST',body:fd});
+        // If the replaced rev is part of an active null comparison (either side), exit null cleanly:
+        // its decoded buffer is keyed by the now-stale stored_name, so null would keep playing the old
+        // audio and silently fail on the next play. (The loaded-rev case is also covered here.)
+        if(nullOn && (r.id===curRevId || r.id===+$('#cmpSel').value)) stopNull();
+        // The rev id is unchanged but its audio + analysis are not: drop the cached peaks (keyed by id),
+        // any decoded null-test buffer (keyed by the now-stale stored_name), and any preloaded <audio> handle.
+        const oldName=r.stored_name;
+        delete peaksCache[r.id]; delete decoded[oldName];
+        players.forEach(p=>{ if(p._revId===r.id) p._revId=null; });
+        const wasLoaded=(curRevId===r.id);
+        const keepPos = (wasLoaded && !nullOn) ? audio.currentTime : null;
+        const wasPlaying = wasLoaded && !nullOn && !audio.paused;
+        await reload();                                  // rebuilds studio + track list with the new stored_name/metadata
+        if(wasLoaded){ await settleCrossfade();          // don't reload mid A/B fade
+          if(curRevId===r.id) loadTrack(t.id, r.id, {play:wasPlaying, keepPos}); }   // force-reload off the new URL
+        toast('Audio replaced');
+      }catch(e){ toast(e.message,true); rstat.textContent=''; rup.disabled=false; }
+    });
+    d.querySelector('.rdel').addEventListener('click',async()=>{ if(!confirm('Delete revision v'+r.rev_number+'?'))return;
+      await api('revisions/'+r.id,{method:'DELETE'});
+      delete peaksCache[r.id];
+      players.forEach(p=>{ if(p._revId===r.id) p._revId=null; });   // drop any preloaded handle on the deleted file
+      const wasLoaded=(curRevId===r.id);
+      await reload();
+      if(wasLoaded){ const tr=trackById(t.id); const latest=tr&&tr.revisions[tr.revisions.length-1];
+        if(latest) loadTrack(t.id, latest.id, {play:false}); else stopAll(); }
+      toast('Revision deleted'); });
+    el.appendChild(d);
+  });
+}
+
+// ───────── keyboard ─────────
+document.addEventListener('keydown',e=>{
+  if(e.target.matches('input,textarea,select'))return;
+  if(e.code==='Space'){ e.preventDefault(); if(curTrackId) togglePlay(); }
+  else if(e.key==='ArrowRight' && e.shiftKey){ step(1); }
+  else if(e.key==='ArrowLeft' && e.shiftKey){ step(-1); }
+});
+
+// ───────── init ─────────
+(async()=>{ try{ await boot(); }catch{ showLogin(); } })();
+</script>
+</body>
+</html>
