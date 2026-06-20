@@ -147,7 +147,10 @@ else
     ''|*[!0-9]*) die "Port must be a whole number 1–65535 (got '$port_val')." ;;
   esac
   { [ "$port_val" -ge 1 ] && [ "$port_val" -le 65535 ]; } || die "Port out of range 1–65535 (got '$port_val')."
-  admin_val="$(ask_val 'Admin username (its FIRST login sets the password)' 'james')"
+  # Default the owner-admin to the account running the install (SUDO_USER if run via sudo), not a
+  # hardcoded name — this is a tool other people install for themselves.
+  default_admin="${SUDO_USER:-$(id -un)}"; [ -n "$default_admin" ] || default_admin="admin"
+  admin_val="$(ask_val 'Admin username (its FIRST login sets the password)' "$default_admin")"
   host_val="127.0.0.1"
   if ask_yn "Make the app reachable from other devices on your network (LAN)?" N; then
     host_val="0.0.0.0"

@@ -102,7 +102,9 @@ if(Test-Path $EnvFile){
   if($portVal -notmatch '^\d{1,5}$' -or [int]$portVal -lt 1 -or [int]$portVal -gt 65535){
     Die "Port must be a number 1-65535 (got '$portVal')."
   }
-  $adminVal = AskVal 'Admin username (its FIRST login sets the password)' 'james'
+  # Default the owner-admin to the current Windows account, not a hardcoded name.
+  $defaultAdmin = if([string]::IsNullOrWhiteSpace($env:USERNAME)){ 'admin' } else { $env:USERNAME }
+  $adminVal = AskVal 'Admin username (its FIRST login sets the password)' $defaultAdmin
   $hostVal  = '127.0.0.1'
   if(AskYN "Make the app reachable from other devices on your network (LAN)?" 'N'){
     $hostVal = '0.0.0.0'
