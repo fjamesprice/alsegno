@@ -1391,22 +1391,29 @@ function buildStudioBody(el,t){
   // VIDEO (the picture) — a video track's locked video asset, replaceable independently of its audio.
   if(isVid){
     const vsec=document.createElement('div'); vsec.className='uploader';
-    const cur = t.has_video
-      ? `<div class="small" style="margin-bottom:6px">Current: <b>${esc(t.video_original_name||'video')}</b> · ${t.video_width||'?'}×${t.video_height||'?'}${t.video_fps?' · '+t.video_fps+' fps':''} · ${fmt(t.video_duration||0)}
-           <a class="btn sm" style="margin-left:8px" href="api/audio/${t.video_stored_name}?dl=1">⬇ Download</a></div>`
-      : `<div class="small faint" style="margin-bottom:6px">No video yet — upload the picture. Its own audio becomes the “Original audio” revision; then upload mixes below.</div>`;
-    vsec.innerHTML=`<div class="field"><label>${t.has_video?'Replace video (the picture)':'Upload video (the picture)'} — ${KEEP_LOSSLESS?'original kept for download; ':''}an H.264 MP4 preview + 480p proxy are generated${t.has_video?'. Your audio mixes are kept.':''}</label>
-        ${cur}<input type="file" class="vfile" accept="${videoAccept}"></div>
-      <div class="row"><button class="btn primary vup">${t.has_video?'Replace video':'Upload video'}</button><span class="vstat faint small"></span></div>`;
-    const vfile=vsec.querySelector('.vfile'), vstat=vsec.querySelector('.vstat'), vbtn=vsec.querySelector('.vup');
-    vbtn.addEventListener('click',async()=>{
-      if(!vfile.files[0]){ toast('Choose a video file',true); return; }
-      const fd=new FormData(); fd.append('file',vfile.files[0]);
-      vbtn.disabled=true; vstat.innerHTML='<span class="spin"></span> uploading & encoding…';
-      try{ await api('tracks/'+t.id+'/video',{method:'POST',body:fd}); await reload(); toast(t.has_video?'Video replaced':'Video set'); }
-      catch(e){ toast(e.message,true); vstat.textContent=''; vbtn.disabled=false; }
-    });
-    el.appendChild(vsec);
+    if(t.video_processing){
+      // A video upload is transcoding in the background — it'll appear automatically (SSE) when ready.
+      vsec.innerHTML=`<div class="field"><label>Video (the picture)</label>
+        <div class="small"><span class="spin"></span> Processing video… this can take a few minutes for a long clip; it appears here automatically when ready. You can keep working.</div></div>`;
+      el.appendChild(vsec);
+    } else {
+      const cur = t.has_video
+        ? `<div class="small" style="margin-bottom:6px">Current: <b>${esc(t.video_original_name||'video')}</b> · ${t.video_width||'?'}×${t.video_height||'?'}${t.video_fps?' · '+t.video_fps+' fps':''} · ${fmt(t.video_duration||0)}
+             <a class="btn sm" style="margin-left:8px" href="api/audio/${t.video_stored_name}?dl=1">⬇ Download</a></div>`
+        : `<div class="small faint" style="margin-bottom:6px">No video yet — upload the picture. Its own audio becomes the “Original audio” revision; then upload mixes below.</div>`;
+      vsec.innerHTML=`<div class="field"><label>${t.has_video?'Replace video (the picture)':'Upload video (the picture)'} — ${KEEP_LOSSLESS?'original kept for download; ':''}an H.264 MP4 preview + 480p proxy are generated${t.has_video?'. Your audio mixes are kept.':''}</label>
+          ${cur}<input type="file" class="vfile" accept="${videoAccept}"></div>
+        <div class="row"><button class="btn primary vup">${t.has_video?'Replace video':'Upload video'}</button><span class="vstat faint small"></span></div>`;
+      const vfile=vsec.querySelector('.vfile'), vstat=vsec.querySelector('.vstat'), vbtn=vsec.querySelector('.vup');
+      vbtn.addEventListener('click',async()=>{
+        if(!vfile.files[0]){ toast('Choose a video file',true); return; }
+        const fd=new FormData(); fd.append('file',vfile.files[0]);
+        vbtn.disabled=true; vstat.innerHTML='<span class="spin"></span> uploading…';
+        try{ await api('tracks/'+t.id+'/video',{method:'POST',body:fd}); await reload(); toast('Uploaded — processing in the background'); }
+        catch(e){ toast(e.message,true); vstat.textContent=''; vbtn.disabled=false; }
+      });
+      el.appendChild(vsec);
+    }
   }
 
   // AUDIO uploader — a new revision (an audio mix for a video track; an audio revision otherwise).
@@ -1418,7 +1425,8 @@ function buildStudioBody(el,t){
     : (KEEP_LOSSLESS
         ? 'Upload new revision (original kept for lossless download; a 320k MP3 preview is generated for playback)'
         : 'Upload new revision (WAV → converted to 320k MP3 preview; original is discarded)');
-  up.innerHTML=`<div class="field"><label>${upLabel}</label>
+  const procNote = t.mix_processing ? `<div class="small" style="margin-bottom:7px"><span class="spin"></span> Processing ${t.mix_processing} upload${t.mix_processing>1?'s':''} in the background…</div>` : '';
+  up.innerHTML=`${procNote}<div class="field"><label>${upLabel}</label>
       <input type="file" class="ufile" accept="${audioAccept}"></div>
     <div class="field"><label>Change notes (optional)</label><textarea class="unotes" rows="2" placeholder="What changed in this revision?"></textarea></div>
     <div class="row"><button class="btn primary uup">Upload ${isVid?'mix':'revision'}</button><span class="ustat faint small"></span></div>`;
@@ -1426,8 +1434,8 @@ function buildStudioBody(el,t){
   btn.addEventListener('click',async()=>{
     if(!fileEl.files[0]){ toast('Choose a file',true); return; }
     const fd=new FormData(); fd.append('file',fileEl.files[0]); fd.append('notes',up.querySelector('.unotes').value);
-    btn.disabled=true; stat.innerHTML='<span class="spin"></span> uploading & converting…';
-    try{ await api('tracks/'+t.id+'/revisions',{method:'POST',body:fd}); await reload(); toast(isVid?'Mix added':'Revision added'); }
+    btn.disabled=true; stat.innerHTML='<span class="spin"></span> uploading…';
+    try{ await api('tracks/'+t.id+'/revisions',{method:'POST',body:fd}); await reload(); toast('Uploaded — processing in the background'); }
     catch(e){ toast(e.message,true); stat.textContent=''; btn.disabled=false; }
   });
   el.appendChild(up);

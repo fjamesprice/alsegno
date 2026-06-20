@@ -227,9 +227,17 @@ db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('video_enabled',
   tadd('video_duration', 'REAL');
   tadd('video_uploaded_by', 'TEXT');
   tadd('video_updated_at', 'TEXT');
+  // Background-processing flags: a media upload responds immediately and transcodes in the background
+  // (long video/audio can't reliably be held in one HTTP request), so Studio shows "processing…" until
+  // an SSE 'change' lands. video_processing = a video is being processed; mix_processing = count of
+  // audio-mix uploads in flight. Stale flags from a crash/restart are cleared on startup (below).
+  tadd('video_processing', 'INTEGER NOT NULL DEFAULT 0');
+  tadd('mix_processing', 'INTEGER NOT NULL DEFAULT 0');
   const rcols = db.prepare('PRAGMA table_info(revisions)').all().map(c => c.name);
   if (!rcols.includes('is_orig_audio')) db.exec("ALTER TABLE revisions ADD COLUMN is_orig_audio INTEGER NOT NULL DEFAULT 0");
 }
+// Clear any processing flags left set by a crash/restart mid-job (the in-flight transcode was lost).
+db.exec('UPDATE tracks SET video_processing = 0, mix_processing = 0 WHERE video_processing <> 0 OR mix_processing <> 0');
 
 // Indexes for the project-scoped lookups added in Phase 3b (membership-by-user, tracks-by-project).
 // Created after the ALTER above so tracks.project_id exists; idempotent.
@@ -560,6 +568,13 @@ function unlinkStored(name) {
   const p = path.join(UPLOADS_DIR, name);
   if (fs.existsSync(p)) { try { fs.unlinkSync(p); } catch {} }
 }
+
+// Serialized background media queue. Uploads respond immediately, then their transcode/analysis runs
+// here ONE AT A TIME — so an upload is never held in a multi-minute HTTP request (proxy/browser
+// timeouts), and concurrent uploads can't spike CPU/RAM with parallel ffmpeg + big f32le buffers.
+// Each job owns its own try/catch (a thrown job never breaks the chain). Order is FIFO.
+let mediaChain = Promise.resolve();
+function enqueueMedia(job) { mediaChain = mediaChain.then(() => job().catch(e => console.error('[media-queue] job failed:', e && e.message))); }
 
 // ── Express setup ────────────────────────────────────────────
 app.set('trust proxy', 1);
@@ -981,103 +996,117 @@ app.post('/api/tracks/:id/seen', requireProjectAccess(pTrack), (req, res) => {
 // Stores the HQ preview + 480p proxy + fps/dims/duration on the track and, when the video carries
 // audio, seeds/refreshes the "Original audio" revision (is_orig_audio=1, rev_number 0) IN PLACE so its
 // id (and any comments) survive a re-upload. The track's audio-mix revisions are untouched.
-app.post('/api/tracks/:id/video', requireProjectEngineer(pTrack), upload.single('file'), async (req, res) => {
-  const track = db.prepare('SELECT * FROM tracks WHERE id = ?').get(req.params.id);
+app.post('/api/tracks/:id/video', requireProjectEngineer(pTrack), upload.single('file'), (req, res) => {
+  const track = db.prepare('SELECT id FROM tracks WHERE id = ?').get(req.params.id);
   if (!track) { if (req.file) { try { fs.unlinkSync(req.file.path); } catch {} } return res.status(404).json({ error: 'Track not found' }); }
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   const proj = db.prepare('SELECT media_type FROM projects WHERE id = ?').get(req.projectId);
   if (!proj || proj.media_type !== 'video') { try { fs.unlinkSync(req.file.path); } catch {} return res.status(400).json({ error: 'Not a video project' }); }
 
-  let a;
-  try { a = await processTrackVideo(req.file, settingOn('keep_lossless', false)); }
-  catch (e) { console.error('[track-video] failed:', e.message); return res.status(e.status || 500).json({ error: e.status ? e.message : 'Processing failed: ' + e.message }); }
+  // Respond immediately; the (multi-minute) transcode runs in the background queue, and the picture
+  // appears via the SSE 'change' when it's done. Studio shows "processing…" via video_processing.
+  const file = req.file, projectId = req.projectId, username = req.session.user.username, trackId = track.id;
+  const keepLossless = settingOn('keep_lossless', false);
+  db.prepare('UPDATE tracks SET video_processing = 1 WHERE id = ?').run(trackId);
+  broadcastChange(projectId);
+  res.json({ ok: true, processing: true });
 
-  const old = { v: track.video_stored_name, p: track.video_proxy_name, ov: track.video_original_stored_name };
-  const oldOrig = db.prepare('SELECT id, stored_name, original_stored_name FROM revisions WHERE track_id = ? AND is_orig_audio = 1').get(track.id);
-  const oa = a.origAudio;
-  const oaName = oa ? (path.basename(a.video.originalName, path.extname(a.video.originalName)) || 'audio') + '.mp3' : null;
-  try {
-    db.transaction(() => {
-      db.prepare(`UPDATE tracks SET video_stored_name=?, video_proxy_name=?, video_original_name=?, video_original_stored_name=?,
-                    video_fps=?, video_width=?, video_height=?, video_duration=?, video_uploaded_by=?, video_updated_at=datetime('now'),
-                    updated_at=datetime('now') WHERE id=?`)
-        .run(a.video.storedName, a.video.proxyName, a.video.originalName, a.video.originalStoredName,
-             a.video.fps, a.video.width, a.video.height, a.video.duration, req.session.user.username, track.id);
-      if (oa && oldOrig) {
-        db.prepare(`UPDATE revisions SET stored_name=?, original_name=?, original_stored_name=NULL, mime_type='audio/mpeg',
-                      size=?, duration=?, peaks=?, lufs_i=?, lufs_lra=?, true_peak=?, st_interval=?, st_series=?, peak_interval=?, peak_series=? WHERE id=?`)
-          .run(oa.storedName, oaName, oa.size, oa.duration, JSON.stringify(oa.wave.peaks),
-               oa.loud.i, oa.loud.lra, oa.loud.tp, oa.loud.st_interval, JSON.stringify(oa.loud.st),
-               oa.wave.peakInterval, JSON.stringify(oa.wave.peakSeries), oldOrig.id);
-        db.prepare('UPDATE comments SET ts = ? WHERE revision_id = ? AND ts > ?').run(oa.duration, oldOrig.id, oa.duration);
-      } else if (oa) {
-        db.prepare(`INSERT INTO revisions (track_id, rev_number, stored_name, original_name, mime_type, size, duration, peaks, notes, uploaded_by,
-                      lufs_i, lufs_lra, true_peak, st_interval, st_series, peak_interval, peak_series, is_orig_audio)
-                    VALUES (?, 0, ?, ?, 'audio/mpeg', ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, 1)`)
-          .run(track.id, oa.storedName, oaName, oa.size, oa.duration, JSON.stringify(oa.wave.peaks), req.session.user.username,
-               oa.loud.i, oa.loud.lra, oa.loud.tp, oa.loud.st_interval, JSON.stringify(oa.loud.st),
-               oa.wave.peakInterval, JSON.stringify(oa.wave.peakSeries));
-      } else if (oldOrig) {
-        // New picture is SILENT but a stale Original-audio rev (from the old picture) exists — drop it
-        // so the player never presents the old video's audio as the new picture's "Original audio".
-        // Orphan its comments/pins + clear any done pointer, mirroring DELETE /api/revisions.
-        db.prepare('UPDATE comments SET revision_id = NULL, ts = NULL WHERE revision_id = ?').run(oldOrig.id);
-        db.prepare('UPDATE tracks SET done_revision_id = NULL WHERE done_revision_id = ?').run(oldOrig.id);
-        db.prepare('DELETE FROM revisions WHERE id = ?').run(oldOrig.id);
-      }
-    })();
-  } catch (e) {
-    unlinkStored(a.video.storedName); unlinkStored(a.video.proxyName); unlinkStored(a.video.originalStoredName);
-    if (oa) unlinkStored(oa.storedName);
-    console.error('[track-video] db failed:', e.message);
-    return res.status(500).json({ error: 'Processing failed: ' + e.message });
-  }
-  // committed — unlink the replaced video files, and the Original-audio's old files when refreshed
-  if (old.v && old.v !== a.video.storedName) unlinkStored(old.v);
-  if (old.p && old.p !== a.video.proxyName) unlinkStored(old.p);
-  if (old.ov && old.ov !== a.video.originalStoredName) unlinkStored(old.ov);
-  if (oldOrig) {  // the old Original-audio's files are unreferenced now (refreshed in place, or dropped)
-    if (!oa || oldOrig.stored_name !== oa.storedName) unlinkStored(oldOrig.stored_name);
-    unlinkStored(oldOrig.original_stored_name);
-  }
-  broadcastChange(req.projectId);
-  res.json({ ok: true });
+  enqueueMedia(async () => {
+    let a;
+    try { a = await processTrackVideo(file, keepLossless); }
+    catch (e) { console.error('[track-video] processing failed:', e.message); db.prepare('UPDATE tracks SET video_processing = 0 WHERE id = ?').run(trackId); broadcastChange(projectId); return; }
+    // Re-read current state INSIDE the job (FIFO queue ⇒ a prior video upload to this track may have
+    // run first; the track could also have been deleted while queued).
+    const cur = db.prepare('SELECT video_stored_name, video_proxy_name, video_original_stored_name FROM tracks WHERE id = ?').get(trackId);
+    if (!cur) { unlinkStored(a.video.storedName); unlinkStored(a.video.proxyName); unlinkStored(a.video.originalStoredName); if (a.origAudio) unlinkStored(a.origAudio.storedName); return; }
+    const old = { v: cur.video_stored_name, p: cur.video_proxy_name, ov: cur.video_original_stored_name };
+    const oldOrig = db.prepare('SELECT id, stored_name, original_stored_name FROM revisions WHERE track_id = ? AND is_orig_audio = 1').get(trackId);
+    const oa = a.origAudio;
+    const oaName = oa ? (path.basename(a.video.originalName, path.extname(a.video.originalName)) || 'audio') + '.mp3' : null;
+    try {
+      db.transaction(() => {
+        db.prepare(`UPDATE tracks SET video_stored_name=?, video_proxy_name=?, video_original_name=?, video_original_stored_name=?,
+                      video_fps=?, video_width=?, video_height=?, video_duration=?, video_uploaded_by=?, video_updated_at=datetime('now'),
+                      video_processing=0, updated_at=datetime('now') WHERE id=?`)
+          .run(a.video.storedName, a.video.proxyName, a.video.originalName, a.video.originalStoredName,
+               a.video.fps, a.video.width, a.video.height, a.video.duration, username, trackId);
+        if (oa && oldOrig) {
+          db.prepare(`UPDATE revisions SET stored_name=?, original_name=?, original_stored_name=NULL, mime_type='audio/mpeg',
+                        size=?, duration=?, peaks=?, lufs_i=?, lufs_lra=?, true_peak=?, st_interval=?, st_series=?, peak_interval=?, peak_series=? WHERE id=?`)
+            .run(oa.storedName, oaName, oa.size, oa.duration, JSON.stringify(oa.wave.peaks),
+                 oa.loud.i, oa.loud.lra, oa.loud.tp, oa.loud.st_interval, JSON.stringify(oa.loud.st),
+                 oa.wave.peakInterval, JSON.stringify(oa.wave.peakSeries), oldOrig.id);
+          db.prepare('UPDATE comments SET ts = ? WHERE revision_id = ? AND ts > ?').run(oa.duration, oldOrig.id, oa.duration);
+        } else if (oa) {
+          db.prepare(`INSERT INTO revisions (track_id, rev_number, stored_name, original_name, mime_type, size, duration, peaks, notes, uploaded_by,
+                        lufs_i, lufs_lra, true_peak, st_interval, st_series, peak_interval, peak_series, is_orig_audio)
+                      VALUES (?, 0, ?, ?, 'audio/mpeg', ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, 1)`)
+            .run(trackId, oa.storedName, oaName, oa.size, oa.duration, JSON.stringify(oa.wave.peaks), username,
+                 oa.loud.i, oa.loud.lra, oa.loud.tp, oa.loud.st_interval, JSON.stringify(oa.loud.st),
+                 oa.wave.peakInterval, JSON.stringify(oa.wave.peakSeries));
+        } else if (oldOrig) {
+          // New picture is SILENT but a stale Original-audio rev (from the old picture) exists — drop it.
+          db.prepare('UPDATE comments SET revision_id = NULL, ts = NULL WHERE revision_id = ?').run(oldOrig.id);
+          db.prepare('UPDATE tracks SET done_revision_id = NULL WHERE done_revision_id = ?').run(oldOrig.id);
+          db.prepare('DELETE FROM revisions WHERE id = ?').run(oldOrig.id);
+        }
+      })();
+    } catch (e) {
+      unlinkStored(a.video.storedName); unlinkStored(a.video.proxyName); unlinkStored(a.video.originalStoredName);
+      if (oa) unlinkStored(oa.storedName);
+      db.prepare('UPDATE tracks SET video_processing = 0 WHERE id = ?').run(trackId);
+      console.error('[track-video] db failed:', e.message);
+      broadcastChange(projectId);
+      return;
+    }
+    // committed — unlink the replaced video files + the Original-audio's old files
+    if (old.v && old.v !== a.video.storedName) unlinkStored(old.v);
+    if (old.p && old.p !== a.video.proxyName) unlinkStored(old.p);
+    if (old.ov && old.ov !== a.video.originalStoredName) unlinkStored(old.ov);
+    if (oldOrig) { if (!oa || oldOrig.stored_name !== oa.storedName) unlinkStored(oldOrig.stored_name); unlinkStored(oldOrig.original_stored_name); }
+    broadcastChange(projectId);
+  });
 });
 
 // ── Revision routes ──────────────────────────────────────────
-app.post('/api/tracks/:id/revisions', requireProjectEngineer(pTrack), upload.single('file'), async (req, res) => {
-  const track = db.prepare('SELECT * FROM tracks WHERE id = ?').get(req.params.id);
+app.post('/api/tracks/:id/revisions', requireProjectEngineer(pTrack), upload.single('file'), (req, res) => {
+  const track = db.prepare('SELECT id FROM tracks WHERE id = ?').get(req.params.id);
   if (!track) { if (req.file) { try { fs.unlinkSync(req.file.path); } catch {} } return res.status(404).json({ error: 'Track not found' }); }
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
   // A revision is always AUDIO — for a video project it's an audio MIX that plays in sync with the
-  // track's video (the picture is a separate track-level asset, set via POST /api/tracks/:id/video).
-  let a;
-  try {
-    a = await processAudioUpload(req.file, settingOn('keep_lossless', false));
-  } catch (e) {
-    console.error('[upload] analysis failed:', e.message);
-    return res.status(e.status || 500).json({ error: e.status ? e.message : 'Processing failed: ' + e.message });
-  }
-  try {
-    const nextRev = (db.prepare('SELECT COALESCE(MAX(rev_number), 0) v FROM revisions WHERE track_id = ?').get(track.id).v) + 1;
-    const r = db.prepare(`INSERT INTO revisions
-      (track_id, rev_number, stored_name, original_name, original_stored_name, mime_type, size, duration, peaks, notes, uploaded_by,
-       lufs_i, lufs_lra, true_peak, st_interval, st_series, peak_interval, peak_series)
-      VALUES (?, ?, ?, ?, ?, 'audio/mpeg', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(track.id, nextRev, a.storedName, a.origName, a.originalStoredName, a.size, a.duration, JSON.stringify(a.wave.peaks),
-           String(req.body.notes || ''), req.session.user.username,
-           a.loud.i, a.loud.lra, a.loud.tp, a.loud.st_interval, JSON.stringify(a.loud.st),
-           a.wave.peakInterval, JSON.stringify(a.wave.peakSeries));
-    db.prepare("UPDATE tracks SET updated_at = datetime('now') WHERE id = ?").run(track.id);
-    broadcastChange(req.projectId); // a new revision: reviewers' "NEW", rev count, latest all change
-    res.json({ id: r.lastInsertRowid, rev_number: nextRev, duration: a.duration, stored_name: a.storedName });
-  } catch (e) {
-    // DB write failed after files were stored — remove the now-orphaned preview + kept original.
-    unlinkStored(a.storedName); unlinkStored(a.originalStoredName);
-    console.error('[upload] db insert failed:', e.message);
-    res.status(500).json({ error: 'Processing failed: ' + e.message });
-  }
+  // track's video. Respond immediately and transcode/analyze in the background queue (long files
+  // can't be held in one HTTP request); Studio shows "processing…" via mix_processing.
+  const file = req.file, projectId = req.projectId, username = req.session.user.username, trackId = track.id;
+  const notes = String(req.body.notes || ''), keepLossless = settingOn('keep_lossless', false);
+  db.prepare('UPDATE tracks SET mix_processing = mix_processing + 1 WHERE id = ?').run(trackId);
+  broadcastChange(projectId);
+  res.json({ ok: true, processing: true });
+
+  enqueueMedia(async () => {
+    const done = () => { db.prepare('UPDATE tracks SET mix_processing = MAX(0, mix_processing - 1) WHERE id = ?').run(trackId); broadcastChange(projectId); };
+    let a;
+    try { a = await processAudioUpload(file, keepLossless); }
+    catch (e) { console.error('[mix] processing failed:', e.message); done(); return; }
+    if (!db.prepare('SELECT id FROM tracks WHERE id = ?').get(trackId)) {   // track deleted while queued
+      unlinkStored(a.storedName); unlinkStored(a.originalStoredName); done(); return;
+    }
+    try {
+      const nextRev = (db.prepare('SELECT COALESCE(MAX(rev_number), 0) v FROM revisions WHERE track_id = ?').get(trackId).v) + 1;
+      db.prepare(`INSERT INTO revisions
+        (track_id, rev_number, stored_name, original_name, original_stored_name, mime_type, size, duration, peaks, notes, uploaded_by,
+         lufs_i, lufs_lra, true_peak, st_interval, st_series, peak_interval, peak_series)
+        VALUES (?, ?, ?, ?, ?, 'audio/mpeg', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(trackId, nextRev, a.storedName, a.origName, a.originalStoredName, a.size, a.duration, JSON.stringify(a.wave.peaks),
+             notes, username, a.loud.i, a.loud.lra, a.loud.tp, a.loud.st_interval, JSON.stringify(a.loud.st),
+             a.wave.peakInterval, JSON.stringify(a.wave.peakSeries));
+      db.prepare("UPDATE tracks SET updated_at = datetime('now') WHERE id = ?").run(trackId);
+    } catch (e) {
+      unlinkStored(a.storedName); unlinkStored(a.originalStoredName);
+      console.error('[mix] db insert failed:', e.message);
+    }
+    done();
+  });
 });
 
 // Replace the audio of an EXISTING revision in place — keeps id/rev_number/notes and the whole
