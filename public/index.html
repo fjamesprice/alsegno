@@ -141,8 +141,7 @@
   .cmt .tsbtn{flex:none;font-variant-numeric:tabular-nums;color:var(--warn);background:rgba(227,179,65,.12);border-radius:6px;padding:2px 7px;font-size:12px;height:fit-content}
   .cmt .gen{flex:none;color:var(--faint);font-size:12px;padding:2px 4px}
   .cmt .cbody{flex:1;min-width:0;word-wrap:break-word}
-  .cmt .cwho{font-weight:600;margin-right:6px}
-  .cmt .cwho.james{color:var(--accent)} .cmt .cwho.noah{color:var(--done)}
+  .cmt .cwho{font-weight:600;margin-right:6px}  /* color set inline per-author (userColor) */
   .cmt .crev{font-size:11px;color:var(--faint)}
   .cmt .cact{display:flex;gap:6px;flex:none;opacity:.0;transition:.1s}
   .cmt:hover .cact{opacity:1}
@@ -181,10 +180,37 @@
   .spin{display:inline-block;width:14px;height:14px;border:2px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:sp .7s linear infinite;vertical-align:-2px}
   @keyframes sp{to{transform:rotate(360deg)}}
 
+  /* Projects list */
+  .plist{display:flex;flex-direction:column;gap:9px}
+  .pcard{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:14px 16px;display:flex;align-items:center;gap:13px;cursor:pointer;transition:.12s}
+  .pcard:hover{border-color:var(--accent)}
+  .pcard .pt{flex:1;min-width:0}
+  .pcard .pname{font-weight:600;display:flex;align-items:center;gap:8px;min-width:0}
+  .pcard .pname .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .pcard .pmeta{font-size:12.5px;color:var(--faint);margin-top:3px;display:flex;gap:10px;flex-wrap:wrap}
+  .pcard .pprog{width:120px;flex:none}
+  .badge.type{background:var(--panel2);color:var(--muted);border:1px solid var(--line);text-transform:uppercase}
+  .pcard .barwrap{height:6px;margin-top:5px}
+
+  /* Admin tables */
+  .utable{display:flex;flex-direction:column;gap:7px}
+  .urow{display:flex;align-items:center;gap:10px;flex-wrap:wrap;background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:9px 11px}
+  .urow .un{font-weight:600} .urow .uinfo{flex:1;min-width:120px}
+  .urow.inactive{opacity:.55}
+  .urow select{padding:4px 7px;font-size:13px}
+  .pill{font-size:10.5px;font-weight:700;letter-spacing:.4px;padding:2px 7px;border-radius:5px;border:1px solid var(--line);color:var(--muted)}
+  .pill.tofu{color:var(--warn);border-color:var(--warn)}
+  .aproj{background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:11px 12px;margin-bottom:9px}
+  .aproj .ah{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+  .aproj .members{margin-top:9px;display:flex;gap:7px;flex-wrap:wrap;align-items:center}
+  .chip{display:inline-flex;align-items:center;gap:5px;background:var(--panel);border:1px solid var(--line);border-radius:20px;padding:3px 5px 3px 10px;font-size:12.5px}
+  .chip button{color:var(--faint);font-size:14px;line-height:1} .chip button:hover{color:var(--danger)}
+
   @media(max-width:620px){
     .done-ctl{width:120px} .done-ctl input[type=range],.dbar{width:110px}
     .track{flex-wrap:wrap} .topbar .title{font-size:14px}
     .nav button{padding:6px 10px}
+    .pcard .pprog{display:none}
   }
 </style>
 </head>
@@ -205,13 +231,20 @@
 <!-- ───────── MAIN ───────── -->
 <div id="mainView" class="hidden">
   <div class="topbar">
-    <div class="title" id="albumTitle">Album</div>
-    <div class="nav" id="nav">
-      <button data-view="player" class="active">Player</button>
-      <button data-view="studio" id="navStudio">Studio</button>
-    </div>
+    <div class="title" id="albumTitle">Projects</div>
+    <div class="nav" id="nav"></div>
     <span class="who" id="who"></span>
     <button class="btn ghost sm" id="logoutBtn">Sign out</button>
+  </div>
+
+  <!-- PROJECTS LIST VIEW -->
+  <div id="projectsView" class="hidden">
+    <div class="row" style="margin:8px 0 14px">
+      <h2 style="font-size:17px;margin:0;flex:1">Your projects</h2>
+      <button class="btn primary sm hidden" id="newProjectBtn">+ New project</button>
+    </div>
+    <div class="plist" id="projectList"></div>
+    <div id="noProjects" class="pb-empty hidden">No projects yet.</div>
   </div>
 
   <!-- PLAYER VIEW -->
@@ -221,7 +254,7 @@
       <div class="barwrap"><i id="apBar" style="width:0%"></i></div>
     </div>
     <div class="tracks" id="trackList"></div>
-    <div id="emptyHint" class="pb-empty hidden">No tracks yet. James can add them in the Studio tab.</div>
+    <div id="emptyHint" class="pb-empty hidden">No tracks in this project yet.</div>
 
     <!-- comments for currently-open track -->
     <div class="cpanel hidden" id="cpanel">
@@ -241,21 +274,55 @@
   <!-- STUDIO VIEW -->
   <div id="studioView" class="hidden">
     <div class="stx">
-      <div class="card">
-        <h2>Album</h2>
+      <div class="card" id="stTitleCard">
+        <h2 id="stTitleH">Album title</h2>
         <div class="row">
-          <input id="albInput" style="flex:1" placeholder="Album title">
+          <input id="albInput" style="flex:1" placeholder="Title">
           <button class="btn" id="albSave">Save</button>
         </div>
       </div>
       <div class="card">
-        <h2>Add a track</h2>
+        <h2 id="stAddH">Add a track</h2>
+        <p class="muted small hidden" id="stAddHint" style="margin:-4px 0 10px">Adding a second track turns this song into an album.</p>
         <div class="row">
           <input id="newTrack" style="flex:1" placeholder="Track title">
           <button class="btn primary" id="addTrack">Add track</button>
         </div>
       </div>
       <div id="studioTracks" class="stx"></div>
+    </div>
+  </div>
+
+  <!-- ADMIN VIEW (admin only) -->
+  <div id="adminView" class="hidden">
+    <div class="stx">
+      <div class="card">
+        <h2>Users</h2>
+        <div id="usersBox"></div>
+        <div class="adduser" style="margin-top:14px;border-top:1px solid var(--line);padding-top:14px">
+          <h2 style="font-size:14px">Add user</h2>
+          <div class="row" style="flex-wrap:wrap;gap:8px">
+            <input id="auName" placeholder="username" autocapitalize="none" spellcheck="false" style="width:150px">
+            <input id="auDisplay" placeholder="display name (optional)" style="width:180px">
+            <select id="auRole"><option value="client">client</option><option value="engineer">engineer</option><option value="admin">admin</option></select>
+            <button class="btn primary sm" id="auAdd">Add user</button>
+          </div>
+          <p class="faint small" style="margin:8px 0 0">New users sign in with any password the first time — that becomes their password (same as a reset).</p>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Projects</h2>
+        <div id="adminProjects"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SETTINGS VIEW (admin only) -->
+  <div id="settingsView" class="hidden">
+    <div class="card">
+      <h2>Settings</h2>
+      <label class="toggle" style="font-size:14px"><input type="checkbox" id="setNullVis"> Show the null-test button in the player</label>
+      <p class="faint small" style="margin:8px 0 0">More settings (lossless downloads, deleted-note recovery, video projects) arrive in a later update.</p>
     </div>
   </div>
 </div>
@@ -324,7 +391,10 @@ const fmt = t => { if(!isFinite(t)||t<0)t=0; const m=Math.floor(t/60),s=Math.flo
 // SQLite UTC timestamp ("YYYY-MM-DD HH:MM:SS") → compact local datetime
 const fmtDate = s => { if(!s) return ''; const d=new Date(String(s).replace(' ','T')+'Z'); return isNaN(d)?String(s):d.toLocaleString([],{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}); };
 
-let ME=null, TRACKS=[], ALBUM='Album', VIEW='player';
+let ME=null, TRACKS=[], ALBUM='Album', VIEW='projects';
+let PROJECTS=[];                                // project summaries for the landing list
+let PROJECT=null;                              // the currently-open project ({id,type,title,...}) or null
+let NULL_VIS=true;                             // instance setting: null-test button visible in player
 let curTrackId=null, curRevId=null;           // what's loaded in the player
 const peaksCache={};                           // revId -> {duration,peaks}
 let comments=[];                               // comments for the open track
@@ -363,31 +433,95 @@ $('#loginForm').addEventListener('submit',async e=>{
 });
 $('#logoutBtn').addEventListener('click',async()=>{ try{audio.pause()}catch{}; await api('logout',{method:'POST'}); ME=null; location.reload(); });
 
+const canManage = () => !!ME && (ME.role==='admin' || ME.role==='engineer'); // may run Studio on an open project
+const displayName = u => (u && (u.display_name||u.username)) || '';
+// Stable per-author color from a username hash (replaces the old hardcoded james/noah rules).
+function userColor(name){ let h=0; const s=String(name||''); for(let i=0;i<s.length;i++) h=(h*31+s.charCodeAt(i))>>>0; return `hsl(${h%360},62%,68%)`; }
+function applyNullVis(){ $('#nullBox').classList.toggle('hidden', !NULL_VIS); }
+
 async function boot(){
   const data=await api('bootstrap');
-  ME=data.user; ALBUM=data.album_title; TRACKS=data.tracks;
-  $('#loginView').classList.add('hidden'); $('#mainView').classList.remove('hidden'); $('#playerBar').classList.remove('hidden');
-  $('#who').textContent=ME.username;
-  $('#navStudio').classList.toggle('hidden', ME.role!=='admin');
-  $('#albumTitle').textContent=ALBUM; document.title=ALBUM;
-  if(ME.role!=='admin' && VIEW==='studio') setView('player');
-  render();
+  ME=data.user; PROJECTS=data.projects||[]; NULL_VIS=data.null_test_visible!==false;
+  $('#loginView').classList.add('hidden'); $('#mainView').classList.remove('hidden');
+  $('#who').textContent=displayName(ME);
+  $('#newProjectBtn').classList.toggle('hidden', ME.role!=='admin');
+  applyNullVis();
+  // Jump straight back into the last-opened project (the server already re-verified access on the
+  // bootstrap echo); any failure (e.g. access revoked mid-flight) just drops to the project list.
+  const last=data.last_project_id;
+  if(last!=null){ try{ await openProject(last); return; }catch{} }
+  // No remembered project but exactly one accessible → open it (keeps the single-album flow seamless).
+  if(PROJECTS.length===1){ try{ await openProject(PROJECTS[0].id); return; }catch{} }
+  setView('projects');
+}
+
+// ───────── projects list ─────────
+async function loadProjects(){
+  const data=await api('bootstrap');
+  ME=data.user; PROJECTS=data.projects||[]; NULL_VIS=data.null_test_visible!==false;
+  applyNullVis(); renderProjects();
+}
+function renderProjects(){
+  const box=$('#projectList'); box.innerHTML='';
+  $('#noProjects').classList.toggle('hidden', PROJECTS.length>0);
+  PROJECTS.forEach(p=>{
+    const card=document.createElement('div'); card.className='pcard';
+    const unseen=(ME.role==='client' && p.unseen_count)?'<span class="badge new">NEW</span>':'';
+    const open=p.open_comment_count?`<span>💬 ${p.open_comment_count} open</span>`:'';
+    card.innerHTML=`
+      <div class="pt">
+        <div class="pname"><span class="nm">${esc(p.title)}</span>${unseen}<span class="badge type">${esc(p.type)}</span></div>
+        <div class="pmeta"><span>${p.track_count} track${p.track_count===1?'':'s'}</span>${open}</div>
+      </div>
+      <div class="pprog">
+        <div class="small faint" style="text-align:right;margin-bottom:3px">${p.avg_doneness}%</div>
+        <div class="barwrap"><i style="width:${p.avg_doneness}%"></i></div>
+      </div>`;
+    card.addEventListener('click',()=>openProject(p.id).catch(e=>toast(e.message,true)));
+    box.appendChild(card);
+  });
+}
+// Load one project's full payload and enter the player. Switching projects resets the transport.
+async function openProject(id){
+  const data=await api('projects/'+id);   // throws on 403/404 → caller drops to the list
+  if(PROJECT && PROJECT.id!==data.project.id) stopAll();
+  PROJECT=data.project; TRACKS=data.tracks; ALBUM=PROJECT.title;
+  setView('player'); render();
 }
 
 // ───────── view switching ─────────
+function renderNav(){
+  if(!ME){ $('#nav').innerHTML=''; return; }
+  const has=!!PROJECT, manage=has&&canManage();
+  const btn=(v,l)=>`<button data-view="${v}" class="${VIEW===v?'active':''}">${l}</button>`;
+  $('#nav').innerHTML = btn('projects','Projects')
+    + (has?btn('player','Player'):'')
+    + (manage?btn('studio','Studio'):'')
+    + (ME.role==='admin'?btn('admin','Admin')+btn('settings','Settings'):'');
+}
 function setView(v){
+  // Guard the views that need context/role; silently fall back rather than show an empty/forbidden page.
+  if((v==='player'||v==='studio') && !PROJECT) v='projects';
+  if(v==='studio' && !canManage()) v='player';
+  if((v==='admin'||v==='settings') && (!ME||ME.role!=='admin')) v='projects';
   VIEW=v;
-  $$('#nav button').forEach(b=>b.classList.toggle('active',b.dataset.view===v));
-  $('#playerView').classList.toggle('hidden',v!=='player');
-  $('#studioView').classList.toggle('hidden',v!=='studio');
+  ['projects','player','studio','admin','settings'].forEach(n=>{ const el=$('#'+n+'View'); if(el) el.classList.toggle('hidden', n!==v); });
+  $('#playerBar').classList.toggle('hidden', !(v==='player'||v==='studio'));
+  $('#albumTitle').textContent = v==='projects'?'Projects' : v==='admin'?'Admin' : v==='settings'?'Settings' : ALBUM;
+  document.title = (v==='player'||v==='studio') ? ALBUM : 'Album Tracker';
+  renderNav();
+  if(v==='projects') loadProjects();
   if(v==='studio') renderStudio();
+  if(v==='admin') renderAdmin();
+  if(v==='settings') renderSettings();
 }
 $('#nav').addEventListener('click',e=>{ const b=e.target.closest('button'); if(b&&b.dataset.view) setView(b.dataset.view); });
 
 // ───────── render player ─────────
 function render(){
-  $('#albumTitle').textContent=ALBUM; document.title=ALBUM;
-  // album progress
+  if(!PROJECT) return;                              // nothing to draw without an open project
+  const isSong = PROJECT.type==='song';
+  $('.album-prog').classList.toggle('hidden', isSong);   // a single song has no album-level progress bar
   const total=TRACKS.length;
   const done=TRACKS.filter(t=>t.doneness>=100).length;
   const avg=total? Math.round(TRACKS.reduce((a,t)=>a+t.doneness,0)/total):0;
@@ -403,6 +537,7 @@ function render(){
 }
 
 function trackRow(t,i){
+  const isSong = PROJECT && PROJECT.type==='song';
   const li=document.createElement('div');
   li.className='track'+(t.id===curTrackId?' playing':'');
   li.dataset.id=t.id;
@@ -410,12 +545,12 @@ function trackRow(t,i){
   const isPlayingThis=t.id===curTrackId && !audio.paused;
   const doneBadge = t.doneness>=100
     ? `<span class="badge done">✓ DONE${t.done_revision_id?` · r${(t.revisions.find(r=>r.id===t.done_revision_id)||{}).rev_number||''}`:''}</span>` : '';
-  const newBadge = (ME.username==='noah' && t.unseen && t.id!==curTrackId) ? '<span class="badge new">NEW</span>' : '';
+  const newBadge = (ME.role==='client' && t.unseen && t.id!==curTrackId) ? '<span class="badge new">NEW</span>' : '';
   const revBadge = latest ? `<span class="badge rev">${t.revisions.length} rev${t.revisions.length>1?'s':''}</span>`:'<span class="badge rev">no audio</span>';
+  const doneLabel = ME.role==='client'?'Your':'Client';   // a reviewer sees "Your"; engineers/admin see "Client"
   li.innerHTML=`
-    <span class="handle" title="Drag to reorder">⋮⋮</span>
-    <span class="ord"><button class="up" title="Move up">▲</button><button class="dn" title="Move down">▼</button></span>
-    <span class="num">${i+1}</span>
+    ${isSong?'':'<span class="handle" title="Drag to reorder">⋮⋮</span><span class="ord"><button class="up" title="Move up">▲</button><button class="dn" title="Move down">▼</button></span>'}
+    <span class="num">${isSong?'♪':i+1}</span>
     <button class="play-btn ${isPlayingThis?'on':''}" ${latest?'':'disabled'}>${isPlayingThis?'⏸':'▶'}</button>
     <div class="tmid">
       <div class="tname"><span class="nm">${esc(t.title)}</span>${newBadge}${doneBadge}${revBadge}</div>
@@ -425,7 +560,7 @@ function trackRow(t,i){
       </div>
     </div>
     <div class="done-ctl">
-      <span class="dl">${ME.username==='noah'?'Your':'Noah’s'} progress · <b class="dval">${t.doneness}%</b></span>
+      <span class="dl">${doneLabel} progress · <b class="dval">${t.doneness}%</b></span>
       <input type="range" min="0" max="100" step="5" value="${t.doneness}" ${latest?'':'disabled'}>
       <div class="dbar"><i style="width:${t.doneness}%"></i></div>
     </div>`;
@@ -433,20 +568,23 @@ function trackRow(t,i){
   li.querySelector('.play-btn').addEventListener('click',e=>{e.stopPropagation(); if(!latest)return;
     if(t.id===curTrackId){ togglePlay(); } else { loadTrack(t.id, latest.id, {play:true}); } });
   li.querySelector('.cc').addEventListener('click',e=>{e.stopPropagation(); if(latest) loadTrack(t.id, latest.id,{play:false}); else openTrack(t.id);});
-  li.querySelector('.up').addEventListener('click',e=>{e.stopPropagation(); move(i,-1);});
-  li.querySelector('.dn').addEventListener('click',e=>{e.stopPropagation(); move(i,1);});
+  if(!isSong){   // ordering affordances exist only for albums
+    li.querySelector('.up').addEventListener('click',e=>{e.stopPropagation(); move(i,-1);});
+    li.querySelector('.dn').addEventListener('click',e=>{e.stopPropagation(); move(i,1);});
+    setupDrag(li);
+  }
 
   const rng=li.querySelector('input[type=range]'), dval=li.querySelector('.dval'), dbar=li.querySelector('.dbar>i');
   rng.addEventListener('input',()=>{ dval.textContent=rng.value+'%'; dbar.style.width=rng.value+'%'; });
   rng.addEventListener('change',()=>setDoneness(t,parseInt(rng.value,10)));
 
-  setupDrag(li);
   return li;
 }
 
 // ───────── reorder ─────────
 async function saveOrder(){
-  try{ await api('reorder',{method:'PUT',body:{order:TRACKS.map(t=>t.id)}}); }
+  if(!PROJECT) return;
+  try{ await api('projects/'+PROJECT.id+'/reorder',{method:'PUT',body:{order:TRACKS.map(t=>t.id)}}); }
   catch(e){ toast(e.message,true); }
 }
 function move(i,dir){
@@ -883,7 +1021,7 @@ function renderComments(){
       const initial = draft!=null ? draft : c.body;
       div.className='cmt'+(isReply?' reply editing':'');
       div.innerHTML=`${tsStatic}
-        <div class="cbody"><span class="cwho ${c.author}">${esc(c.author)}</span>
+        <div class="cbody"><span class="cwho" style="color:${userColor(c.author)}">${esc(c.author)}</span>
           <textarea class="cedit-ta" data-cid="${c.id}" rows="2">${esc(initial)}</textarea>
           <div class="row" style="margin-top:6px;gap:8px">
             <button class="btn sm esave">Save</button>
@@ -911,7 +1049,7 @@ function renderComments(){
     const editedHtml = c.edited_at ? `<span class="cedit" title="last edited ${esc(fmtDate(c.edited_at))}">(last edited ${esc(fmtDate(c.edited_at))})</span>` : '';
     if(isReply){
       div.className='cmt reply';
-      div.innerHTML=`<div class="cbody"><span class="cwho ${c.author}">${esc(c.author)}</span>${esc(c.body)}${editedHtml}</div>
+      div.innerHTML=`<div class="cbody"><span class="cwho" style="color:${userColor(c.author)}">${esc(c.author)}</span>${esc(c.body)}${editedHtml}</div>
         <div class="cact">
           ${canEdit?'<button class="edit">edit</button>':''}
           ${canEdit?'<button class="del danger">del</button>':''}
@@ -922,7 +1060,7 @@ function renderComments(){
       const rcountHtml = nReplies ? `<span class="rcount">${nReplies} repl${nReplies===1?'y':'ies'}</span>` : '';
       div.className='cmt'+(c.resolved?' resolved':'')+(c.revision_id===curRevId?' cur':'');
       div.innerHTML=`${tsHtml}
-        <div class="cbody"><span class="cwho ${c.author}">${esc(c.author)}</span>${esc(c.body)}
+        <div class="cbody"><span class="cwho" style="color:${userColor(c.author)}">${esc(c.author)}</span>${esc(c.body)}
           <span class="crev">${c.rev_number?('· v'+c.rev_number):''}</span>${editedHtml}${rcountHtml}</div>
         <div class="cact">
           <button class="res">${c.resolved?'reopen':'resolve'}</button>
@@ -1008,21 +1146,46 @@ async function sendComment(){
 }
 
 async function markSeen(t,revId){
-  if(ME.role==='admin')return; // seen-tracking is for Noah's "NEW" badges
+  if(ME.role!=='client')return; // seen-tracking drives clients' "NEW" badges only
   try{ await api('tracks/'+t.id+'/seen',{method:'POST',body:{revision_id:revId}}); if(revId===t.revisions.at(-1)?.id) t.unseen=false; }catch{}
 }
 
-// ───────── STUDIO (admin) ─────────
-$('#albSave').addEventListener('click',async()=>{ const v=$('#albInput').value.trim(); if(!v)return; await api('album',{method:'PUT',body:{title:v}}); ALBUM=v; render(); toast('Album title saved'); });
+// ───────── STUDIO (engineer/admin) ─────────
+$('#albSave').addEventListener('click',async()=>{ const v=$('#albInput').value.trim(); if(!v||!PROJECT)return;
+  try{ await api('projects/'+PROJECT.id,{method:'PUT',body:{title:v}}); PROJECT.title=v; ALBUM=v;
+    $('#albumTitle').textContent=ALBUM; document.title=ALBUM; render(); toast('Title saved'); }
+  catch(e){ toast(e.message,true); } });
 $('#addTrack').addEventListener('click',addTrackFn);
 $('#newTrack').addEventListener('keydown',e=>{ if(e.key==='Enter') addTrackFn(); });
-async function addTrackFn(){ const v=$('#newTrack').value.trim(); if(!v)return; try{ const r=await api('tracks',{method:'POST',body:{title:v}}); $('#newTrack').value=''; if(r&&r.id) openStudio.add(r.id); await reload(); setView('studio'); }catch(e){toast(e.message,true);} }
+async function addTrackFn(){
+  const v=$('#newTrack').value.trim(); if(!v||!PROJECT)return;
+  const body={title:v};
+  // Adding a 2nd track to a song promotes it to an album — collect the album title here.
+  if(PROJECT.type==='song' && TRACKS.length>=1){
+    const at=prompt('Adding a second track turns this song into an album.\nAlbum title:', PROJECT.title);
+    if(at===null) return;
+    if(!at.trim()){ toast('Album title required',true); return; }
+    body.album_title=at.trim();
+  }
+  try{ const r=await api('projects/'+PROJECT.id+'/tracks',{method:'POST',body}); $('#newTrack').value=''; if(r&&r.id) openStudio.add(r.id); await reload(); setView('studio'); }
+  catch(e){ toast(e.message,true); }
+}
 
-async function reload(){ const data=await api('bootstrap'); TRACKS=data.tracks; ALBUM=data.album_title; render(); if(VIEW==='studio') renderStudio(); }
+// Reload the OPEN project's payload (replaces the old album-wide bootstrap reload).
+async function reload(){
+  if(!PROJECT) return;
+  const data=await api('projects/'+PROJECT.id);
+  PROJECT=data.project; TRACKS=data.tracks; ALBUM=PROJECT.title;
+  render(); if(VIEW==='studio') renderStudio();
+}
 
 const openStudio=new Set();
 function renderStudio(){
-  $('#albInput').value=ALBUM;
+  if(!PROJECT) return;
+  const isSong=PROJECT.type==='song';
+  $('#stTitleH').textContent = isSong?'Song title':'Album title';
+  $('#stAddHint').classList.toggle('hidden', !isSong);
+  $('#albInput').value=PROJECT.title;
   const box=$('#studioTracks'); box.innerHTML='';
   if(!TRACKS.length){ box.innerHTML='<div class="card faint">No tracks yet — add one above.</div>'; return; }
   TRACKS.forEach((t,i)=>{
@@ -1132,10 +1295,120 @@ function buildStudioBody(el,t){
   });
 }
 
+// ───────── SETTINGS (admin) ─────────
+async function renderSettings(){
+  try{ const s=await api('settings'); $('#setNullVis').checked = s.null_test_visible!=='0'; }
+  catch(e){ toast(e.message,true); }
+}
+$('#setNullVis').addEventListener('change',async e=>{
+  const on=e.target.checked;
+  try{ await api('settings',{method:'PUT',body:{null_test_visible:on}}); NULL_VIS=on; applyNullVis(); toast('Setting saved'); }
+  catch(err){ toast(err.message,true); e.target.checked=!on; }
+});
+
+// ───────── ADMIN (users + projects) ─────────
+async function renderAdmin(){
+  try{
+    const [users, projects] = await Promise.all([api('admin/users'), api('admin/projects')]);
+    renderUsers(users); renderAdminProjects(projects, users);
+  }catch(e){ toast(e.message,true); }
+}
+function renderUsers(users){
+  const box=$('#usersBox'); box.innerHTML=''; const tbl=document.createElement('div'); tbl.className='utable';
+  users.forEach(u=>{
+    const row=document.createElement('div'); row.className='urow'+(u.active?'':' inactive');
+    row.innerHTML=`
+      <span class="un" style="color:${userColor(u.username)}">${esc(u.username)}</span>
+      <span class="uinfo small muted">${esc(u.display_name||'')} ${u.has_password?'':'<span class="pill tofu">password pending</span>'} ${u.active?'':'<span class="pill">inactive</span>'}</span>
+      <select class="urole">${['client','engineer','admin'].map(r=>`<option value="${r}" ${u.role===r?'selected':''}>${r}</option>`).join('')}</select>
+      <button class="btn sm uact">${u.active?'Deactivate':'Activate'}</button>
+      <button class="btn sm ureset">Reset password</button>`;
+    row.querySelector('.urole').addEventListener('change',async e=>{
+      try{ await api('users/'+u.username,{method:'PUT',body:{role:e.target.value}}); toast('Role updated');
+        if(u.username===ME.username && e.target.value!=='admin'){ location.reload(); return; } // self-demote: hard re-sync ME/nav
+        renderAdmin(); }
+      catch(err){ toast(err.message,true); e.target.value=u.role; }
+    });
+    row.querySelector('.uact').addEventListener('click',async()=>{
+      try{ await api('users/'+u.username,{method:'PUT',body:{active:u.active?0:1}}); toast(u.active?'Deactivated':'Activated'); renderAdmin(); }
+      catch(err){ toast(err.message,true); }
+    });
+    row.querySelector('.ureset').addEventListener('click',async()=>{
+      if(!confirm('Reset '+u.username+'’s password?\nTheir next sign-in with any password sets a new one.'))return;
+      try{ await api('users/'+u.username+'/reset',{method:'POST'}); toast('Password reset — next sign-in sets a new one'); renderAdmin(); }
+      catch(err){ toast(err.message,true); }
+    });
+    tbl.appendChild(row);
+  });
+  box.appendChild(tbl);
+}
+function renderAdminProjects(projects, users){
+  const box=$('#adminProjects'); box.innerHTML='';
+  const head=document.createElement('div'); head.className='row'; head.style.marginBottom='10px';
+  head.innerHTML='<button class="btn primary sm" id="adminNewProj">+ New project</button>';
+  head.querySelector('#adminNewProj').addEventListener('click',newProjectFlow);
+  box.appendChild(head);
+  projects.forEach(p=>{
+    const card=document.createElement('div'); card.className='aproj';
+    const chips=p.users.map(u=>`<span class="chip" style="color:${userColor(u)}">${esc(u)}<button class="rmu" data-u="${esc(u)}" title="Revoke">×</button></span>`).join('');
+    const nonMembers=users.filter(u=>u.active && !p.users.includes(u.username));
+    card.innerHTML=`
+      <div class="ah">
+        <b style="flex:1">${esc(p.title)}</b>
+        <span class="badge type">${esc(p.type)}</span>
+        <span class="faint small">${p.track_count} track${p.track_count===1?'':'s'}</span>
+        <button class="btn sm prn">Rename</button>
+        <button class="btn sm danger pdel">Delete</button>
+      </div>
+      <div class="members">
+        <span class="faint small">Access:</span>${chips||'<span class="faint small">admins only</span>'}
+        ${nonMembers.length?`<select class="addmem"><option value="">+ add user…</option>${nonMembers.map(u=>`<option value="${esc(u.username)}">${esc(u.username)} (${u.role})</option>`).join('')}</select>`:''}
+      </div>`;
+    card.querySelector('.prn').addEventListener('click',async()=>{
+      const v=prompt('Project title:', p.title); if(v===null||!v.trim())return;
+      try{ await api('projects/'+p.id,{method:'PUT',body:{title:v.trim()}}); toast('Renamed'); if(PROJECT&&PROJECT.id===p.id){PROJECT.title=v.trim();ALBUM=PROJECT.title;} renderAdmin(); }
+      catch(e){ toast(e.message,true); }
+    });
+    card.querySelector('.pdel').addEventListener('click',async()=>{
+      if(!confirm('Delete project "'+p.title+'" and ALL its tracks, revisions, and notes?\nThis cannot be undone.'))return;
+      try{ await api('projects/'+p.id,{method:'DELETE'}); toast('Project deleted'); if(PROJECT&&PROJECT.id===p.id){ stopAll(); PROJECT=null; renderNav(); } renderAdmin(); }
+      catch(e){ toast(e.message,true); }
+    });
+    card.querySelectorAll('.rmu').forEach(b=>b.addEventListener('click',async()=>{
+      try{ await api('projects/'+p.id+'/users/'+encodeURIComponent(b.dataset.u),{method:'DELETE'}); toast('Access revoked'); renderAdmin(); }
+      catch(e){ toast(e.message,true); }
+    }));
+    const addmem=card.querySelector('.addmem');
+    if(addmem) addmem.addEventListener('change',async e=>{
+      const u=e.target.value; if(!u)return;
+      try{ await api('projects/'+p.id+'/users',{method:'POST',body:{username:u}}); toast('Access granted'); renderAdmin(); }
+      catch(err){ toast(err.message,true); }
+    });
+    box.appendChild(card);
+  });
+}
+$('#auAdd').addEventListener('click',async()=>{
+  const username=$('#auName').value.trim().toLowerCase(), role=$('#auRole').value, display_name=$('#auDisplay').value.trim();
+  if(!username){ toast('Username required',true); return; }
+  try{ await api('users',{method:'POST',body:{username,role,display_name}}); $('#auName').value=''; $('#auDisplay').value=''; toast('User added'); renderAdmin(); }
+  catch(e){ toast(e.message,true); }
+});
+$('#newProjectBtn').addEventListener('click',newProjectFlow);
+async function newProjectFlow(){
+  const type = confirm('Create which kind of project?\n\nOK = Album (multiple tracks)\nCancel = Single song')? 'album':'song';
+  const title = prompt(type==='album'?'Album title:':'Song title:'); if(title===null||!title.trim())return;
+  try{
+    const r=await api('projects',{method:'POST',body:{type,title:title.trim()}});
+    toast(type==='album'?'Album created':'Song created');
+    if(VIEW==='admin'){ renderAdmin(); }
+    else { await loadProjects(); if(r&&r.id) await openProject(r.id); }
+  }catch(e){ toast(e.message,true); }
+}
+
 // ───────── keyboard ─────────
 document.addEventListener('keydown',e=>{
   if(e.target.matches('input,textarea,select'))return;
-  if(e.code==='Space'){ e.preventDefault(); if(curTrackId) togglePlay(); }
+  if(e.code==='Space'){ e.preventDefault(); if(curTrackId && (VIEW==='player'||VIEW==='studio')) togglePlay(); }
   else if(e.key==='ArrowRight' && e.shiftKey){ step(1); }
   else if(e.key==='ArrowLeft' && e.shiftKey){ step(-1); }
 });

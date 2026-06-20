@@ -118,10 +118,14 @@ db.exec(`
 const ADMIN_USER = (process.env.ADMIN_USER || 'james').trim().toLowerCase();
 db.prepare('INSERT OR IGNORE INTO users (username, role) VALUES (?, ?)').run(ADMIN_USER, 'admin');
 
-// Seed album title. Still read/written by the legacy /api/album + bootstrap routes until they
-// move to projects.title in Phase 3b/3c; the backfill copies it into the migrated album project.
+// Seed album title. Read once by the Phase 3a backfill to title the migrated album project;
+// no longer surfaced by any route (the project's own title is authoritative from 3b on).
 db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('album_title', ?)")
   .run('Noah Praise God — Album');
+
+// Phase 3b settings. Only null_test_visible is wired this session (player hides the null UI when
+// '0'); keep_lossless / show_deleted_notes / video_enabled arrive with their behavior in Phase 3d.
+db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('null_test_visible', '1')").run();
 
 // Migration: loudness/peak metering columns on revisions
 {
@@ -160,6 +164,11 @@ db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('album_title', ?
   if (!ucols.includes('active')) db.exec('ALTER TABLE users ADD COLUMN active INTEGER NOT NULL DEFAULT 1');
   const tcols = db.prepare('PRAGMA table_info(tracks)').all().map(c => c.name);
   if (!tcols.includes('project_id')) db.exec('ALTER TABLE tracks ADD COLUMN project_id INTEGER');
+  // Phase 3b: remember each user's last-opened project so login can jump straight back in.
+  // Set ONLY server-side inside the access-checked GET /api/projects/:id, re-validated on every
+  // open and filtered in bootstrap — a stale pointer at a revoked/deleted project can never
+  // auto-open (it falls back to the project list). It is a hint, never an authorization.
+  if (!ucols.includes('last_project_id')) db.exec('ALTER TABLE users ADD COLUMN last_project_id INTEGER');
 }
 
 // Indexes for the project-scoped lookups added in Phase 3b (membership-by-user, tracks-by-project).
@@ -207,6 +216,11 @@ function verifyPassword(pw, stored) {
   const expected = Buffer.from(hashHex, 'hex');
   return hash.length === expected.length && crypto.timingSafeEqual(hash, expected);
 }
+// What we keep in the session cookie (and hand to the client) — never the pw_hash.
+const sessionUser = u => ({ username: u.username, role: u.role, display_name: u.display_name || null });
+// Instance setting as a boolean (missing key ⇒ default). Used by bootstrap so every role learns
+// instance toggles (e.g. null_test_visible) even though GET /api/settings is admin-only.
+const settingOn = (key, dflt = true) => { const v = db.prepare('SELECT value FROM settings WHERE key = ?').get(key)?.value; return v == null ? dflt : v === '1'; };
 
 // ── Multer ───────────────────────────────────────────────────
 const storage = multer.diskStorage({
@@ -384,14 +398,75 @@ app.use(session({
   cookie: { maxAge: 30 * 24 * 60 * 60 * 1000, secure: false, sameSite: 'lax' }
 }));
 
+// Re-read the user from the DB on every authenticated request. The session cookie is only a
+// login-time snapshot; without this, deactivation and role changes wouldn't take effect until the
+// user happened to log out (a deactivated admin could keep minting admins). Returns the fresh row
+// or null when the account is gone or deactivated, and refreshes req.session.user in place so all
+// downstream checks use the live role. One cheap indexed lookup (better-sqlite3 is synchronous) —
+// mirrors how project membership (isMember) is already enforced live on each request.
+function liveUser(req) {
+  if (!req.session.user) return null;
+  const u = db.prepare('SELECT username, role, active, display_name FROM users WHERE username = ?').get(req.session.user.username);
+  if (!u || u.active === 0) return null;
+  req.session.user = sessionUser(u);
+  return u;
+}
 function requireAuth(req, res, next) {
-  if (!req.session.user) return res.status(401).json({ error: 'Not authenticated' });
+  if (!liveUser(req)) return res.status(401).json({ error: 'Not authenticated' });
   next();
 }
 function requireAdmin(req, res, next) {
-  if (!req.session.user) return res.status(401).json({ error: 'Not authenticated' });
-  if (req.session.user.role !== 'admin') return res.status(403).json({ error: 'Only James can do that' });
+  const u = liveUser(req);
+  if (!u) return res.status(401).json({ error: 'Not authenticated' });
+  if (u.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
   next();
+}
+
+// ── Project access control (Phase 3b) ────────────────────────
+// Resolve the owning project of a resource from whatever id a route carries. NULL ⇒ the resource
+// (or its project link) doesn't exist → the middleware answers 404 before any access decision.
+const projectExists      = id => !!db.prepare('SELECT 1 FROM projects WHERE id = ?').get(id);
+const projectIdForTrack    = id => db.prepare('SELECT project_id FROM tracks WHERE id = ?').get(id)?.project_id ?? null;
+const projectIdForRevision = id => db.prepare('SELECT t.project_id AS p FROM revisions r JOIN tracks t ON r.track_id = t.id WHERE r.id = ?').get(id)?.p ?? null;
+const projectIdForComment  = id => db.prepare('SELECT t.project_id AS p FROM comments c JOIN tracks t ON c.track_id = t.id WHERE c.id = ?').get(id)?.p ?? null;
+const projectIdForAudio    = name => db.prepare('SELECT t.project_id AS p FROM revisions r JOIN tracks t ON r.track_id = t.id WHERE r.stored_name = ?').get(name)?.p ?? null;
+const isMember = (username, projectId) => !!db.prepare('SELECT 1 FROM project_users WHERE project_id = ? AND username = ?').get(projectId, username);
+
+// Resolvers (req → projectId|null). Param ids are the project itself; others look the project up.
+// intId guards against a non-numeric :id (NaN would otherwise reach a SQLite bind) → clean 404.
+const intId    = v => { const n = Number(v); return Number.isInteger(n) && n > 0 ? n : null; };
+const pParam   = req => { const id = intId(req.params.id); return id != null && projectExists(id) ? id : null; };
+const pTrack   = req => { const id = intId(req.params.id); return id == null ? null : projectIdForTrack(id); };
+const pRev     = req => { const id = intId(req.params.id); return id == null ? null : projectIdForRevision(id); };
+const pComment = req => { const id = intId(req.params.id); return id == null ? null : projectIdForComment(id); };
+const pAudio   = req => projectIdForAudio(req.params.name);
+
+// admin → any project; otherwise must be a member of THIS project. Stashes req.projectId.
+function requireProjectAccess(resolve) {
+  return (req, res, next) => {
+    const u = liveUser(req);
+    if (!u) return res.status(401).json({ error: 'Not authenticated' });
+    const pid = resolve(req);
+    if (pid == null) return res.status(404).json({ error: 'Not found' });
+    if (u.role !== 'admin' && !isMember(u.username, pid)) return res.status(403).json({ error: 'No access to this project' });
+    req.projectId = pid;
+    next();
+  };
+}
+// admin → any project; otherwise must be an ENGINEER who is a member of THIS project. Clients (and
+// non-member engineers) are refused. Gates everything that creates/edits tracks, revisions, files.
+function requireProjectEngineer(resolve) {
+  return (req, res, next) => {
+    const u = liveUser(req);
+    if (!u) return res.status(401).json({ error: 'Not authenticated' });
+    const pid = resolve(req);
+    if (pid == null) return res.status(404).json({ error: 'Not found' });
+    if (u.role !== 'admin' && !(u.role === 'engineer' && isMember(u.username, pid))) {
+      return res.status(403).json({ error: 'Engineer access required' });
+    }
+    req.projectId = pid;
+    next();
+  };
 }
 
 // ── Auth routes ──────────────────────────────────────────────
@@ -402,28 +477,32 @@ app.post('/api/login', (req, res) => {
 
   const user = db.prepare('SELECT * FROM users WHERE username = ?').get(username);
   if (!user) return res.status(401).json({ error: 'Invalid credentials' });
+  if (user.active === 0) return res.status(403).json({ error: 'Account deactivated' });
 
   if (!user.pw_hash) {
-    // First login for this account — the password they type becomes the password.
+    // First login for this account (new user OR admin password reset) — the password they type
+    // becomes the password. Deactivated accounts are refused above, before TOFU can fire.
     db.prepare('UPDATE users SET pw_hash = ? WHERE username = ?').run(hashPassword(password), username);
   } else if (!verifyPassword(password, user.pw_hash)) {
     return res.status(401).json({ error: 'Invalid credentials' });
   }
 
-  req.session.user = { username: user.username, role: user.role };
+  req.session.user = sessionUser(user);
   res.json(req.session.user);
 });
 
 app.post('/api/logout', (req, res) => { req.session.destroy(() => res.json({ ok: true })); });
 
 app.get('/api/me', (req, res) => {
-  if (!req.session.user) return res.status(401).json({ error: 'Not authenticated' });
+  if (!liveUser(req)) return res.status(401).json({ error: 'Not authenticated' });
   res.json(req.session.user);
 });
 
-// ── Bootstrap (everything the UI needs in one call) ──────────
-function trackPayload(username) {
-  const tracks = db.prepare('SELECT * FROM tracks ORDER BY sort_order, id').all();
+// ── Bootstrap + project payloads (Phase 3b) ──────────────────
+// Full per-project payload: the project's tracks, each with revisions, the caller's unseen flag,
+// and comment counts — the exact shape the player/studio render (scoped to one project_id).
+function projectTracks(username, projectId) {
+  const tracks = db.prepare('SELECT * FROM tracks WHERE project_id = ? ORDER BY sort_order, id').all(projectId);
   const revStmt = db.prepare(`SELECT id, rev_number, stored_name, original_name, duration, notes, uploaded_by, size, created_at,
                                      lufs_i, lufs_lra, true_peak
                               FROM revisions WHERE track_id = ? ORDER BY rev_number`);
@@ -443,64 +522,186 @@ function trackPayload(username) {
   return tracks;
 }
 
+// The projects a user may see: admin → all; everyone else → only the ones they're a member of.
+function visibleProjects(user) {
+  return user.role === 'admin'
+    ? db.prepare('SELECT * FROM projects ORDER BY created_at, id').all()
+    : db.prepare(`SELECT p.* FROM projects p JOIN project_users pu ON pu.project_id = p.id
+                  WHERE pu.username = ? ORDER BY p.created_at, p.id`).all(user.username);
+}
+
+// Lightweight summaries for the project-list landing (counts + a per-user unseen/progress glance).
+function projectSummaries(user) {
+  const projects = visibleProjects(user);
+  const tCount = db.prepare('SELECT COUNT(*) v FROM tracks WHERE project_id = ?');
+  const openC = db.prepare(`SELECT COUNT(*) v FROM comments c JOIN tracks t ON c.track_id = t.id
+                            WHERE t.project_id = ? AND c.parent_id IS NULL AND c.resolved = 0`);
+  const avgDone = db.prepare('SELECT COALESCE(AVG(doneness), 0) v FROM tracks WHERE project_id = ?');
+  // unseen: tracks in the project whose latest revision this user hasn't marked seen.
+  const unseen = db.prepare(`
+    SELECT COUNT(*) v FROM tracks t
+    WHERE t.project_id = ?
+      AND (SELECT MAX(id) FROM revisions WHERE track_id = t.id) IS NOT NULL
+      AND COALESCE((SELECT last_seen_rev FROM seen WHERE username = ? AND track_id = t.id), 0)
+          < (SELECT MAX(id) FROM revisions WHERE track_id = t.id)`);
+  return projects.map(p => ({
+    id: p.id, type: p.type, media_type: p.media_type, title: p.title, owner: p.owner,
+    art_stored_name: p.art_stored_name || null,
+    track_count: tCount.get(p.id).v,
+    open_comment_count: openC.get(p.id).v,
+    avg_doneness: Math.round(avgDone.get(p.id).v),
+    unseen_count: unseen.get(p.id, user.username).v,
+  }));
+}
+
+// Landing call: the user + the projects they can open + their last-opened project (if still
+// reachable). The list is the source of truth for the picker; opening one fetches its payload.
 app.get('/api/bootstrap', requireAuth, (req, res) => {
-  res.json({
-    user: req.session.user,
-    album_title: db.prepare("SELECT value FROM settings WHERE key = 'album_title'").get()?.value || 'Album',
-    tracks: trackPayload(req.session.user.username)
-  });
+  const user = req.session.user;
+  const projects = projectSummaries(user);
+  const last = db.prepare('SELECT last_project_id FROM users WHERE username = ?').get(user.username)?.last_project_id ?? null;
+  // Only echo the hint if it's still in the accessible set — never auto-open a revoked/deleted project.
+  const last_project_id = (last != null && projects.some(p => p.id === last)) ? last : null;
+  res.json({ user, projects, last_project_id, null_test_visible: settingOn('null_test_visible') });
 });
 
-// ── Album ────────────────────────────────────────────────────
-app.put('/api/album', requireAdmin, (req, res) => {
+// Full payload for one project. requireProjectAccess proves membership/admin BEFORE we record it
+// as the user's last-opened project — so the stored hint can only ever point at a reachable project.
+app.get('/api/projects/:id', requireProjectAccess(pParam), (req, res) => {
+  const p = db.prepare('SELECT id, type, media_type, title, art_stored_name, owner, created_at FROM projects WHERE id = ?').get(req.projectId);
+  db.prepare('UPDATE users SET last_project_id = ? WHERE username = ?').run(p.id, req.session.user.username);
+  res.json({ user: req.session.user, project: p, tracks: projectTracks(req.session.user.username, p.id) });
+});
+
+// ── Project management (admin) ───────────────────────────────
+// Admin sees every project with its members + a track count, for the admin page.
+app.get('/api/admin/projects', requireAdmin, (req, res) => {
+  const projects = db.prepare('SELECT id, type, media_type, title, owner, created_at FROM projects ORDER BY created_at, id').all();
+  const memStmt = db.prepare('SELECT username FROM project_users WHERE project_id = ? ORDER BY username');
+  const tCount = db.prepare('SELECT COUNT(*) v FROM tracks WHERE project_id = ?');
+  for (const p of projects) { p.users = memStmt.all(p.id).map(r => r.username); p.track_count = tCount.get(p.id).v; }
+  res.json(projects);
+});
+
+app.post('/api/projects', requireAdmin, (req, res) => {
+  const type = req.body.type === 'song' ? 'song' : 'album';
   const title = String(req.body.title || '').trim();
   if (!title) return res.status(400).json({ error: 'Title required' });
-  db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('album_title', ?)").run(title);
+  const members = Array.isArray(req.body.users) ? req.body.users.map(u => String(u).trim().toLowerCase()).filter(Boolean) : [];
+  const owner = req.session.user.username;
+  const id = db.transaction(() => {
+    const pid = db.prepare("INSERT INTO projects (type, media_type, title, owner) VALUES (?, 'audio', ?, ?)").run(type, title, owner).lastInsertRowid;
+    const grant = db.prepare('INSERT OR IGNORE INTO project_users (project_id, username) VALUES (?, ?)');
+    grant.run(pid, owner); // creator keeps access even if later demoted from admin
+    for (const u of members) if (db.prepare('SELECT 1 FROM users WHERE username = ?').get(u)) grant.run(pid, u);
+    // A song auto-creates its single track (titled like the song); a 2nd track later promotes it.
+    if (type === 'song') db.prepare('INSERT INTO tracks (title, sort_order, project_id) VALUES (?, 1, ?)').run(title, pid);
+    return pid;
+  })();
+  res.json({ id });
+});
+
+app.put('/api/projects/:id', requireAdmin, (req, res) => {
+  if (!projectExists(Number(req.params.id))) return res.status(404).json({ error: 'Not found' });
+  const title = String(req.body.title || '').trim();
+  if (!title) return res.status(400).json({ error: 'Title required' });
+  db.prepare("UPDATE projects SET title = ?, updated_at = datetime('now') WHERE id = ?").run(title, req.params.id);
+  res.json({ ok: true });
+});
+
+// Delete a project: tracks have no FK to projects (Phase 3a), so cascade them explicitly
+// (tracks→revisions→comments DO cascade); project_users cascades via its own FK. Unlink files after.
+app.delete('/api/projects/:id', requireAdmin, (req, res) => {
+  const pid = Number(req.params.id);
+  if (!projectExists(pid)) return res.status(404).json({ error: 'Not found' });
+  const revs = db.prepare('SELECT r.stored_name FROM revisions r JOIN tracks t ON r.track_id = t.id WHERE t.project_id = ?').all(pid);
+  db.transaction(() => {
+    db.prepare('DELETE FROM seen WHERE track_id IN (SELECT id FROM tracks WHERE project_id = ?)').run(pid);
+    db.prepare('DELETE FROM tracks WHERE project_id = ?').run(pid);   // cascades revisions + comments
+    db.prepare('UPDATE users SET last_project_id = NULL WHERE last_project_id = ?').run(pid);
+    db.prepare('DELETE FROM projects WHERE id = ?').run(pid);          // cascades project_users
+  })();
+  for (const r of revs) { const fp = path.join(UPLOADS_DIR, r.stored_name); if (fs.existsSync(fp)) { try { fs.unlinkSync(fp); } catch {} } }
+  res.json({ ok: true });
+});
+
+app.post('/api/projects/:id/users', requireAdmin, (req, res) => {
+  const pid = Number(req.params.id);
+  if (!projectExists(pid)) return res.status(404).json({ error: 'Not found' });
+  const username = String(req.body.username || '').trim().toLowerCase();
+  if (!db.prepare('SELECT 1 FROM users WHERE username = ?').get(username)) return res.status(400).json({ error: 'No such user' });
+  db.prepare('INSERT OR IGNORE INTO project_users (project_id, username) VALUES (?, ?)').run(pid, username);
+  res.json({ ok: true });
+});
+
+app.delete('/api/projects/:id/users/:username', requireAdmin, (req, res) => {
+  const pid = Number(req.params.id);
+  const username = String(req.params.username || '').trim().toLowerCase();
+  db.prepare('DELETE FROM project_users WHERE project_id = ? AND username = ?').run(pid, username);
+  // Drop the stale auto-open hint for the revoked user (bootstrap also filters, but keep it clean).
+  db.prepare('UPDATE users SET last_project_id = NULL WHERE username = ? AND last_project_id = ?').run(username, pid);
   res.json({ ok: true });
 });
 
 // ── Track routes ─────────────────────────────────────────────
-app.post('/api/tracks', requireAdmin, (req, res) => {
+// Create a track in a project. Song→album promotion: adding a 2nd track to a 'song' flips it to
+// 'album' and (re)titles it from album_title — so albums get a heading + ordering they lacked.
+app.post('/api/projects/:id/tracks', requireProjectEngineer(pParam), (req, res) => {
+  const pid = req.projectId;
   const title = String(req.body.title || '').trim();
-  if (!title) return res.status(400).json({ error: 'Title required' });
-  const max = db.prepare('SELECT COALESCE(MAX(sort_order), 0) v FROM tracks').get().v;
-  const r = db.prepare('INSERT INTO tracks (title, sort_order) VALUES (?, ?)').run(title, max + 1);
-  res.json({ id: r.lastInsertRowid });
+  if (!title) return res.status(400).json({ error: 'Track title required' });
+  const proj = db.prepare('SELECT type FROM projects WHERE id = ?').get(pid);
+  const existing = db.prepare('SELECT COUNT(*) v FROM tracks WHERE project_id = ?').get(pid).v;
+  let promoted = false;
+  if (proj.type === 'song' && existing >= 1) {
+    const albumTitle = String(req.body.album_title || '').trim();
+    if (!albumTitle) return res.status(400).json({ error: 'Album title required to add a second track' });
+    db.prepare("UPDATE projects SET type = 'album', title = ?, updated_at = datetime('now') WHERE id = ?").run(albumTitle, pid);
+    promoted = true;
+  }
+  const max = db.prepare('SELECT COALESCE(MAX(sort_order), 0) v FROM tracks WHERE project_id = ?').get(pid).v;
+  const r = db.prepare('INSERT INTO tracks (title, sort_order, project_id) VALUES (?, ?, ?)').run(title, max + 1, pid);
+  res.json({ id: r.lastInsertRowid, promoted });
 });
 
-app.put('/api/tracks/:id', requireAdmin, (req, res) => {
+app.put('/api/tracks/:id', requireProjectEngineer(pTrack), (req, res) => {
   const title = String(req.body.title || '').trim();
   if (!title) return res.status(400).json({ error: 'Title required' });
   db.prepare("UPDATE tracks SET title = ?, updated_at = datetime('now') WHERE id = ?").run(title, req.params.id);
   res.json({ ok: true });
 });
 
-app.delete('/api/tracks/:id', requireAdmin, (req, res) => {
+app.delete('/api/tracks/:id', requireProjectEngineer(pTrack), (req, res) => {
   const revs = db.prepare('SELECT stored_name FROM revisions WHERE track_id = ?').all(req.params.id);
   db.prepare('DELETE FROM tracks WHERE id = ?').run(req.params.id); // cascades revisions/comments
   for (const r of revs) { const p = path.join(UPLOADS_DIR, r.stored_name); if (fs.existsSync(p)) fs.unlinkSync(p); }
   res.json({ ok: true });
 });
 
-// Reorder — both users may reorder; order is shared
-app.put('/api/reorder', requireAuth, (req, res) => {
+// Reorder tracks within a project — shared state, any project member may do it. The UPDATE is
+// constrained to this project so a forged id list can't move another project's tracks.
+app.put('/api/projects/:id/reorder', requireProjectAccess(pParam), (req, res) => {
   const order = Array.isArray(req.body.order) ? req.body.order : [];
-  const stmt = db.prepare('UPDATE tracks SET sort_order = ? WHERE id = ?');
-  const tx = db.transaction((ids) => { ids.forEach((id, i) => stmt.run(i + 1, id)); });
-  tx(order.map(Number));
+  const stmt = db.prepare('UPDATE tracks SET sort_order = ? WHERE id = ? AND project_id = ?');
+  db.transaction(ids => ids.forEach((id, i) => stmt.run(i + 1, id, req.projectId)))(order.map(Number));
   res.json({ ok: true });
 });
 
-// Doneness — Noah's call (any authed user may set it)
-app.put('/api/tracks/:id/doneness', requireAuth, (req, res) => {
+// Doneness — any project member may set it (clients drive it; shared state).
+app.put('/api/tracks/:id/doneness', requireProjectAccess(pTrack), (req, res) => {
   let d = parseInt(req.body.doneness, 10);
   if (isNaN(d)) return res.status(400).json({ error: 'doneness required' });
   d = Math.max(0, Math.min(100, d));
   let doneRev = null;
   if (d >= 100) {
-    doneRev = req.body.revision_id
-      ? Number(req.body.revision_id)
-      : db.prepare('SELECT MAX(id) v FROM revisions WHERE track_id = ?').get(req.params.id).v;
+    if (req.body.revision_id) {
+      const rid = Number(req.body.revision_id);
+      const rv = db.prepare('SELECT track_id FROM revisions WHERE id = ?').get(rid);
+      if (!rv || rv.track_id !== Number(req.params.id)) return res.status(400).json({ error: 'Revision is not on this track' });
+      doneRev = rid;
+    } else {
+      doneRev = db.prepare('SELECT MAX(id) v FROM revisions WHERE track_id = ?').get(req.params.id).v;
+    }
   }
   db.prepare("UPDATE tracks SET doneness = ?, done_revision_id = ?, updated_at = datetime('now') WHERE id = ?")
     .run(d, doneRev, req.params.id);
@@ -508,7 +709,7 @@ app.put('/api/tracks/:id/doneness', requireAuth, (req, res) => {
 });
 
 // Mark a track's latest revision as seen by the current user
-app.post('/api/tracks/:id/seen', requireAuth, (req, res) => {
+app.post('/api/tracks/:id/seen', requireProjectAccess(pTrack), (req, res) => {
   const rev = Number(req.body.revision_id) || 0;
   db.prepare(`INSERT INTO seen (username, track_id, last_seen_rev) VALUES (?, ?, ?)
               ON CONFLICT(username, track_id) DO UPDATE SET last_seen_rev = MAX(last_seen_rev, excluded.last_seen_rev)`)
@@ -517,7 +718,7 @@ app.post('/api/tracks/:id/seen', requireAuth, (req, res) => {
 });
 
 // ── Revision routes ──────────────────────────────────────────
-app.post('/api/tracks/:id/revisions', requireAdmin, upload.single('file'), async (req, res) => {
+app.post('/api/tracks/:id/revisions', requireProjectEngineer(pTrack), upload.single('file'), async (req, res) => {
   const track = db.prepare('SELECT * FROM tracks WHERE id = ?').get(req.params.id);
   if (!track) { if (req.file) { try { fs.unlinkSync(req.file.path); } catch {} } return res.status(404).json({ error: 'Track not found' }); }
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
@@ -551,7 +752,7 @@ app.post('/api/tracks/:id/revisions', requireAdmin, upload.single('file'), async
 
 // Replace the audio of an EXISTING revision in place — keeps id/rev_number/notes and the whole
 // comment thread; only the audio + its analysis change. Same pipeline as create (ROADMAP 2.1).
-app.post('/api/revisions/:id/replace', requireAdmin, upload.single('file'), async (req, res) => {
+app.post('/api/revisions/:id/replace', requireProjectEngineer(pRev), upload.single('file'), async (req, res) => {
   const rev = db.prepare('SELECT * FROM revisions WHERE id = ?').get(req.params.id);
   if (!rev) { if (req.file) { try { fs.unlinkSync(req.file.path); } catch {} } return res.status(404).json({ error: 'Revision not found' }); }
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
@@ -591,12 +792,12 @@ app.post('/api/revisions/:id/replace', requireAdmin, upload.single('file'), asyn
   res.json({ id: rev.id, rev_number: rev.rev_number, duration: a.duration, stored_name: a.storedName });
 });
 
-app.put('/api/revisions/:id', requireAdmin, (req, res) => {
+app.put('/api/revisions/:id', requireProjectEngineer(pRev), (req, res) => {
   db.prepare('UPDATE revisions SET notes = ? WHERE id = ?').run(String(req.body.notes || ''), req.params.id);
   res.json({ ok: true });
 });
 
-app.delete('/api/revisions/:id', requireAdmin, (req, res) => {
+app.delete('/api/revisions/:id', requireProjectEngineer(pRev), (req, res) => {
   const rev = db.prepare('SELECT * FROM revisions WHERE id = ?').get(req.params.id);
   if (!rev) return res.status(404).json({ error: 'Not found' });
   // Orphan, don't cascade: comments are shown track-wide, so keep the discussion thread
@@ -613,7 +814,7 @@ app.delete('/api/revisions/:id', requireAdmin, (req, res) => {
   res.json({ ok: true });
 });
 
-app.get('/api/revisions/:id/peaks', requireAuth, (req, res) => {
+app.get('/api/revisions/:id/peaks', requireProjectAccess(pRev), (req, res) => {
   const rev = db.prepare('SELECT duration, peaks, lufs_i, lufs_lra, true_peak, st_interval, st_series, peak_interval, peak_series FROM revisions WHERE id = ?').get(req.params.id);
   if (!rev) return res.status(404).json({ error: 'Not found' });
   res.json({
@@ -626,7 +827,7 @@ app.get('/api/revisions/:id/peaks', requireAuth, (req, res) => {
 });
 
 // ── Audio streaming / download ───────────────────────────────
-app.get('/api/audio/:name', requireAuth, (req, res) => {
+app.get('/api/audio/:name', requireProjectAccess(pAudio), (req, res) => {
   const rev = db.prepare('SELECT * FROM revisions WHERE stored_name = ?').get(req.params.name);
   if (!rev) return res.status(404).json({ error: 'Not found' });
   const p = path.join(UPLOADS_DIR, rev.stored_name);
@@ -637,13 +838,13 @@ app.get('/api/audio/:name', requireAuth, (req, res) => {
 });
 
 // ── Comments ─────────────────────────────────────────────────
-app.get('/api/tracks/:id/comments', requireAuth, (req, res) => {
+app.get('/api/tracks/:id/comments', requireProjectAccess(pTrack), (req, res) => {
   res.json(db.prepare(`SELECT c.*, r.rev_number FROM comments c
                        LEFT JOIN revisions r ON c.revision_id = r.id
                        WHERE c.track_id = ? ORDER BY c.created_at`).all(req.params.id));
 });
 
-app.post('/api/tracks/:id/comments', requireAuth, (req, res) => {
+app.post('/api/tracks/:id/comments', requireProjectAccess(pTrack), (req, res) => {
   const body = String(req.body.body || '').trim();
   if (!body) return res.status(400).json({ error: 'Comment body required' });
   let ts = (req.body.ts === null || req.body.ts === undefined || req.body.ts === '') ? null : Number(req.body.ts);
@@ -657,12 +858,19 @@ app.post('/api/tracks/:id/comments', requireAuth, (req, res) => {
     if (parent.parent_id != null) return res.status(400).json({ error: 'Cannot reply to a reply' });
     ts = null; revisionId = null; // replies are never pinned and never carry a revision
   }
+  // A pinned note's revision must belong to THIS track — otherwise a member could smuggle a foreign
+  // project's revision id in (leaking its existence/rev_number via the comments GET join) or trip a
+  // raw FK-constraint 500. The frontend only ever sends the open track's own revision.
+  if (revisionId != null) {
+    const rv = db.prepare('SELECT track_id FROM revisions WHERE id = ?').get(revisionId);
+    if (!rv || rv.track_id !== Number(req.params.id)) return res.status(400).json({ error: 'Revision is not on this track' });
+  }
   const r = db.prepare('INSERT INTO comments (track_id, revision_id, author, ts, body, parent_id) VALUES (?, ?, ?, ?, ?, ?)')
     .run(req.params.id, revisionId, req.session.user.username, ts, body, parentId);
   res.json({ id: r.lastInsertRowid });
 });
 
-app.put('/api/comments/:id', requireAuth, (req, res) => {
+app.put('/api/comments/:id', requireProjectAccess(pComment), (req, res) => {
   const c = db.prepare('SELECT * FROM comments WHERE id = ?').get(req.params.id);
   if (!c) return res.status(404).json({ error: 'Not found' });
   if (req.body.resolved !== undefined) {
@@ -683,7 +891,7 @@ app.put('/api/comments/:id', requireAuth, (req, res) => {
   res.json({ ok: true });
 });
 
-app.delete('/api/comments/:id', requireAuth, (req, res) => {
+app.delete('/api/comments/:id', requireProjectAccess(pComment), (req, res) => {
   const c = db.prepare('SELECT * FROM comments WHERE id = ?').get(req.params.id);
   if (!c) return res.status(404).json({ error: 'Not found' });
   if (c.author !== req.session.user.username && req.session.user.role !== 'admin') {
@@ -696,6 +904,70 @@ app.delete('/api/comments/:id', requireAuth, (req, res) => {
     db.prepare('DELETE FROM comments WHERE id = ?').run(req.params.id);
   });
   tx();
+  res.json({ ok: true });
+});
+
+// ── User management (admin) ──────────────────────────────────
+const ROLES = new Set(['admin', 'engineer', 'client']);
+const activeAdminCount = () => db.prepare("SELECT COUNT(*) v FROM users WHERE role = 'admin' AND active = 1").get().v;
+
+app.get('/api/admin/users', requireAdmin, (req, res) => {
+  // has_password=0 ⇒ TOFU pending (new user or reset): they set it on next login.
+  res.json(db.prepare(`SELECT username, role, display_name, active, created_at,
+                              (pw_hash IS NOT NULL) AS has_password FROM users ORDER BY created_at, username`).all());
+});
+
+app.post('/api/users', requireAdmin, (req, res) => {
+  const username = String(req.body.username || '').trim().toLowerCase();
+  const role = String(req.body.role || '');
+  const display_name = String(req.body.display_name || '').trim() || null;
+  if (!/^[a-z0-9_.-]{2,32}$/.test(username)) return res.status(400).json({ error: 'Username must be 2–32 chars: a–z 0–9 . _ -' });
+  if (!ROLES.has(role)) return res.status(400).json({ error: 'Invalid role' });
+  if (db.prepare('SELECT 1 FROM users WHERE username = ?').get(username)) return res.status(400).json({ error: 'Username already exists' });
+  // pw_hash NULL ⇒ TOFU: the new user's first login sets their password.
+  db.prepare('INSERT INTO users (username, role, display_name, active) VALUES (?, ?, ?, 1)').run(username, role, display_name);
+  res.json({ ok: true });
+});
+
+app.post('/api/users/:u/reset', requireAdmin, (req, res) => {
+  const username = String(req.params.u).trim().toLowerCase();
+  if (!db.prepare('SELECT 1 FROM users WHERE username = ?').get(username)) return res.status(404).json({ error: 'Not found' });
+  db.prepare('UPDATE users SET pw_hash = NULL WHERE username = ?').run(username); // back to TOFU
+  res.json({ ok: true });
+});
+
+app.put('/api/users/:u', requireAdmin, (req, res) => {
+  const username = String(req.params.u).trim().toLowerCase();
+  const u = db.prepare('SELECT * FROM users WHERE username = ?').get(username);
+  if (!u) return res.status(404).json({ error: 'Not found' });
+  let role = u.role, active = u.active, display_name = u.display_name;
+  if (req.body.role !== undefined) { if (!ROLES.has(String(req.body.role))) return res.status(400).json({ error: 'Invalid role' }); role = String(req.body.role); }
+  if (req.body.active !== undefined) active = req.body.active ? 1 : 0;
+  if (req.body.display_name !== undefined) display_name = String(req.body.display_name || '').trim() || null;
+  // Never strand the instance: block demoting/deactivating the last active admin.
+  const wasActiveAdmin = u.role === 'admin' && u.active === 1;
+  const staysActiveAdmin = role === 'admin' && active === 1;
+  if (wasActiveAdmin && !staysActiveAdmin && activeAdminCount() <= 1) {
+    return res.status(400).json({ error: 'Cannot demote or deactivate the last active admin' });
+  }
+  db.prepare('UPDATE users SET role = ?, active = ?, display_name = ? WHERE username = ?').run(role, active, display_name, username);
+  // If admins edit their own role/name, refresh their live session so the UI stays in sync.
+  if (username === req.session.user.username) req.session.user = sessionUser({ username, role, display_name });
+  res.json({ ok: true });
+});
+
+// ── Settings (admin) ─────────────────────────────────────────
+// Only null_test_visible is honored this session (player hides null UI when '0'); the rest land
+// with their wiring in Phase 3d. Keep the allowlist tight so PUT can't write arbitrary keys.
+const SETTING_KEYS = new Set(['null_test_visible']);
+app.get('/api/settings', requireAdmin, (req, res) => {
+  const out = {};
+  for (const k of SETTING_KEYS) out[k] = settingOn(k) ? '1' : '0';
+  res.json(out);
+});
+app.put('/api/settings', requireAdmin, (req, res) => {
+  const set = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
+  for (const k of SETTING_KEYS) if (req.body[k] !== undefined) set.run(k, req.body[k] ? '1' : '0');
   res.json({ ok: true });
 });
 
