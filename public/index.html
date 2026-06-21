@@ -45,6 +45,11 @@
   .login-card input{width:100%;margin-bottom:12px}
   .login-card .btn{width:100%}
   .login-err{color:var(--danger);font-size:13px;min-height:18px;margin-top:10px;text-align:center}
+  .login-card .login-hint{color:var(--faint);font-size:11.5px;line-height:1.45;margin:-2px 0 14px}
+  .login-card .inote{font-size:12px;line-height:1.45;margin:0 0 14px;color:var(--muted)}
+  .login-card .inote.err{color:var(--danger)}
+  #luser.locked{opacity:.7;cursor:not-allowed}
+  .ilink{font:inherit;font-size:11px;color:var(--accent);background:none;border:none;padding:0;margin-left:3px;cursor:pointer;text-decoration:underline}
 
   /* Modal (e.g. new-project form) + segmented control */
   .modal-bg{position:fixed;inset:0;z-index:80;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:24px}
@@ -293,8 +298,10 @@
   <form class="login-card" id="loginForm">
     <h1>Album Tracker</h1>
     <p class="sub">Sign in</p>
+    <p class="inote hidden" id="inviteNote"></p>
     <input id="luser" name="username" placeholder="Username" autocomplete="username" autocapitalize="none" spellcheck="false">
     <input id="lpass" name="password" type="password" placeholder="Password" autocomplete="current-password">
+    <p class="login-hint">The password you enter on first sign-in becomes your account password.</p>
     <button class="btn primary" type="submit">Sign in</button>
     <div class="login-err" id="loginErr"></div>
   </form>
@@ -394,7 +401,14 @@
             <select id="auRole"><option value="client">client</option><option value="engineer">engineer</option><option value="admin">admin</option></select>
             <button class="btn primary sm" id="auAdd">Add user</button>
           </div>
-          <p class="faint small" style="margin:8px 0 0">New users sign in with any password the first time — that becomes their password (same as a reset).</p>
+          <p class="faint small" style="margin:8px 0 0">New users get a one-time invite link. Their first sign-in must use that link; the password they enter then becomes their password.</p>
+          <div id="inviteResult" class="hidden" style="margin-top:12px;padding:10px 12px;border:1px solid var(--warn);border-radius:8px">
+            <div class="small" style="margin-bottom:6px"><b>One-time invite link</b> — send this to the user for their first sign-in:</div>
+            <div class="row" style="gap:8px;align-items:center">
+              <input id="inviteLinkText" readonly class="small" style="flex:1;min-width:0;font-family:monospace">
+              <button class="btn sm" id="inviteCopy">Copy</button>
+            </div>
+          </div>
         </div>
       </div>
       <div class="card">
@@ -568,12 +582,54 @@ function toast(msg,isErr){ const t=$('#toast'); t.textContent=msg; t.className='
 
 // ───────── auth / boot ─────────
 function showLogin(){ disconnectEvents(); $('#loginView').classList.remove('hidden'); $('#mainView').classList.add('hidden'); $('#playerBar').classList.add('hidden'); }
+// One-time invite link. Build it from window.location (origin+pathname → relative + subpath-safe),
+// token in the URL hash — the browser never sends the fragment to the server, and we resolve it via
+// a POST body (below), so the token never lands in the URL path / nginx access logs.
+let INVITE=null;
+function inviteLink(token){ return location.origin + location.pathname + '#invite=' + token; }
+async function copyInvite(token){
+  const link=inviteLink(token);
+  try{ await navigator.clipboard.writeText(link); toast('Invite link copied'); }
+  catch{ prompt('Copy this one-time invite link:', link); }
+}
+// On boot, if the URL carries #invite=TOKEN, resolve it to its pending username and lock the login
+// form to it. A bad/used/unknown token returns a uniform 404 — we show a neutral message, never
+// which case it was. The token rides along in the login POST below.
+async function initInvite(){
+  const m=(location.hash||'').match(/invite=([A-Za-z0-9]+)/);
+  if(!m) return;
+  const note=$('#inviteNote'); note.classList.remove('hidden');
+  try{
+    const r=await api('invite',{method:'POST',body:{token:m[1]}});   // {username} only for a valid, unconsumed token (token in body, not URL)
+    INVITE={token:m[1], username:r.username};
+    const lu=$('#luser'); lu.value=r.username; lu.readOnly=true; lu.classList.add('locked');
+    note.classList.remove('err');
+    note.textContent='Welcome, '+r.username+' — choose a password below to finish setting up your account.';
+    setTimeout(()=>$('#lpass').focus(),0);
+  }catch{
+    note.classList.add('err');
+    note.textContent='This invite link is invalid or has already been used. If you already set a password, just sign in.';
+  }
+}
 $('#loginForm').addEventListener('submit',async e=>{
   e.preventDefault(); $('#loginErr').textContent='';
-  try{
-    ME=await api('login',{method:'POST',body:{username:$('#luser').value,password:$('#lpass').value}});
-    $('#lpass').value=''; await boot();
-  }catch(err){ $('#loginErr').textContent = err.message==='unauth'?'':'Invalid credentials'; }
+  // Login is the one call we DON'T route through api(): api() bounces every 401 to showLogin() and
+  // swallows the message, but here a 401 is the result the user needs to see (wrong creds / stale
+  // invite). Handle the response directly so they get feedback.
+  let r;
+  try{ r=await fetch('api/login',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({username:$('#luser').value,password:$('#lpass').value, token: INVITE?INVITE.token:undefined})}); }
+  catch{ $('#loginErr').textContent='Could not reach the server. Please try again.'; return; }
+  if(!r.ok){
+    $('#loginErr').textContent = INVITE
+      ? 'This invite link is no longer valid — it may have already been used. Ask your admin for a new link.'
+      : 'Invalid credentials';
+    return;
+  }
+  ME=await r.json();
+  $('#lpass').value='';
+  if(INVITE){ INVITE=null; history.replaceState(null,'',location.pathname+location.search); } // consume the link from the URL
+  await boot();
 });
 $('#logoutBtn').addEventListener('click',async()=>{ disconnectEvents(); try{audio.pause()}catch{}; await api('logout',{method:'POST'}); ME=null; location.reload(); });
 
@@ -1858,12 +1914,14 @@ function renderUsers(users){
   const box=$('#usersBox'); box.innerHTML=''; const tbl=document.createElement('div'); tbl.className='utable';
   users.forEach(u=>{
     const row=document.createElement('div'); row.className='urow'+(u.active?'':' inactive');
+    const ilink=(!u.has_password && u.first_login_token)?`<button type="button" class="ilink">copy invite link</button>`:'';
     row.innerHTML=`
       <span class="un" style="color:${userColor(u.username)}">${esc(u.username)}</span>
-      <span class="uinfo small muted">${esc(u.display_name||'')} ${u.has_password?'':'<span class="pill tofu">password pending</span>'} ${u.active?'':'<span class="pill">inactive</span>'}</span>
+      <span class="uinfo small muted">${esc(u.display_name||'')} ${u.has_password?'':'<span class="pill tofu">password pending</span>'}${ilink} ${u.active?'':'<span class="pill">inactive</span>'}</span>
       <select class="urole">${['client','engineer','admin'].map(r=>`<option value="${r}" ${u.role===r?'selected':''}>${r}</option>`).join('')}</select>
       <button class="btn sm uact">${u.active?'Deactivate':'Activate'}</button>
       <button class="btn sm ureset">Reset password</button>`;
+    { const il=row.querySelector('.ilink'); if(il) il.addEventListener('click',()=>copyInvite(u.first_login_token)); }
     row.querySelector('.urole').addEventListener('change',async e=>{
       try{ await api('users/'+u.username,{method:'PUT',body:{role:e.target.value}}); toast('Role updated');
         if(u.username===ME.username && e.target.value!=='admin'){ location.reload(); return; } // self-demote: hard re-sync ME/nav
@@ -1875,8 +1933,8 @@ function renderUsers(users){
       catch(err){ toast(err.message,true); }
     });
     row.querySelector('.ureset').addEventListener('click',async()=>{
-      if(!confirm('Reset '+u.username+'’s password?\nTheir next sign-in with any password sets a new one.'))return;
-      try{ await api('users/'+u.username+'/reset',{method:'POST'}); toast('Password reset — next sign-in sets a new one'); renderAdmin(); }
+      if(!confirm('Reset '+u.username+'’s password?\nThis generates a new one-time invite link; their next sign-in must use it.'))return;
+      try{ const r=await api('users/'+u.username+'/reset',{method:'POST'}); showInviteResult(r.first_login_token); toast('Password reset — share the new invite link'); renderAdmin(); }
       catch(err){ toast(err.message,true); }
     });
     tbl.appendChild(row);
@@ -1928,10 +1986,21 @@ function renderAdminProjects(projects, users){
     box.appendChild(card);
   });
 }
+// Show (and keep) the freshly-minted invite link in the admin Users card so it can be copied
+// deliberately. Persists across renderAdmin() (the panel lives in the static add-user form, which
+// renderUsers/renderAdminProjects don't touch).
+function showInviteResult(token){
+  if(!token) return;
+  $('#inviteResult').dataset.token=token;
+  $('#inviteLinkText').value=inviteLink(token);
+  $('#inviteResult').classList.remove('hidden');
+}
+$('#inviteCopy').addEventListener('click',()=>{ const t=$('#inviteResult').dataset.token; if(t) copyInvite(t); });
+$('#inviteLinkText').addEventListener('focus',e=>e.target.select());
 $('#auAdd').addEventListener('click',async()=>{
   const username=$('#auName').value.trim().toLowerCase(), role=$('#auRole').value, display_name=$('#auDisplay').value.trim();
   if(!username){ toast('Username required',true); return; }
-  try{ await api('users',{method:'POST',body:{username,role,display_name}}); $('#auName').value=''; $('#auDisplay').value=''; toast('User added'); renderAdmin(); }
+  try{ const r=await api('users',{method:'POST',body:{username,role,display_name}}); $('#auName').value=''; $('#auDisplay').value=''; showInviteResult(r.first_login_token); toast('User added'); renderAdmin(); }
   catch(e){ toast(e.message,true); }
 });
 $('#newProjectBtn').addEventListener('click',newProjectFlow);
@@ -2027,7 +2096,7 @@ function connectEvents(){
 function disconnectEvents(){ if(es){ try{es.close()}catch{} es=null; } esWasOpen=false; }
 
 // ───────── init ─────────
-(async()=>{ try{ await boot(); }catch{ showLogin(); } })();
+(async()=>{ await initInvite(); try{ await boot(); }catch{ showLogin(); } })();
 </script>
 </body>
 </html>

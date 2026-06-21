@@ -190,6 +190,13 @@ db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('video_enabled',
   // open and filtered in bootstrap — a stale pointer at a revoked/deleted project can never
   // auto-open (it falls back to the project list). It is a hint, never an authorization.
   if (!ucols.includes('last_project_id')) db.exec('ALTER TABLE users ADD COLUMN last_project_id INTEGER');
+  // Round 2 / Cluster A: one-time invite token for a TOFU-pending account. NULL = none/consumed.
+  // A pending account (pw_hash NULL) with a non-NULL token can ONLY set its password via the
+  // matching invite link's token (login hard-refuses otherwise). Existing NULL-pw_hash rows get a
+  // NULL token here and are grandfathered as "token not required" so the bootstrap admin / any
+  // pre-migration pending user isn't locked out. Additive + idempotent; independent of the 3a
+  // backfill (guarded separately below), so it never re-fires it.
+  if (!ucols.includes('first_login_token')) db.exec('ALTER TABLE users ADD COLUMN first_login_token TEXT');
 }
 
 // Migration (Phase 6): video revisions. For a video revision, `stored_name` holds the HQ
@@ -284,6 +291,14 @@ function verifyPassword(pw, stored) {
   const hash = crypto.scryptSync(pw, Buffer.from(saltHex, 'hex'), 64);
   const expected = Buffer.from(hashHex, 'hex');
   return hash.length === expected.length && crypto.timingSafeEqual(hash, expected);
+}
+// One-time invite token (Cluster A). 24 random bytes ⇒ 48 hex chars (≥16B entropy, NOT derived
+// from SESSION_SECRET). Minted on user-create and password-reset; cleared the moment it sets a
+// password. Compared in constant time so the login compare can't leak it char-by-char.
+function mintInviteToken() { return crypto.randomBytes(24).toString('hex'); }
+function tokenEquals(a, b) {
+  const ab = Buffer.from(String(a || '')), bb = Buffer.from(String(b || ''));
+  return ab.length > 0 && ab.length === bb.length && crypto.timingSafeEqual(ab, bb);
 }
 // What we keep in the session cookie (and hand to the client) — never the pw_hash.
 const sessionUser = u => ({ username: u.username, role: u.role, display_name: u.display_name || null });
@@ -762,9 +777,22 @@ app.post('/api/login', (req, res) => {
   if (user.active === 0) return res.status(403).json({ error: 'Account deactivated' });
 
   if (!user.pw_hash) {
-    // First login for this account (new user OR admin password reset) — the password they type
-    // becomes the password. Deactivated accounts are refused above, before TOFU can fire.
-    db.prepare('UPDATE users SET pw_hash = ? WHERE username = ?').run(hashPassword(password), username);
+    // First login for this account (new user OR admin password reset). Deactivated accounts are
+    // refused above, before any TOFU can fire.
+    if (user.first_login_token) {
+      // HARD-REFUSE: a pending account with an outstanding invite can ONLY set its password via
+      // that one-time token. Missing/wrong token → 401, and we do NOT set a password (so the
+      // standard URL can't be hammered into claiming the account). Setting pw_hash and clearing
+      // the token happen in ONE atomic UPDATE ⇒ single-use.
+      if (!tokenEquals(req.body.token, user.first_login_token)) {
+        return res.status(401).json({ error: 'Invalid credentials' });
+      }
+      db.prepare('UPDATE users SET pw_hash = ?, first_login_token = NULL WHERE username = ?').run(hashPassword(password), username);
+    } else {
+      // Grandfathered: NULL pw_hash AND NULL token — no invite was ever minted (the bootstrap
+      // admin, or a pre-migration pending user). Token not required; plain TOFU as before.
+      db.prepare('UPDATE users SET pw_hash = ? WHERE username = ?').run(hashPassword(password), username);
+    }
   } else if (!verifyPassword(password, user.pw_hash)) {
     return res.status(401).json({ error: 'Invalid credentials' });
   }
@@ -774,6 +802,22 @@ app.post('/api/login', (req, res) => {
 });
 
 app.post('/api/logout', (req, res) => { req.session.destroy(() => res.json({ ok: true })); });
+
+// Resolve an invite token → the pending username it belongs to, so the login form can prefill +
+// lock the username. PUBLIC (used pre-login) but reveals ONLY a username, and ONLY for a valid,
+// unconsumed token on an active account. Anything else — invalid, already used, deactivated, or
+// nonexistent — returns a UNIFORM 404 so it can't be used as a username/existence oracle.
+// POST (not GET) so the token rides in the request BODY, never the URL path — nginx logs the path
+// ($request) but not the body, so the still-unconsumed token never lands in access.log. (The link
+// itself keeps the token in the URL hash, which browsers don't send to the server at all.)
+app.post('/api/invite', (req, res) => {
+  const token = String(req.body.token || '');
+  const u = token
+    ? db.prepare('SELECT username FROM users WHERE first_login_token = ? AND pw_hash IS NULL AND active = 1').get(token)
+    : null;
+  if (!u) return res.status(404).json({ error: 'Not found' });
+  res.json({ username: u.username });
+});
 
 app.get('/api/me', (req, res) => {
   if (!liveUser(req)) return res.status(401).json({ error: 'Not authenticated' });
@@ -1387,9 +1431,12 @@ const ROLES = new Set(['admin', 'engineer', 'client']);
 const activeAdminCount = () => db.prepare("SELECT COUNT(*) v FROM users WHERE role = 'admin' AND active = 1").get().v;
 
 app.get('/api/admin/users', requireAdmin, (req, res) => {
-  // has_password=0 ⇒ TOFU pending (new user or reset): they set it on next login.
+  // has_password=0 ⇒ TOFU pending (new user or reset). first_login_token (NULL once consumed) lets
+  // the admin UI rebuild the one-time invite link for any still-pending user. Admin-only, and the
+  // token grants no more than an admin already has (they can reset any account), so it's safe here.
   res.json(db.prepare(`SELECT username, role, display_name, active, created_at,
-                              (pw_hash IS NOT NULL) AS has_password FROM users ORDER BY created_at, username`).all());
+                              (pw_hash IS NOT NULL) AS has_password, first_login_token
+                       FROM users ORDER BY created_at, username`).all());
 });
 
 app.post('/api/users', requireAdmin, (req, res) => {
@@ -1399,18 +1446,23 @@ app.post('/api/users', requireAdmin, (req, res) => {
   if (!/^[a-z0-9_.-]{2,32}$/.test(username)) return res.status(400).json({ error: 'Username must be 2–32 chars: a–z 0–9 . _ -' });
   if (!ROLES.has(role)) return res.status(400).json({ error: 'Invalid role' });
   if (db.prepare('SELECT 1 FROM users WHERE username = ?').get(username)) return res.status(400).json({ error: 'Username already exists' });
-  // pw_hash NULL ⇒ TOFU: the new user's first login sets their password.
-  db.prepare('INSERT INTO users (username, role, display_name, active) VALUES (?, ?, ?, 1)').run(username, role, display_name);
+  // pw_hash NULL ⇒ TOFU; the invite token is what unlocks that first login. Return it so the admin
+  // can hand the new user their one-time link.
+  const token = mintInviteToken();
+  db.prepare('INSERT INTO users (username, role, display_name, active, first_login_token) VALUES (?, ?, ?, 1, ?)').run(username, role, display_name, token);
   broadcastProjects(); // keep other admins' user tables in sync
-  res.json({ ok: true });
+  res.json({ ok: true, username, first_login_token: token });
 });
 
 app.post('/api/users/:u/reset', requireAdmin, (req, res) => {
   const username = String(req.params.u).trim().toLowerCase();
   if (!db.prepare('SELECT 1 FROM users WHERE username = ?').get(username)) return res.status(404).json({ error: 'Not found' });
-  db.prepare('UPDATE users SET pw_hash = NULL WHERE username = ?').run(username); // back to TOFU
+  // Back to TOFU — and RE-MINT the invite token. A reset account would otherwise be hammerable
+  // again (the whole point of the token), so a reset must produce a fresh single-use link.
+  const token = mintInviteToken();
+  db.prepare('UPDATE users SET pw_hash = NULL, first_login_token = ? WHERE username = ?').run(token, username);
   broadcastProjects(); // refresh the "password pending" pill on other admins' user tables
-  res.json({ ok: true });
+  res.json({ ok: true, username, first_login_token: token });
 });
 
 app.put('/api/users/:u', requireAdmin, (req, res) => {
