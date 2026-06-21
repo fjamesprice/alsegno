@@ -1773,6 +1773,40 @@ app.put('/api/users/:u', requireAdmin, (req, res) => {
   res.json({ ok: true });
 });
 
+// ── Self-service account (any signed-in user edits their OWN profile) ──────────
+// Scoped to the caller — no :username param, so a client can only ever touch their own row. The
+// admin routes above stay the only way to reach other accounts.
+app.put('/api/me', requireAuth, (req, res) => {
+  const username = req.session.user.username;
+  const u = db.prepare('SELECT * FROM users WHERE username = ?').get(username);
+  if (!u) return res.status(404).json({ error: 'Not found' });
+  if (req.body.display_name === undefined) return res.status(400).json({ error: 'Nothing to update' });
+  const display_name = String(req.body.display_name || '').trim().slice(0, 64) || null;
+  db.prepare('UPDATE users SET display_name = ? WHERE username = ?').run(display_name, username);
+  req.session.user = sessionUser({ username, role: u.role, display_name });
+  broadcastProjects(); // keep admins' user tables in sync
+  res.json(req.session.user);
+});
+
+// Changing your own password REQUIRES the current one — a session cookie alone (e.g. a walk-up at an
+// unlocked screen) shouldn't silently re-key the account. Unlike the admin reset this sets pw_hash
+// directly (no TOFU/invite round-trip) and leaves the session valid, so you stay signed in.
+app.post('/api/me/password', requireAuth, (req, res) => {
+  const username = req.session.user.username;
+  const u = db.prepare('SELECT * FROM users WHERE username = ?').get(username);
+  if (!u) return res.status(404).json({ error: 'Not found' });
+  const current = String(req.body.current_password || '');
+  const next = String(req.body.new_password || '');
+  // An admin reset NULLs pw_hash but doesn't kill the live session, so a still-signed-in user can land
+  // here with no password to verify. Don't silently re-key (that would bypass the invite-only TOFU
+  // gate) — send them back through the invite link, which is the only sanctioned way to set it.
+  if (!u.pw_hash) return res.status(409).json({ error: 'Your password was reset by an admin — sign out and use your invite link to set a new one.' });
+  if (!verifyPassword(current, u.pw_hash)) return res.status(403).json({ error: 'Current password is incorrect' });
+  if (!next) return res.status(400).json({ error: 'New password required' });
+  db.prepare('UPDATE users SET pw_hash = ? WHERE username = ?').run(hashPassword(next), username);
+  res.json({ ok: true });
+});
+
 // ── Self-update check — notify only (Cluster E) ──────────────
 // We tell admins when `origin` is ahead; we NEVER pull, install, or restart (that stays a manual,
 // documented step — auto-restart-on-clean-exit, dirty-tree-on-the-live-checkout, and SSH-key

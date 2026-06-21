@@ -53,11 +53,11 @@
 
   /* Modal (e.g. new-project form) + segmented control */
   .modal-bg{position:fixed;inset:0;z-index:80;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:24px}
-  .modal-card{width:100%;max-width:440px;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:24px 24px 20px;box-shadow:0 18px 50px rgba(0,0,0,.5)}
+  .modal-card{width:100%;max-width:440px;max-height:calc(100vh - 48px);overflow-y:auto;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:24px 24px 20px;box-shadow:0 18px 50px rgba(0,0,0,.5)}
   .modal-card h2{font-size:17px;margin:0 0 18px;font-weight:600}
   .mfield{margin-bottom:16px}
   .mfield > label{display:block;font-size:13px;color:var(--muted);margin-bottom:7px}
-  .mfield input[type=text]{width:100%}
+  .mfield input[type=text],.mfield input[type=password]{width:100%}
   .segctl{display:flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--panel2)}
   .segctl button{flex:1;padding:9px 10px;color:var(--muted);font-size:13px;border-right:1px solid var(--line);transition:.12s}
   .segctl button:last-child{border-right:none}
@@ -83,7 +83,16 @@
   .nav{display:flex;gap:4px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:3px}
   .nav button{padding:6px 14px;border-radius:7px;color:var(--muted);font-size:14px}
   .nav button.active{background:var(--accent2);color:#fff}
-  .who{font-size:13px;color:var(--muted)}
+  .who-wrap{position:relative}
+  .who{font-size:13px;color:var(--muted);background:none;border:0;font:inherit;cursor:pointer;display:inline-flex;align-items:center;gap:5px;padding:5px 8px;border-radius:8px}
+  .who:hover{color:var(--text);background:var(--panel2)}
+  .who #whoName{max-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .who .caret{font-size:9px;opacity:.65;flex:none}
+  .whomenu{position:absolute;right:0;top:calc(100% + 6px);z-index:60;min-width:184px;background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:0 14px 38px rgba(0,0,0,.5);padding:6px}
+  .whomenu-h{padding:6px 10px 9px;margin:0 0 6px;border-bottom:1px solid var(--line);display:flex;flex-direction:column;gap:2px}
+  .whomenu-h b{font-size:13px;color:var(--text)}
+  .whomenu-item{display:block;width:100%;text-align:left;background:none;border:0;color:var(--text);font:inherit;font-size:13px;padding:8px 10px;border-radius:7px;cursor:pointer}
+  .whomenu-item:hover{background:var(--panel2)}
 
   /* Album progress */
   .album-prog{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:14px 16px;margin:10px 0 16px;display:flex;align-items:center;gap:14px}
@@ -321,7 +330,15 @@
   <div class="topbar">
     <div class="title" id="albumTitle">Projects</div>
     <div class="nav" id="nav"></div>
-    <span class="who" id="who"></span>
+    <div class="who-wrap" id="whoWrap">
+      <button type="button" class="who" id="who" aria-haspopup="true" aria-expanded="false">
+        <span id="whoName"></span><span class="caret">▾</span></button>
+      <div class="whomenu hidden" id="whoMenu">
+        <div class="whomenu-h"><b id="whoMenuName"></b><span class="faint small" id="whoMenuRole"></span></div>
+        <button type="button" class="whomenu-item" id="wmName">Change display name</button>
+        <button type="button" class="whomenu-item" id="wmPass">Change password</button>
+      </div>
+    </div>
     <button class="btn ghost sm" id="logoutBtn">Sign out</button>
   </div>
 
@@ -566,6 +583,40 @@
   </div>
 </div>
 
+<!-- Account modal — self-service display-name + password change (any signed-in user). -->
+<div id="accountModal" class="modal-bg hidden">
+  <div class="modal-card" role="dialog" aria-modal="true" aria-label="Account">
+    <h2>Account</h2>
+    <div class="mfield">
+      <label for="acDisplay">Display name</label>
+      <input type="text" id="acDisplay" maxlength="64" autocomplete="off" placeholder="(your username)">
+      <div class="faint small" style="margin-top:6px">Shown in the top bar. Leave blank to use your username (<b id="acUser"></b>).</div>
+    </div>
+    <div class="modal-actions" style="margin-top:12px">
+      <button class="btn ghost" type="button" id="acClose">Close</button>
+      <button class="btn primary" type="button" id="acNameSave">Save name</button>
+    </div>
+    <div style="border-top:1px solid var(--line);margin:20px 0 16px"></div>
+    <h2 style="font-size:14px;margin-bottom:14px">Change password</h2>
+    <div class="mfield">
+      <label for="acCur">Current password</label>
+      <input type="password" id="acCur" autocomplete="current-password">
+    </div>
+    <div class="mfield">
+      <label for="acNew">New password</label>
+      <input type="password" id="acNew" autocomplete="new-password">
+    </div>
+    <div class="mfield">
+      <label for="acNew2">Confirm new password</label>
+      <input type="password" id="acNew2" autocomplete="new-password">
+    </div>
+    <div class="modal-actions" style="margin-top:4px">
+      <button class="btn ghost" type="button" id="acPassClose">Close</button>
+      <button class="btn primary" type="button" id="acPassSave">Change password</button>
+    </div>
+  </div>
+</div>
+
 <script>
 "use strict";
 const $ = s => document.querySelector(s);
@@ -682,6 +733,14 @@ $('#logoutBtn').addEventListener('click',async()=>{ disconnectEvents(); try{audi
 
 const canManage = () => !!ME && (ME.role==='admin' || ME.role==='engineer'); // may run Studio on an open project
 const displayName = u => (u && (u.display_name||u.username)) || '';
+// Paint the signed-in name into the top-bar button + its dropdown header (called on boot and after
+// a self display-name change).
+function refreshWho(){
+  if(!ME) return;
+  $('#whoName').textContent=displayName(ME);
+  $('#whoMenuName').textContent=displayName(ME);
+  $('#whoMenuRole').textContent=ME.role;
+}
 // Stable per-author color from a username hash (replaces the old hardcoded james/noah rules).
 function userColor(name){ let h=0; const s=String(name||''); for(let i=0;i<s.length;i++) h=(h*31+s.charCodeAt(i))>>>0; return `hsl(${h%360},62%,68%)`; }
 function isVideoProject(){ return !!(PROJECT && PROJECT.media_type==='video'); }
@@ -925,7 +984,7 @@ async function boot(){
   const data=await api('bootstrap');
   ME=data.user; PROJECTS=data.projects||[]; NULL_VIS=data.null_test_visible!==false; KEEP_LOSSLESS=data.keep_lossless===true; VIDEO_ENABLED=data.video_enabled===true; UPDATE_INFO=data.update||null;
   $('#loginView').classList.add('hidden'); $('#mainView').classList.remove('hidden');
-  $('#who').textContent=displayName(ME);
+  refreshWho();
   $('#newProjectBtn').classList.toggle('hidden', ME.role!=='admin');
   applyNullVis();
   connectEvents(); // open the realtime stream once we're authenticated (before any early return below)
@@ -1042,8 +1101,11 @@ function trackRow(t,i){
   const doneBadge = t.doneness>=100
     ? `<span class="badge done">✓ DONE${t.done_revision_id?` · r${(t.revisions.find(r=>r.id===t.done_revision_id)||{}).rev_number||''}`:''}</span>` : '';
   const newBadge = (ME.role==='client' && t.unseen && t.id!==curTrackId) ? '<span class="badge new">NEW</span>' : '';
-  const revBadge = latest ? `<span class="badge rev">${t.revisions.length} rev${t.revisions.length>1?'s':''}</span>`:'<span class="badge rev">no audio</span>';
+  const nRev = mixRevCount(t);
+  const revBadge = latest ? `<span class="badge rev">${nRev} rev${nRev!==1?'s':''}</span>`:'<span class="badge rev">no audio</span>';
   const doneLabel = ME.role==='client'?'Your':'Client';   // a reviewer sees "Your"; engineers/admin see "Client"
+  // The slider is shared "doneness". The client sets it ("you"); engineers/admin read the client's value.
+  const doneTip = ME.role==='client'?'How done you feel this is':'How done the client feels this is';
   li.innerHTML=`
     ${isSong?'':'<span class="handle" title="Drag to reorder">⋮⋮</span><span class="ord"><button class="up" title="Move up">▲</button><button class="dn" title="Move down">▼</button></span>'}
     <span class="num">${isSong?'♪':i+1}</span>
@@ -1056,7 +1118,7 @@ function trackRow(t,i){
       </div>
     </div>
     <div class="done-ctl">
-      <span class="dl">${doneLabel} progress · <b class="dval">${t.doneness}%</b></span>
+      <span class="dl" title="${doneTip}">${doneLabel} progress · <b class="dval">${t.doneness}%</b></span>
       <input type="range" min="0" max="100" step="5" value="${t.doneness}" ${latest?'':'disabled'}>
       <div class="dbar"><i style="width:${t.doneness}%"></i></div>
     </div>`;
@@ -1149,6 +1211,9 @@ async function loadTrack(trackId, revId, {play=false, keepPos=null}={}){
 
 // A revision label: the video's own extracted audio shows as "Original audio", mixes as v1, v2…
 function revLabel(r){ return r && r.is_orig_audio ? 'Original audio' : ('v'+(r?r.rev_number:'')); }
+// Count of real mix revisions for the "N revs" badge. A video's auto-made "Original audio" (the
+// baseline, not an uploaded mix) is NOT a revision, so it's excluded — audio projects never have one.
+function mixRevCount(t){ return t.revisions.filter(r=>!r.is_orig_audio).length; }
 let selTrackId=null, selRevCount=-1;
 function syncPlayerSelectors(t){
   const revSel=$('#revSel'), cmpSel=$('#cmpSel');
@@ -1787,7 +1852,7 @@ function renderStudio(){
         <span class="chev">▶</span>
         <span class="num">${i+1}</span>
         <span class="stitle">${esc(t.title)}</span>
-        <span class="badge rev">${t.revisions.length} rev${t.revisions.length!==1?'s':''}</span>
+        <span class="badge rev">${mixRevCount(t)} rev${mixRevCount(t)!==1?'s':''}</span>
         ${t.doneness>=100?'<span class="badge done">✓ DONE</span>':`<span class="faint small">${t.doneness}%</span>`}
       </div>
       <div class="strack-body ${open?'':'hidden'}"></div>`;
@@ -2121,6 +2186,52 @@ $('#npCreate').addEventListener('click',async()=>{
     else { await loadProjects(); if(r&&r.id) await openProject(r.id); }
   }catch(e){ toast(e.message,true); }
 });
+
+// ───────── account menu (self-service profile) ─────────
+// The top-bar name is a dropdown; its two items open the Account modal focused on the relevant
+// field. Display-name + password both hit caller-scoped /api/me routes (no admin rights needed).
+function closeWhoMenu(){ const m=$('#whoMenu'); if(m.classList.contains('hidden'))return; m.classList.add('hidden'); $('#who').setAttribute('aria-expanded','false'); }
+$('#who').addEventListener('click',e=>{ e.stopPropagation();
+  const shown=$('#whoMenu').classList.toggle('hidden')===false; $('#who').setAttribute('aria-expanded',shown?'true':'false'); });
+document.addEventListener('click',e=>{ if(!$('#whoWrap').contains(e.target)) closeWhoMenu(); });
+
+function openAccount(focus){
+  if(!ME) return;
+  $('#acUser').textContent=ME.username;
+  $('#acDisplay').value=ME.display_name||'';
+  $('#acCur').value=''; $('#acNew').value=''; $('#acNew2').value='';
+  $('#accountModal').classList.remove('hidden');
+  setTimeout(()=>{ const el=$(focus==='pass'?'#acCur':'#acDisplay'); if(el){ el.focus(); if(el.select)el.select(); } },0);
+}
+function closeAccount(){ $('#accountModal').classList.add('hidden'); }
+$('#wmName').addEventListener('click',()=>{ closeWhoMenu(); openAccount('name'); });
+$('#wmPass').addEventListener('click',()=>{ closeWhoMenu(); openAccount('pass'); });
+$('#acClose').addEventListener('click',closeAccount);
+$('#acPassClose').addEventListener('click',closeAccount);
+$('#accountModal').addEventListener('click',e=>{ if(e.target===$('#accountModal')) closeAccount(); });
+document.addEventListener('keydown',e=>{ if(e.key==='Escape'){ closeWhoMenu(); if(!$('#accountModal').classList.contains('hidden')) closeAccount(); } });
+
+async function saveDisplayName(){
+  try{
+    const u=await api('me',{method:'PUT',body:{display_name:$('#acDisplay').value}});
+    ME.display_name=u.display_name; refreshWho();
+    toast('Display name updated');   // leave the modal open so any in-progress password edit isn't lost
+  }catch(err){ toast(err.message,true); }
+}
+async function changePassword(){
+  const cur=$('#acCur').value, nw=$('#acNew').value, nw2=$('#acNew2').value;
+  if(!nw){ toast('Enter a new password',true); $('#acNew').focus(); return; }
+  if(nw!==nw2){ toast('New passwords don’t match',true); $('#acNew2').focus(); return; }
+  try{
+    await api('me/password',{method:'POST',body:{current_password:cur,new_password:nw}});
+    $('#acCur').value=''; $('#acNew').value=''; $('#acNew2').value='';
+    toast('Password changed');       // stay open (fields cleared); the user closes when done
+  }catch(err){ toast(err.message,true); }
+}
+$('#acNameSave').addEventListener('click',saveDisplayName);
+$('#acPassSave').addEventListener('click',changePassword);
+$('#acDisplay').addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); saveDisplayName(); } });
+['#acCur','#acNew','#acNew2'].forEach(sel=>$(sel).addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); changePassword(); } }));
 
 // ───────── notes export (Cluster C) ─────────
 // Timed (pinned) notes → marker/locator files for DAWs + video editors. The download is a plain
