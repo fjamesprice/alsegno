@@ -300,6 +300,15 @@ const upload = multer({ storage, limits: { fileSize: 1024 * 1024 * 1024 } }); //
 // Album art: small cap + image-only filter (ffmpeg then re-encodes to a downscaled jpg, which also validates it).
 const uploadImage = multer({ storage, limits: { fileSize: 25 * 1024 * 1024 },
   fileFilter: (req, file, cb) => cb(null, /^image\//.test(file.mimetype)) });
+// Wrap the art upload so multer's own errors (e.g. over the 25 MB cap) become a clean JSON 413/400
+// instead of Express's default HTML 500 — so the client toast shows the real reason.
+function artUpload(req, res, next) {
+  uploadImage.single('file')(req, res, err => {
+    if (err) return res.status(err.code === 'LIMIT_FILE_SIZE' ? 413 : 400)
+      .json({ error: err.code === 'LIMIT_FILE_SIZE' ? 'Image too large (max 25 MB)' : 'Upload failed' });
+    next();
+  });
+}
 
 // ── ffmpeg helpers ───────────────────────────────────────────
 function run(cmd, args) {
@@ -911,7 +920,7 @@ app.put('/api/projects/:id', requireAdmin, (req, res) => {
 
 // Album art (album projects only). Engineer/admin on the project. Stored as a downscaled jpg; the
 // previous art file is unlinked. Both broadcasts so the open album AND everyone's project-list thumb update.
-app.post('/api/projects/:id/art', requireProjectEngineer(pParam), uploadImage.single('file'), async (req, res) => {
+app.post('/api/projects/:id/art', requireProjectEngineer(pParam), artUpload, async (req, res) => {
   const pid = req.projectId;
   const proj = db.prepare('SELECT type, art_stored_name FROM projects WHERE id = ?').get(pid);
   if (!req.file) return res.status(400).json({ error: 'An image file is required' });
