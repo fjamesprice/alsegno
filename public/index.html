@@ -143,8 +143,18 @@
      underneath, then the proxy hides → no buffering hitch. Both letterbox identically (object-fit). */
   .vstage{position:relative;display:none;background:#000;border-radius:8px;margin-bottom:8px;height:38vh;overflow:hidden}
   .vstage.show{display:block}
-  .vstage video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000;display:block;border-radius:8px}
+  .vstage video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000;display:block;border-radius:8px;cursor:pointer}
   .vstage video.vhide{display:none}
+  /* Translucent menu that slides up from the bottom of the video on hover (theater only). */
+  .vmenu{position:absolute;left:0;right:0;bottom:0;z-index:6;display:none;align-items:center;gap:4px;
+    height:22px;padding:0 6px;background:rgba(12,14,18,.6);backdrop-filter:blur(6px);
+    transform:translateY(100%);transition:transform .16s ease,opacity .16s ease;opacity:0;pointer-events:none}
+  #playerBar.theater .vmenu{display:flex}                       /* only meaningful in the video theater */
+  .vstage:hover .vmenu,.vstage:focus-within .vmenu,.vstage.vmenu-tap .vmenu{transform:translateY(0);opacity:1;pointer-events:auto}
+  .vmenu button{appearance:none;background:none;border:0;color:#e9edf2;font:inherit;font-size:11px;line-height:1;
+    cursor:pointer;padding:3px 7px;border-radius:4px;display:inline-flex;align-items:center;gap:5px}
+  .vmenu button:hover{background:rgba(255,255,255,.14)}
+  .vmenu button.on{background:rgba(255,255,255,.22);color:#fff}
   /* Drag handle on top of the player bar — grow/shrink the video (only shown for video). */
   .pb-resize{display:none;height:12px;cursor:ns-resize;align-items:center;justify-content:center;touch-action:none}
   .pb-resize.show{display:flex}
@@ -238,6 +248,11 @@
   .pb-inner.theater > #pbActive{grid-area:engine;min-width:0}
   /* Theater video: width fills the engine column, height follows the video's aspect ratio (set inline). */
   #playerBar.theater #vstage{height:auto;width:100%}
+  /* "Wide" video mode (vmWide): #vstage is hoisted to a direct child of .pb-inner spanning the full
+     width above the notes column; wave/meters/controls (rest of #pbActive) stay in the engine column on
+     the left, #theaterNotes on the right.  Only applies with the notes column present (with-notes). */
+  .pb-inner.theater.with-notes.vidwide{grid-template-areas:"video video" "engine notes" "tracks notes"}
+  .pb-inner.theater.vidwide > #vstage{grid-area:video;align-self:start}
   .pb-inner.theater > #theaterTracks{grid-area:tracks;min-width:0;display:flex;flex-direction:column;gap:8px}
   .pb-inner.theater > #theaterNotes{grid-area:notes;min-width:0;display:flex;flex-direction:column;gap:14px;
     position:sticky;top:12px;max-height:calc(100vh - 24px);overflow:auto}
@@ -247,6 +262,7 @@
   #playerView > .addc{margin-top:14px}
   @media(max-width:860px){
     .pb-inner.theater.with-notes{grid-template-columns:1fr;grid-template-areas:"engine" "notes" "tracks"}
+    .pb-inner.theater.with-notes.vidwide{grid-template-areas:"video" "engine" "notes" "tracks"}
     .pb-inner.theater > #theaterNotes{position:static;max-height:none}
   }
 
@@ -468,6 +484,11 @@
         <video id="vidpic" class="vhide" playsinline preload="auto" muted></video>
         <video id="vidproxy" class="vhide" playsinline preload="auto" muted></video>
         <video id="vidmicro" class="vhide" playsinline preload="auto" muted></video>
+        <!-- Translucent hover menu sliding up from the bottom of the video picture (theater only). -->
+        <div class="vmenu" id="vmenu">
+          <button id="vmFull" title="Fullscreen video">⤢ Fullscreen</button>
+          <button id="vmWide" title="Widen the video across the notes column">⇔ Wide</button>
+        </div>
       </div>
       <div class="wave-wrap">
         <canvas id="wave"></canvas>
@@ -785,8 +806,25 @@ function applyLayout(){
     pv.insertBefore($('#addc'), $('#cpanel'));   // note-input box sits above the comments panel
   }
   inner.classList.toggle('with-notes', !$('#cpanel').classList.contains('hidden'));   // notes column shows only while a track is open
+  applyVidWide();
   applyVideoH(); syncBottomPad();
   if(curRevId) drawWave();   // engine column width may have changed → re-layout the canvas
+}
+
+// "Wide" video mode: hoist #vstage out of #pbActive to a full-width grid area above the notes column
+// (and back). Only valid in the theater with a notes column open; otherwise the stage lives in #pbActive.
+let vidWide = localStorage.getItem('at_video_wide')==='1';   // persists across reloads
+function applyVidWide(){
+  const inner=$('.pb-inner'), pbActive=$('#pbActive'), vs=$('#vstage');
+  const can = inner.classList.contains('theater') && inner.classList.contains('with-notes');
+  const wide = can && vidWide;
+  inner.classList.toggle('vidwide', wide);
+  if(wide){
+    if(vs.parentNode!==inner) inner.insertBefore(vs, inner.firstChild);
+  } else {
+    if(vs.parentNode!==pbActive) pbActive.insertBefore(vs, pbActive.firstChild);   // back atop wave/meters/controls
+  }
+  const btn=$('#vmWide'); if(btn){ btn.classList.toggle('on', wide); btn.style.display = can ? '' : 'none'; }
 }
 
 // ── Video picture (audio-post model, Phase 6d adaptive tiers) ────────────────────────
@@ -1250,7 +1288,7 @@ async function ensurePeaks(revId){
 }
 
 function togglePlay(){ if(nullOn){ toggleNull(); return;} if(audio.paused){ audio.volume=userVol; audio.play().catch(()=>{}); } else audio.pause(); }
-function stopAll(){ players.forEach(p=>{try{p.pause()}catch{}}); stopNull(); curTrackId=null; curRevId=null; dragSeek=null; stepT=null; scrubEl=null; $('#pbActive').classList.add('hidden'); $('#cpanel').classList.add('hidden'); $('#addc').classList.add('hidden'); $('#vnotePanel').classList.add('hidden'); $('.pb-inner').classList.remove('with-notes'); updateBarVis(); updateStage(); render(); }
+function stopAll(){ players.forEach(p=>{try{p.pause()}catch{}}); stopNull(); curTrackId=null; curRevId=null; dragSeek=null; stepT=null; scrubEl=null; $('#pbActive').classList.add('hidden'); $('#cpanel').classList.add('hidden'); $('#addc').classList.add('hidden'); $('#vnotePanel').classList.add('hidden'); $('.pb-inner').classList.remove('with-notes'); applyVidWide(); updateBarVis(); updateStage(); render(); }
 
 $('#playBtn').addEventListener('click',togglePlay);
 $('#prevBtn').addEventListener('click',()=>step(-1));
@@ -1276,6 +1314,25 @@ players.forEach(el=>{
 
 $('#revSel').addEventListener('change',e=>requestRev(+e.target.value));
 $('#swapBtn').addEventListener('click',()=>requestRev(+$('#cmpSel').value));  // play the compare rev; selectors update on completion
+$('#vmFull').addEventListener('click',()=>{
+  const vs=$('#vstage'), fsEl=document.fullscreenElement||document.webkitFullscreenElement;
+  // exit must be invoked on `document`; request on the element — different receivers, don't merge them.
+  try{
+    const p = fsEl ? (document.exitFullscreen||document.webkitExitFullscreen).call(document)
+                   : (vs.requestFullscreen||vs.webkitRequestFullscreen).call(vs);
+    if(p&&p.catch) p.catch(()=>{});                 // older webkit returns no promise; some policies reject
+  }catch{}
+});
+// Click the video picture (anywhere but the menu) to play/pause — playBtn stays in sync via the audio play/pause events.
+$('#vstage').addEventListener('click',e=>{ if(e.target.closest('.vmenu'))return; if(curTrackId) togglePlay(); });
+// Touch devices have no :hover — tap the video to reveal/hide the menu (taps on the buttons pass through).
+$('#vstage').addEventListener('touchstart',e=>{ if(e.target.closest('.vmenu'))return; $('#vstage').classList.toggle('vmenu-tap'); },{passive:true});
+// Keep the Fullscreen button label/state in sync with the actual fullscreen state (Esc, F11, etc.).
+['fullscreenchange','webkitfullscreenchange'].forEach(ev=>document.addEventListener(ev,()=>{
+  const on=!!(document.fullscreenElement||document.webkitFullscreenElement), b=$('#vmFull');
+  if(b){ b.textContent = on ? '⤡ Exit full' : '⤢ Fullscreen'; b.classList.toggle('on', on); }
+}));
+$('#vmWide').addEventListener('click',()=>{ vidWide=!vidWide; localStorage.setItem('at_video_wide', vidWide?'1':'0'); applyVidWide(); applyVideoH(); if(curRevId) drawWave(); });
 // Coalesce rapid switch/swap clicks: while a crossfade is mid-flight, remember only the LATEST
 // target and run it once the fade settles. Dropping requests outright (the old behavior) left the
 // <select>s mutated-but-unsynced, eventually wedging swap (a===b) and the dropdown until reload.
@@ -1604,6 +1661,7 @@ async function openTrack(trackId, fromPlayer){
   $('#cpanel').classList.remove('hidden');
   $('#addc').classList.remove('hidden');          // show the note-input box (it lives above #cpanel)
   $('.pb-inner').classList.add('with-notes');   // theater: reveal the notes column now a track is open
+  applyVidWide();                                 // notes column now present → reveal the "Wide" button (and honor wide mode)
   if(curRevId) drawWave();                        // the engine column width changed → re-layout the canvas
   $('#cTitleText').textContent='Notes — '+t.title;
   comments=await api('tracks/'+trackId+'/comments');
