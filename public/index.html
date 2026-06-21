@@ -688,7 +688,14 @@ function applyNullVis(){
   $('#nullBox').classList.toggle('hidden', !v && !NULL_VIS);
   $('#nullToggle').classList.toggle('hidden', v);
 }
-function applyMediaMode(){ applyNullVis(); applyLayout(); updateStage(); }
+function applyMediaMode(){
+  applyNullVis(); applyLayout(); updateStage();
+  // Video projects rarely have multiple "tracks" to skip through, and the track list below the
+  // transport is an easier picker — so hide prev/next track buttons for video, show them for audio.
+  const v=isVideoProject();
+  $('#prevBtn').classList.toggle('hidden', v);
+  $('#nextBtn').classList.toggle('hidden', v);
+}
 
 // Arrange the player for the project's media type + current view.  Audio (any view) and
 // video-in-studio keep the fixed bottom #playerBar.  A VIDEO project in the PLAYER view goes
