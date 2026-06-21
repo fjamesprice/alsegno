@@ -72,7 +72,7 @@
   .who{font-size:13px;color:var(--muted)}
 
   /* Album progress */
-  .album-prog{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:14px 16px;margin:10px 0 16px}
+  .album-prog{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:14px 16px;margin:10px 0 16px;display:flex;align-items:center;gap:14px}
   .album-prog .lbl{display:flex;justify-content:space-between;font-size:13px;color:var(--muted);margin-bottom:8px}
   .barwrap{height:8px;background:#0a0b0f;border-radius:6px;overflow:hidden}
   .barwrap > i{display:block;height:100%;background:linear-gradient(90deg,var(--accent2),var(--done));border-radius:6px;transition:width .3s}
@@ -225,6 +225,9 @@
   .pcard .pprog{width:120px;flex:none}
   .badge.type{background:var(--panel2);color:var(--muted);border:1px solid var(--line);text-transform:uppercase}
   .pcard .barwrap{height:6px;margin-top:5px}
+  /* Album art (Phase 6e — albums only): list thumbnail + open-album header image. */
+  .pcard .pthumb{width:46px;height:46px;border-radius:8px;object-fit:cover;flex:none;border:1px solid var(--line);background:var(--panel2)}
+  .alb-art{width:64px;height:64px;border-radius:8px;object-fit:cover;flex:none;border:1px solid var(--line);background:var(--panel2)}
 
   /* Admin tables */
   .utable{display:flex;flex-direction:column;gap:7px}
@@ -284,8 +287,11 @@
   <!-- PLAYER VIEW -->
   <div id="playerView">
     <div class="album-prog">
-      <div class="lbl"><span id="apDone">0 / 0 done</span><span id="apAvg">0%</span></div>
-      <div class="barwrap"><i id="apBar" style="width:0%"></i></div>
+      <img id="albArt" class="alb-art hidden" alt="Album art">
+      <div style="flex:1;min-width:0">
+        <div class="lbl"><span id="apDone">0 / 0 done</span><span id="apAvg">0%</span></div>
+        <div class="barwrap"><i id="apBar" style="width:0%"></i></div>
+      </div>
     </div>
     <div class="tracks" id="trackList"></div>
     <div id="emptyHint" class="pb-empty hidden">No tracks in this project yet.</div>
@@ -313,6 +319,15 @@
         <div class="row">
           <input id="albInput" style="flex:1" placeholder="Title">
           <button class="btn" id="albSave">Save</button>
+        </div>
+        <div id="stArtBlock" class="hidden" style="margin-top:12px">
+          <label class="muted small">Album art — jpg/png/webp, downscaled to ≤1024px</label>
+          <div class="row" style="margin-top:6px;align-items:center;gap:12px">
+            <img id="stArtThumb" class="alb-art hidden" alt="">
+            <input type="file" id="stArtFile" accept="image/*" style="flex:1;min-width:120px">
+            <button class="btn sm" id="stArtUp">Upload</button>
+            <button class="btn ghost sm hidden" id="stArtDel">Remove</button>
+          </div>
         </div>
       </div>
       <div class="card">
@@ -725,7 +740,9 @@ function renderProjects(){
     const card=document.createElement('div'); card.className='pcard';
     const unseen=(ME.role==='client' && p.unseen_count)?'<span class="badge new">NEW</span>':'';
     const open=p.open_comment_count?`<span>💬 ${p.open_comment_count} open</span>`:'';
+    const thumb=p.art_stored_name?`<img class="pthumb" src="api/art/${esc(p.art_stored_name)}" alt="">`:'';
     card.innerHTML=`
+      ${thumb}
       <div class="pt">
         <div class="pname"><span class="nm">${esc(p.title)}</span>${unseen}<span class="badge type">${p.type==='album'?'album':'single'}</span>${p.media_type==='video'?'<span class="badge media">video</span>':''}</div>
         <div class="pmeta"><span>${p.track_count} track${p.track_count===1?'':'s'}</span>${open}</div>
@@ -784,6 +801,9 @@ function render(fromEvent){
   if(!PROJECT) return;                              // nothing to draw without an open project
   const isSong = PROJECT.type==='song';
   $('.album-prog').classList.toggle('hidden', isSong);   // a single song has no album-level progress bar
+  const art=$('#albArt');                                // album art (albums only) in the header
+  if(!isSong && PROJECT.art_stored_name){ art.src='api/art/'+PROJECT.art_stored_name; art.classList.remove('hidden'); }
+  else { art.classList.add('hidden'); art.removeAttribute('src'); }
   const total=TRACKS.length;
   const done=TRACKS.filter(t=>t.doneness>=100).length;
   const avg=total? Math.round(TRACKS.reduce((a,t)=>a+t.doneness,0)/total):0;
@@ -1488,6 +1508,16 @@ $('#albSave').addEventListener('click',async()=>{ const v=$('#albInput').value.t
   try{ await api('projects/'+PROJECT.id,{method:'PUT',body:{title:v}}); PROJECT.title=v; ALBUM=v;
     $('#albumTitle').textContent=ALBUM; document.title=ALBUM; render(); toast('Title saved'); }
   catch(e){ toast(e.message,true); } });
+// Album art upload/replace + remove (albums only; the control is hidden for songs).
+$('#stArtUp').addEventListener('click',async()=>{
+  const f=$('#stArtFile').files[0]; if(!f||!PROJECT)return;
+  const fd=new FormData(); fd.append('file',f);
+  try{ await api('projects/'+PROJECT.id+'/art',{method:'POST',body:fd}); $('#stArtFile').value=''; await reload(); renderStudio(); toast('Album art updated'); }
+  catch(e){ toast(e.message,true); } });
+$('#stArtDel').addEventListener('click',async()=>{
+  if(!PROJECT || !confirm('Remove album art?'))return;
+  try{ await api('projects/'+PROJECT.id+'/art',{method:'DELETE'}); await reload(); renderStudio(); toast('Album art removed'); }
+  catch(e){ toast(e.message,true); } });
 $('#addTrack').addEventListener('click',addTrackFn);
 $('#newTrack').addEventListener('keydown',e=>{ if(e.key==='Enter') addTrackFn(); });
 async function addTrackFn(){
@@ -1520,6 +1550,14 @@ function renderStudio(){
   $('#stTitleH').textContent = isSong?'Song title':'Album title';
   $('#stAddHint').classList.toggle('hidden', !isSong);
   $('#albInput').value=PROJECT.title;
+  // Album art controls — albums only.
+  $('#stArtBlock').classList.toggle('hidden', isSong);
+  if(!isSong){
+    const has=!!PROJECT.art_stored_name, thumb=$('#stArtThumb');
+    thumb.classList.toggle('hidden', !has); if(has) thumb.src='api/art/'+PROJECT.art_stored_name;
+    $('#stArtDel').classList.toggle('hidden', !has);
+    $('#stArtUp').textContent = has?'Replace':'Upload';
+  }
   const box=$('#studioTracks'); box.innerHTML='';
   if(!TRACKS.length){ box.innerHTML='<div class="card faint">No tracks yet — add one above.</div>'; return; }
   TRACKS.forEach((t,i)=>{

@@ -297,6 +297,9 @@ const storage = multer.diskStorage({
   filename: (req, file, cb) => cb(null, crypto.randomUUID() + path.extname(file.originalname).toLowerCase())
 });
 const upload = multer({ storage, limits: { fileSize: 1024 * 1024 * 1024 } }); // 1 GB
+// Album art: small cap + image-only filter (ffmpeg then re-encodes to a downscaled jpg, which also validates it).
+const uploadImage = multer({ storage, limits: { fileSize: 25 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => cb(null, /^image\//.test(file.mimetype)) });
 
 // ── ffmpeg helpers ───────────────────────────────────────────
 function run(cmd, args) {
@@ -469,6 +472,27 @@ async function transcodeToVideoMicro(input, output) {
   await run('ffmpeg', ['-y', '-i', input, '-an', '-vf', 'scale=-2:240',
     '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '33', '-maxrate', '220k', '-bufsize', '440k',
     '-g', '60', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', output]);
+}
+
+// Album art (album projects only): downscale to fit 1024×1024 (keep aspect) and re-encode to a quality
+// jpg. The transcode also VALIDATES the upload is a real image — ffmpeg fails on junk, which the route
+// turns into a 400. Returns the stored jpg name; cleans up its files and rethrows (.status=400) on error.
+async function processArtImage(file) {
+  const inputPath = file.path;
+  const storedName = crypto.randomUUID() + '.jpg';
+  const outPath = path.join(UPLOADS_DIR, storedName);
+  try {
+    await run('ffmpeg', ['-y', '-i', inputPath,
+      '-vf', "scale='min(1024,iw)':'min(1024,ih)':force_original_aspect_ratio=decrease",
+      '-frames:v', '1', '-q:v', '3', outPath]);
+    if (!fs.existsSync(outPath) || fs.statSync(outPath).size === 0) { const e = new Error('Image could not be processed'); e.status = 400; throw e; }
+    try { fs.unlinkSync(inputPath); } catch {}
+    return storedName;
+  } catch (e) {
+    for (const p of [inputPath, outPath]) { if (p && fs.existsSync(p)) { try { fs.unlinkSync(p); } catch {} } }
+    if (!e.status) e.status = 400;
+    throw e;
+  }
 }
 
 // Does this media file have at least one audio stream?
@@ -650,6 +674,7 @@ const projectIdForAudio    = name => {
   const t = db.prepare('SELECT project_id AS p FROM tracks WHERE video_stored_name = ? OR video_proxy_name = ? OR video_micro_name = ?').get(name, name, name);
   return t ? (t.p ?? null) : null;
 };
+const projectIdForArt = name => db.prepare('SELECT id AS p FROM projects WHERE art_stored_name = ?').get(name)?.p ?? null;
 const isMember = (username, projectId) => !!db.prepare('SELECT 1 FROM project_users WHERE project_id = ? AND username = ?').get(projectId, username);
 
 // Resolvers (req → projectId|null). Param ids are the project itself; others look the project up.
@@ -884,6 +909,31 @@ app.put('/api/projects/:id', requireAdmin, (req, res) => {
   res.json({ ok: true });
 });
 
+// Album art (album projects only). Engineer/admin on the project. Stored as a downscaled jpg; the
+// previous art file is unlinked. Both broadcasts so the open album AND everyone's project-list thumb update.
+app.post('/api/projects/:id/art', requireProjectEngineer(pParam), uploadImage.single('file'), async (req, res) => {
+  const pid = req.projectId;
+  const proj = db.prepare('SELECT type, art_stored_name FROM projects WHERE id = ?').get(pid);
+  if (!req.file) return res.status(400).json({ error: 'An image file is required' });
+  if (proj.type !== 'album') { try { fs.unlinkSync(req.file.path); } catch {} return res.status(400).json({ error: 'Album art is for albums only' }); }
+  let storedName;
+  try { storedName = await processArtImage(req.file); }
+  catch (e) { return res.status(e.status || 400).json({ error: e.message || 'Bad image' }); }
+  db.prepare("UPDATE projects SET art_stored_name = ?, updated_at = datetime('now') WHERE id = ?").run(storedName, pid);
+  unlinkStored(proj.art_stored_name);
+  broadcastChange(pid); broadcastProjects();
+  res.json({ art_stored_name: storedName });
+});
+
+app.delete('/api/projects/:id/art', requireProjectEngineer(pParam), (req, res) => {
+  const pid = req.projectId;
+  const old = db.prepare('SELECT art_stored_name FROM projects WHERE id = ?').get(pid)?.art_stored_name;
+  db.prepare("UPDATE projects SET art_stored_name = NULL, updated_at = datetime('now') WHERE id = ?").run(pid);
+  unlinkStored(old);
+  broadcastChange(pid); broadcastProjects();
+  res.json({ ok: true });
+});
+
 // Delete a project: tracks have no FK to projects (Phase 3a), so cascade them explicitly
 // (tracks→revisions→comments DO cascade); project_users cascades via its own FK. Unlink files after.
 app.delete('/api/projects/:id', requireAdmin, (req, res) => {
@@ -891,6 +941,7 @@ app.delete('/api/projects/:id', requireAdmin, (req, res) => {
   if (!projectExists(pid)) return res.status(404).json({ error: 'Not found' });
   const revs = db.prepare('SELECT r.stored_name, r.original_stored_name FROM revisions r JOIN tracks t ON r.track_id = t.id WHERE t.project_id = ?').all(pid);
   const vids = db.prepare('SELECT video_stored_name, video_proxy_name, video_micro_name, video_original_stored_name FROM tracks WHERE project_id = ?').all(pid);
+  const art = db.prepare('SELECT art_stored_name FROM projects WHERE id = ?').get(pid)?.art_stored_name;
   db.transaction(() => {
     db.prepare('DELETE FROM seen WHERE track_id IN (SELECT id FROM tracks WHERE project_id = ?)').run(pid);
     db.prepare('DELETE FROM tracks WHERE project_id = ?').run(pid);   // cascades revisions + comments
@@ -899,6 +950,7 @@ app.delete('/api/projects/:id', requireAdmin, (req, res) => {
   })();
   for (const r of revs) { unlinkStored(r.stored_name); unlinkStored(r.original_stored_name); }
   for (const v of vids) { unlinkStored(v.video_stored_name); unlinkStored(v.video_proxy_name); unlinkStored(v.video_micro_name); unlinkStored(v.video_original_stored_name); }
+  unlinkStored(art);
   // Membership is gone now, so anyone who had it open re-validates via the projects ping → 404 → list.
   broadcastProjects();
   res.json({ ok: true });
@@ -1230,6 +1282,14 @@ app.get('/api/audio/:name', requireProjectAccess(pAudio), (req, res) => {
   }
   res.type(MEDIA_TYPES[path.extname(name).toLowerCase()] || 'application/octet-stream');
   res.sendFile(p); // `send` adds Accept-Ranges + handles Range requests for seeking
+});
+
+// Album art image, gated to project members (any role). Always a downscaled jpg (processArtImage).
+app.get('/api/art/:name', requireProjectAccess(req => projectIdForArt(req.params.name)), (req, res) => {
+  const p = path.join(UPLOADS_DIR, req.params.name);
+  if (!fs.existsSync(p)) return res.status(404).json({ error: 'Not found' });
+  res.type('image/jpeg');
+  res.sendFile(p);
 });
 
 // ── Comments ─────────────────────────────────────────────────
