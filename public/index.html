@@ -83,16 +83,9 @@
   .nav{display:flex;gap:4px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:3px}
   .nav button{padding:6px 14px;border-radius:7px;color:var(--muted);font-size:14px}
   .nav button.active{background:var(--accent2);color:#fff}
-  .who-wrap{position:relative}
   .who{font-size:13px;color:var(--muted);background:none;border:0;font:inherit;cursor:pointer;display:inline-flex;align-items:center;gap:5px;padding:5px 8px;border-radius:8px}
   .who:hover{color:var(--text);background:var(--panel2)}
   .who #whoName{max-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .who .caret{font-size:9px;opacity:.65;flex:none}
-  .whomenu{position:absolute;right:0;top:calc(100% + 6px);z-index:60;min-width:184px;background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:0 14px 38px rgba(0,0,0,.5);padding:6px}
-  .whomenu-h{padding:6px 10px 9px;margin:0 0 6px;border-bottom:1px solid var(--line);display:flex;flex-direction:column;gap:2px}
-  .whomenu-h b{font-size:13px;color:var(--text)}
-  .whomenu-item{display:block;width:100%;text-align:left;background:none;border:0;color:var(--text);font:inherit;font-size:13px;padding:8px 10px;border-radius:7px;cursor:pointer}
-  .whomenu-item:hover{background:var(--panel2)}
 
   /* Album progress */
   .album-prog{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:14px 16px;margin:10px 0 16px;display:flex;align-items:center;gap:14px}
@@ -346,15 +339,8 @@
   <div class="topbar">
     <div class="title" id="albumTitle">Projects</div>
     <div class="nav" id="nav"></div>
-    <div class="who-wrap" id="whoWrap">
-      <button type="button" class="who" id="who" aria-haspopup="true" aria-expanded="false">
-        <span id="whoName"></span><span class="caret">▾</span></button>
-      <div class="whomenu hidden" id="whoMenu">
-        <div class="whomenu-h"><b id="whoMenuName"></b><span class="faint small" id="whoMenuRole"></span></div>
-        <button type="button" class="whomenu-item" id="wmName">Change display name</button>
-        <button type="button" class="whomenu-item" id="wmPass">Change password</button>
-      </div>
-    </div>
+    <button type="button" class="who" id="who" aria-haspopup="dialog" title="Account settings">
+      <span id="whoName"></span></button>
     <button class="btn ghost sm" id="logoutBtn">Sign out</button>
   </div>
 
@@ -754,13 +740,11 @@ $('#logoutBtn').addEventListener('click',async()=>{ disconnectEvents(); try{audi
 
 const canManage = () => !!ME && (ME.role==='admin' || ME.role==='engineer'); // may run Studio on an open project
 const displayName = u => (u && (u.display_name||u.username)) || '';
-// Paint the signed-in name into the top-bar button + its dropdown header (called on boot and after
-// a self display-name change).
+// Paint the signed-in name into the top-bar button (called on boot and after a self
+// display-name change).
 function refreshWho(){
   if(!ME) return;
   $('#whoName').textContent=displayName(ME);
-  $('#whoMenuName').textContent=displayName(ME);
-  $('#whoMenuRole').textContent=ME.role;
 }
 // Stable per-author color from a username hash (replaces the old hardcoded james/noah rules).
 function userColor(name){ let h=0; const s=String(name||''); for(let i=0;i<s.length;i++) h=(h*31+s.charCodeAt(i))>>>0; return `hsl(${h%360},62%,68%)`; }
@@ -2246,12 +2230,9 @@ $('#npCreate').addEventListener('click',async()=>{
 });
 
 // ───────── account menu (self-service profile) ─────────
-// The top-bar name is a dropdown; its two items open the Account modal focused on the relevant
-// field. Display-name + password both hit caller-scoped /api/me routes (no admin rights needed).
-function closeWhoMenu(){ const m=$('#whoMenu'); if(m.classList.contains('hidden'))return; m.classList.add('hidden'); $('#who').setAttribute('aria-expanded','false'); }
-$('#who').addEventListener('click',e=>{ e.stopPropagation();
-  const shown=$('#whoMenu').classList.toggle('hidden')===false; $('#who').setAttribute('aria-expanded',shown?'true':'false'); });
-document.addEventListener('click',e=>{ if(!$('#whoWrap').contains(e.target)) closeWhoMenu(); });
+// Clicking the top-bar name opens the Account modal (display name + password, focused on the
+// name field). Both hit caller-scoped /api/me routes (no admin rights needed).
+$('#who').addEventListener('click',()=>openAccount('name'));
 
 function openAccount(focus){
   if(!ME) return;
@@ -2262,12 +2243,10 @@ function openAccount(focus){
   setTimeout(()=>{ const el=$(focus==='pass'?'#acCur':'#acDisplay'); if(el){ el.focus(); if(el.select)el.select(); } },0);
 }
 function closeAccount(){ $('#accountModal').classList.add('hidden'); }
-$('#wmName').addEventListener('click',()=>{ closeWhoMenu(); openAccount('name'); });
-$('#wmPass').addEventListener('click',()=>{ closeWhoMenu(); openAccount('pass'); });
 $('#acClose').addEventListener('click',closeAccount);
 $('#acPassClose').addEventListener('click',closeAccount);
 $('#accountModal').addEventListener('click',e=>{ if(e.target===$('#accountModal')) closeAccount(); });
-document.addEventListener('keydown',e=>{ if(e.key==='Escape'){ closeWhoMenu(); if(!$('#accountModal').classList.contains('hidden')) closeAccount(); } });
+document.addEventListener('keydown',e=>{ if(e.key==='Escape' && !$('#accountModal').classList.contains('hidden')) closeAccount(); });
 
 async function saveDisplayName(){
   try{
