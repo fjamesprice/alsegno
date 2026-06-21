@@ -251,6 +251,15 @@ db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('auto_update_che
 }
 // Clear any processing flags left set by a crash/restart mid-job (the in-flight transcode was lost).
 db.exec('UPDATE tracks SET video_processing = 0, mix_processing = 0 WHERE video_processing <> 0 OR mix_processing <> 0');
+// Sweep transient decode temp files orphaned by a crash/kill mid-analysis. computeWaveAndPeaks writes
+// uploads/.wavtmp-<uuid>.f32 (a full-rate PCM decode — can be hundreds of MB) and unlinks it inline;
+// if the process dies in between, nothing else references or reclaims it. No DB row points at these,
+// so it's always safe to delete every one at startup. Scoped to UPLOADS_DIR (per-instance).
+try {
+  for (const f of fs.readdirSync(UPLOADS_DIR)) {
+    if (/^\.wavtmp-.*\.f32$/.test(f)) { try { fs.unlinkSync(path.join(UPLOADS_DIR, f)); } catch {} }
+  }
+} catch {}
 
 // Indexes for the project-scoped lookups added in Phase 3b (membership-by-user, tracks-by-project).
 // Created after the ALTER above so tracks.project_id exists; idempotent.
@@ -285,17 +294,26 @@ db.transaction(() => {
 })();
 
 // ── Auth (trust-on-first-use) ────────────────────────────────
+// scrypt runs ASYNC (crypto.scrypt, not scryptSync): it's a deliberately expensive CPU-bound KDF, and
+// the sync form would block Node's single event loop for the whole computation — so a burst of login
+// attempts would serialize every other request behind it. Async hands the work to libuv's threadpool.
 function hashPassword(pw) {
-  const salt = crypto.randomBytes(16);
-  const hash = crypto.scryptSync(pw, salt, 64);
-  return salt.toString('hex') + ':' + hash.toString('hex');
+  return new Promise((resolve, reject) => {
+    const salt = crypto.randomBytes(16);
+    crypto.scrypt(pw, salt, 64, (err, hash) =>
+      err ? reject(err) : resolve(salt.toString('hex') + ':' + hash.toString('hex')));
+  });
 }
 function verifyPassword(pw, stored) {
-  if (!stored) return false;
-  const [saltHex, hashHex] = stored.split(':');
-  const hash = crypto.scryptSync(pw, Buffer.from(saltHex, 'hex'), 64);
-  const expected = Buffer.from(hashHex, 'hex');
-  return hash.length === expected.length && crypto.timingSafeEqual(hash, expected);
+  return new Promise((resolve) => {
+    if (!stored) return resolve(false);
+    const [saltHex, hashHex] = stored.split(':');
+    crypto.scrypt(pw, Buffer.from(saltHex, 'hex'), 64, (err, hash) => {
+      if (err) return resolve(false);
+      const expected = Buffer.from(hashHex, 'hex');
+      resolve(hash.length === expected.length && crypto.timingSafeEqual(hash, expected));
+    });
+  });
 }
 // One-time invite token (Cluster A). 24 random bytes ⇒ 48 hex chars (≥16B entropy, NOT derived
 // from SESSION_SECRET). Minted on user-create and password-reset; cleared the moment it sets a
@@ -654,15 +672,32 @@ app.use(express.static(path.join(__dirname, 'public')));
 // matters for a self-hosted box that reboots (Phase 5). The store creates its own `sessions` table
 // (no FKs, additive) and sweeps expired rows every 15 min. Switching off MemoryStore logs everyone
 // out exactly once, on the deploy that introduces it; sessions survive every restart after that.
+// Session signing key. NEVER fall back to a hardcoded constant — in a public repo that's a known key
+// anyone could use to forge a signed cookie. If SESSION_SECRET isn't in the environment (a deploy that
+// bypassed install.sh / docker-compose), generate a random one ONCE and persist it in the DB so it's
+// stable across restarts (sessions survive) yet never a value an attacker can know in advance.
+function resolveSessionSecret() {
+  if (process.env.SESSION_SECRET) return process.env.SESSION_SECRET;
+  let s = db.prepare("SELECT value FROM settings WHERE key = 'session_secret'").get()?.value;
+  if (!s) {
+    s = crypto.randomBytes(32).toString('hex');
+    db.prepare("INSERT INTO settings (key, value) VALUES ('session_secret', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(s);
+  }
+  console.warn('[session] SESSION_SECRET not set — using a generated per-install secret persisted in the DB. Set SESSION_SECRET in .env for production.');
+  return s;
+}
 app.use(session({
   store: new SqliteStore({
     client: db,
     expired: { clear: true, intervalMs: 15 * 60 * 1000 }
   }),
-  secret: process.env.SESSION_SECRET || 'album-tracker-dev-secret',
+  secret: resolveSessionSecret(),
   resave: false,
   saveUninitialized: false,
-  cookie: { maxAge: 30 * 24 * 60 * 60 * 1000, secure: false, sameSite: 'lax' }
+  // secure:'auto' (with trust proxy set) marks the cookie Secure ONLY when the connection is HTTPS —
+  // ON behind nginx in prod (X-Forwarded-Proto: https), OFF for the bare-HTTP LAN/standalone posture
+  // where a Secure cookie would never be set and would break login.
+  cookie: { maxAge: 30 * 24 * 60 * 60 * 1000, secure: 'auto', sameSite: 'lax' }
 }));
 
 // Re-read the user from the DB on every authenticated request. The session cookie is only a
@@ -716,27 +751,31 @@ const pComment = req => { const id = intId(req.params.id); return id == null ? n
 const pAudio   = req => projectIdForAudio(req.params.name);
 
 // admin → any project; otherwise must be a member of THIS project. Stashes req.projectId.
+// A non-member gets the SAME 404 as a nonexistent project (not 403) so project ids can't be probed
+// for existence by a logged-in member of some other project.
 function requireProjectAccess(resolve) {
   return (req, res, next) => {
     const u = liveUser(req);
     if (!u) return res.status(401).json({ error: 'Not authenticated' });
     const pid = resolve(req);
     if (pid == null) return res.status(404).json({ error: 'Not found' });
-    if (u.role !== 'admin' && !isMember(u.username, pid)) return res.status(403).json({ error: 'No access to this project' });
+    if (u.role !== 'admin' && !isMember(u.username, pid)) return res.status(404).json({ error: 'Not found' });
     req.projectId = pid;
     next();
   };
 }
-// admin → any project; otherwise must be an ENGINEER who is a member of THIS project. Clients (and
-// non-member engineers) are refused. Gates everything that creates/edits tracks, revisions, files.
+// admin → any project; otherwise must be an ENGINEER who is a member of THIS project. A non-member is
+// hidden behind a 404 (existence oracle, as above); a member who is a CLIENT gets a 403 (they already
+// know the project exists). Gates everything that creates/edits tracks, revisions, files.
 function requireProjectEngineer(resolve) {
   return (req, res, next) => {
     const u = liveUser(req);
     if (!u) return res.status(401).json({ error: 'Not authenticated' });
     const pid = resolve(req);
     if (pid == null) return res.status(404).json({ error: 'Not found' });
-    if (u.role !== 'admin' && !(u.role === 'engineer' && isMember(u.username, pid))) {
-      return res.status(403).json({ error: 'Engineer access required' });
+    if (u.role !== 'admin') {
+      if (!isMember(u.username, pid)) return res.status(404).json({ error: 'Not found' });
+      if (u.role !== 'engineer') return res.status(403).json({ error: 'Engineer access required' });
     }
     req.projectId = pid;
     next();
@@ -780,7 +819,24 @@ function broadcastUpdate(status) {
 }
 
 // ── Auth routes ──────────────────────────────────────────────
-app.post('/api/login', (req, res) => {
+// Tiny in-memory throttle (no dependency) for the unauthenticated, password/token-guessing endpoints.
+// Sliding per-IP window: caps how fast an attacker can brute-force credentials/invite tokens or pile
+// up CPU-bound scrypt work. Generous enough that no legitimate user hits it. Pruned to stay bounded.
+const loginHits = new Map(); // ip → { count, first }
+const RL_WINDOW_MS = 15 * 60 * 1000, RL_MAX = 40;
+function rateLimited(req, res) {
+  const ip = req.ip || 'unknown';
+  const now = Date.now();
+  if (loginHits.size > 5000) loginHits.clear();           // crude cap against IP-rotation memory growth
+  let e = loginHits.get(ip);
+  if (!e || now - e.first > RL_WINDOW_MS) { e = { count: 0, first: now }; loginHits.set(ip, e); }
+  e.count++;
+  if (e.count > RL_MAX) { res.status(429).json({ error: 'Too many attempts — please wait a few minutes.' }); return true; }
+  return false;
+}
+
+app.post('/api/login', async (req, res) => {
+  if (rateLimited(req, res)) return;
   const username = String(req.body.username || '').trim().toLowerCase();
   const password = String(req.body.password || '');
   if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
@@ -800,18 +856,26 @@ app.post('/api/login', (req, res) => {
       if (!tokenEquals(req.body.token, user.first_login_token)) {
         return res.status(401).json({ error: 'Invalid credentials' });
       }
-      db.prepare('UPDATE users SET pw_hash = ?, first_login_token = NULL WHERE username = ?').run(hashPassword(password), username);
+      db.prepare('UPDATE users SET pw_hash = ?, first_login_token = NULL WHERE username = ?').run(await hashPassword(password), username);
     } else {
       // Grandfathered: NULL pw_hash AND NULL token — no invite was ever minted (the bootstrap
       // admin, or a pre-migration pending user). Token not required; plain TOFU as before.
-      db.prepare('UPDATE users SET pw_hash = ? WHERE username = ?').run(hashPassword(password), username);
+      db.prepare('UPDATE users SET pw_hash = ? WHERE username = ?').run(await hashPassword(password), username);
     }
-  } else if (!verifyPassword(password, user.pw_hash)) {
+  } else if (!(await verifyPassword(password, user.pw_hash))) {
     return res.status(401).json({ error: 'Invalid credentials' });
   }
 
-  req.session.user = sessionUser(user);
-  res.json(req.session.user);
+  // Regenerate the session id now that the privilege level changed (login) — without this the
+  // pre-auth session id is reused, leaving the door open to session fixation.
+  req.session.regenerate(err => {
+    if (err) { console.error('[login] session regenerate failed:', err.message); return res.status(500).json({ error: 'Login failed' }); }
+    req.session.user = sessionUser(user);
+    req.session.save(err2 => {
+      if (err2) { console.error('[login] session save failed:', err2.message); return res.status(500).json({ error: 'Login failed' }); }
+      res.json(req.session.user);
+    });
+  });
 });
 
 app.post('/api/logout', (req, res) => { req.session.destroy(() => res.json({ ok: true })); });
@@ -824,6 +888,7 @@ app.post('/api/logout', (req, res) => { req.session.destroy(() => res.json({ ok:
 // ($request) but not the body, so the still-unconsumed token never lands in access.log. (The link
 // itself keeps the token in the URL hash, which browsers don't send to the server at all.)
 app.post('/api/invite', (req, res) => {
+  if (rateLimited(req, res)) return;
   const token = String(req.body.token || '');
   const u = token
     ? db.prepare('SELECT username FROM users WHERE first_login_token = ? AND pw_hash IS NULL AND active = 1').get(token)
@@ -895,13 +960,18 @@ function projectSummaries(user) {
   const openC = db.prepare(`SELECT COUNT(*) v FROM comments c JOIN tracks t ON c.track_id = t.id
                             WHERE t.project_id = ? AND c.parent_id IS NULL AND c.resolved = 0 AND c.deleted_at IS NULL`);
   const avgDone = db.prepare('SELECT COALESCE(AVG(doneness), 0) v FROM tracks WHERE project_id = ?');
-  // unseen: tracks in the project whose latest revision this user hasn't marked seen.
+  // unseen: tracks in the project whose latest revision this user hasn't marked seen. "Latest" MUST
+  // match projectTracks/the frontend exactly — the last row of ORDER BY is_orig_audio DESC, rev_number,
+  // i.e. the highest-rev_number mix (or the Original-audio rev when that's all there is). Using MAX(id)
+  // instead diverges when a re-uploaded video gives the Original-audio rev a higher id than the mixes,
+  // which can leave the project-list NEW badge permanently stuck (the seen id can never reach MAX(id)).
+  const latestRev = `(SELECT id FROM revisions WHERE track_id = t.id ORDER BY is_orig_audio ASC, rev_number DESC LIMIT 1)`;
   const unseen = db.prepare(`
     SELECT COUNT(*) v FROM tracks t
     WHERE t.project_id = ?
-      AND (SELECT MAX(id) FROM revisions WHERE track_id = t.id) IS NOT NULL
+      AND ${latestRev} IS NOT NULL
       AND COALESCE((SELECT last_seen_rev FROM seen WHERE username = ? AND track_id = t.id), 0)
-          < (SELECT MAX(id) FROM revisions WHERE track_id = t.id)`);
+          < ${latestRev}`);
   return projects.map(p => ({
     id: p.id, type: p.type, media_type: p.media_type, title: p.title, owner: p.owner,
     art_stored_name: p.art_stored_name || null,
@@ -987,7 +1057,7 @@ app.post('/api/projects/:id/art', requireProjectEngineer(pParam), artUpload, asy
   if (proj.type !== 'album') { try { fs.unlinkSync(req.file.path); } catch {} return res.status(400).json({ error: 'Album art is for albums only' }); }
   let storedName;
   try { storedName = await processArtImage(req.file); }
-  catch (e) { return res.status(e.status || 400).json({ error: e.message || 'Bad image' }); }
+  catch (e) { console.error('[art] processing failed:', e.message); return res.status(e.status || 400).json({ error: e.status ? e.message : 'Could not process image' }); }
   db.prepare("UPDATE projects SET art_stored_name = ?, updated_at = datetime('now') WHERE id = ?").run(storedName, pid);
   unlinkStored(proj.art_stored_name);
   broadcastChange(pid); broadcastProjects();
@@ -1079,7 +1149,12 @@ app.put('/api/tracks/:id', requireProjectEngineer(pTrack), (req, res) => {
 app.delete('/api/tracks/:id', requireProjectEngineer(pTrack), (req, res) => {
   const revs = db.prepare('SELECT stored_name, original_stored_name FROM revisions WHERE track_id = ?').all(req.params.id);
   const trk = db.prepare('SELECT video_stored_name, video_proxy_name, video_micro_name, video_original_stored_name FROM tracks WHERE id = ?').get(req.params.id);
-  db.prepare('DELETE FROM tracks WHERE id = ?').run(req.params.id); // cascades revisions/comments
+  // `seen` has no FK to tracks (PK is username+track_id), so it does NOT cascade — delete it explicitly
+  // (mirroring the project-delete path) or every viewer's seen row for this track leaks forever.
+  db.transaction(() => {
+    db.prepare('DELETE FROM seen WHERE track_id = ?').run(req.params.id);
+    db.prepare('DELETE FROM tracks WHERE id = ?').run(req.params.id); // cascades revisions/comments
+  })();
   for (const r of revs) { unlinkStored(r.stored_name); unlinkStored(r.original_stored_name); }
   if (trk) { unlinkStored(trk.video_stored_name); unlinkStored(trk.video_proxy_name); unlinkStored(trk.video_micro_name); unlinkStored(trk.video_original_stored_name); }
   broadcastChange(req.projectId);
@@ -1121,6 +1196,12 @@ app.put('/api/tracks/:id/doneness', requireProjectAccess(pTrack), (req, res) => 
 // Mark a track's latest revision as seen by the current user
 app.post('/api/tracks/:id/seen', requireProjectAccess(pTrack), (req, res) => {
   const rev = Number(req.body.revision_id) || 0;
+  // Only accept a revision id that actually belongs to THIS track. The upsert below takes MAX, so a
+  // bogus large id would be sticky and permanently suppress the user's own NEW badges for the track.
+  if (rev > 0) {
+    const rv = db.prepare('SELECT track_id FROM revisions WHERE id = ?').get(rev);
+    if (!rv || rv.track_id !== Number(req.params.id)) return res.status(400).json({ error: 'Revision is not on this track' });
+  }
   db.prepare(`INSERT INTO seen (username, track_id, last_seen_rev) VALUES (?, ?, ?)
               ON CONFLICT(username, track_id) DO UPDATE SET last_seen_rev = MAX(last_seen_rev, excluded.last_seen_rev)`)
     .run(req.session.user.username, req.params.id, rev);
@@ -1248,7 +1329,7 @@ app.post('/api/tracks/:id/revisions', requireProjectEngineer(pTrack), upload.sin
 
 // Replace the audio of an EXISTING revision in place — keeps id/rev_number/notes and the whole
 // comment thread; only the audio + its analysis change. Same pipeline as create (ROADMAP 2.1).
-app.post('/api/revisions/:id/replace', requireProjectEngineer(pRev), upload.single('file'), async (req, res) => {
+app.post('/api/revisions/:id/replace', requireProjectEngineer(pRev), upload.single('file'), (req, res) => {
   const rev = db.prepare('SELECT * FROM revisions WHERE id = ?').get(req.params.id);
   if (!rev) { if (req.file) { try { fs.unlinkSync(req.file.path); } catch {} } return res.status(404).json({ error: 'Revision not found' }); }
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
@@ -1256,38 +1337,49 @@ app.post('/api/revisions/:id/replace', requireProjectEngineer(pRev), upload.sing
   // replace the video instead (POST /api/tracks/:id/video regenerates it).
   if (rev.is_orig_audio) { try { fs.unlinkSync(req.file.path); } catch {} return res.status(400).json({ error: 'The original audio is set by the video — replace the video to change it.' }); }
 
-  let a;
-  try {
-    a = await processAudioUpload(req.file, settingOn('keep_lossless', false));
-  } catch (e) {
-    console.error('[replace] analysis failed:', e.message);
-    return res.status(e.status || 500).json({ error: e.status ? e.message : 'Processing failed: ' + e.message });
-  }
-  try {
-    // New stored_name UUID so the browser can't Range-serve the old bytes under the same URL.
-    const tx = db.transaction(() => {
-      db.prepare(`UPDATE revisions SET stored_name = ?, original_name = ?, original_stored_name = ?, mime_type = 'audio/mpeg',
-                    size = ?, duration = ?, peaks = ?, lufs_i = ?, lufs_lra = ?, true_peak = ?,
-                    st_interval = ?, st_series = ?, peak_interval = ?, peak_series = ? WHERE id = ?`)
-        .run(a.storedName, a.origName, a.originalStoredName, a.size, a.duration, JSON.stringify(a.wave.peaks),
-             a.loud.i, a.loud.lra, a.loud.tp, a.loud.st_interval, JSON.stringify(a.loud.st),
-             a.wave.peakInterval, JSON.stringify(a.wave.peakSeries), rev.id);
-      // A shorter replacement can leave pins past the end — clamp them onto the new waveform.
-      db.prepare('UPDATE comments SET ts = ? WHERE revision_id = ? AND ts > ?').run(a.duration, rev.id, a.duration);
-      db.prepare("UPDATE tracks SET updated_at = datetime('now') WHERE id = ?").run(rev.track_id);
-    });
-    tx();
-  } catch (e) {
-    // DB update failed — the freshly-stored files are orphaned; remove them, leave the row intact.
-    unlinkStored(a.storedName); unlinkStored(a.originalStoredName);
-    console.error('[replace] db update failed:', e.message);
-    return res.status(500).json({ error: 'Processing failed: ' + e.message });
-  }
-  // Committed — the old preview + old kept original are no longer referenced (new UUIDs); unlink both.
-  if (rev.stored_name !== a.storedName) unlinkStored(rev.stored_name);
-  if (rev.original_stored_name && rev.original_stored_name !== a.originalStoredName) unlinkStored(rev.original_stored_name);
-  broadcastChange(req.projectId); // analysis/waveform/stored_name changed — listeners refetch metadata
-  res.json({ id: rev.id, rev_number: rev.rev_number, duration: a.duration, stored_name: a.storedName });
+  // Like create: respond immediately and run the (multi-minute) transcode/analysis in the serialized
+  // background queue — never hold it in one HTTP request (proxy/browser timeout → a "failed" replace
+  // that actually succeeded), and never run a second ffmpeg + big f32le decode in parallel with a
+  // queued job. Studio shows "processing…" via mix_processing; the new audio lands via SSE 'change'.
+  const file = req.file, projectId = req.projectId, revId = rev.id, trackId = rev.track_id;
+  const keepLossless = settingOn('keep_lossless', false);
+  db.prepare('UPDATE tracks SET mix_processing = mix_processing + 1 WHERE id = ?').run(trackId);
+  broadcastChange(projectId);
+  res.json({ ok: true, processing: true });
+
+  enqueueMedia(async () => {
+    const done = () => { db.prepare('UPDATE tracks SET mix_processing = MAX(0, mix_processing - 1) WHERE id = ?').run(trackId); broadcastChange(projectId); };
+    let a;
+    try { a = await processAudioUpload(file, keepLossless); }
+    catch (e) { console.error('[replace] processing failed:', e.message); done(); return; }
+    // Re-read the revision INSIDE the job — it may have been deleted (or itself replaced again, or
+    // turned into an orig-audio rev) while queued. If so, the freshly-stored files belong to nothing.
+    const cur = db.prepare('SELECT id, stored_name, original_stored_name FROM revisions WHERE id = ? AND is_orig_audio = 0').get(revId);
+    if (!cur) { unlinkStored(a.storedName); unlinkStored(a.originalStoredName); done(); return; }
+    try {
+      // New stored_name UUID so the browser can't Range-serve the old bytes under the same URL.
+      db.transaction(() => {
+        db.prepare(`UPDATE revisions SET stored_name = ?, original_name = ?, original_stored_name = ?, mime_type = 'audio/mpeg',
+                      size = ?, duration = ?, peaks = ?, lufs_i = ?, lufs_lra = ?, true_peak = ?,
+                      st_interval = ?, st_series = ?, peak_interval = ?, peak_series = ? WHERE id = ?`)
+          .run(a.storedName, a.origName, a.originalStoredName, a.size, a.duration, JSON.stringify(a.wave.peaks),
+               a.loud.i, a.loud.lra, a.loud.tp, a.loud.st_interval, JSON.stringify(a.loud.st),
+               a.wave.peakInterval, JSON.stringify(a.wave.peakSeries), revId);
+        // A shorter replacement can leave pins past the end — clamp them onto the new waveform.
+        db.prepare('UPDATE comments SET ts = ? WHERE revision_id = ? AND ts > ?').run(a.duration, revId, a.duration);
+        db.prepare("UPDATE tracks SET updated_at = datetime('now') WHERE id = ?").run(trackId);
+      })();
+    } catch (e) {
+      // DB update failed — the freshly-stored files are orphaned; remove them, leave the row intact.
+      unlinkStored(a.storedName); unlinkStored(a.originalStoredName);
+      console.error('[replace] db update failed:', e.message);
+      done(); return;
+    }
+    // Committed — the old preview + old kept original (read live at job time) are no longer referenced.
+    if (cur.stored_name !== a.storedName) unlinkStored(cur.stored_name);
+    if (cur.original_stored_name && cur.original_stored_name !== a.originalStoredName) unlinkStored(cur.original_stored_name);
+    done(); // analysis/waveform/stored_name changed — broadcast so listeners refetch metadata
+  });
 });
 
 app.put('/api/revisions/:id', requireProjectEngineer(pRev), (req, res) => {
@@ -1407,24 +1499,32 @@ app.put('/api/comments/:id', requireProjectAccess(pComment), (req, res) => {
   const c = db.prepare('SELECT * FROM comments WHERE id = ?').get(req.params.id);
   if (!c) return res.status(404).json({ error: 'Not found' });
   if (c.deleted_at != null) return res.status(400).json({ error: 'Note was deleted' });
-  let mutated = false;
-  if (req.body.resolved !== undefined) {
-    if (c.parent_id != null) return res.status(400).json({ error: 'Replies cannot be resolved' });
-    db.prepare('UPDATE comments SET resolved = ? WHERE id = ?').run(req.body.resolved ? 1 : 0, req.params.id);
-    mutated = true;
-  }
-  if (req.body.body !== undefined) {
+  // Validate EVERY requested mutation up front, before applying ANY — otherwise a request carrying both
+  // {resolved} and {body} from a non-author would commit the resolve and then 403 on the body, leaving
+  // a partial write behind an error response (and skipping the SSE broadcast).
+  const wantResolved = req.body.resolved !== undefined;
+  const wantBody = req.body.body !== undefined;
+  if (wantResolved && c.parent_id != null) return res.status(400).json({ error: 'Replies cannot be resolved' });
+  let newBody = null;
+  if (wantBody) {
     if (c.author !== req.session.user.username && req.session.user.role !== 'admin') {
       return res.status(403).json({ error: 'Not your note' });
     }
-    const body = String(req.body.body).trim();
-    if (!body) return res.status(400).json({ error: 'Comment body required' });
-    // Only stamp edited_at when the text actually changes (avoids a no-op edit marking the note).
-    if (body !== c.body) {
-      db.prepare("UPDATE comments SET body = ?, edited_at = datetime('now') WHERE id = ?").run(body, req.params.id);
+    newBody = String(req.body.body).trim();
+    if (!newBody) return res.status(400).json({ error: 'Comment body required' });
+  }
+  let mutated = false;
+  db.transaction(() => {
+    if (wantResolved) {
+      db.prepare('UPDATE comments SET resolved = ? WHERE id = ?').run(req.body.resolved ? 1 : 0, req.params.id);
       mutated = true;
     }
-  }
+    // Only stamp edited_at when the text actually changes (avoids a no-op edit marking the note).
+    if (wantBody && newBody !== c.body) {
+      db.prepare("UPDATE comments SET body = ?, edited_at = datetime('now') WHERE id = ?").run(newBody, req.params.id);
+      mutated = true;
+    }
+  })();
   if (mutated) broadcastChange(req.projectId); // a no-op edit/resolve shouldn't wake everyone's clients
   res.json({ ok: true });
 });
@@ -1741,7 +1841,13 @@ app.post('/api/users', requireAdmin, (req, res) => {
 
 app.post('/api/users/:u/reset', requireAdmin, (req, res) => {
   const username = String(req.params.u).trim().toLowerCase();
-  if (!db.prepare('SELECT 1 FROM users WHERE username = ?').get(username)) return res.status(404).json({ error: 'Not found' });
+  const target = db.prepare('SELECT role, active FROM users WHERE username = ?').get(username);
+  if (!target) return res.status(404).json({ error: 'Not found' });
+  // Don't strand the instance: resetting the last active admin's password (back to TOFU) could lock
+  // everyone out of admin if the one-time token is lost. Mirror the demote/deactivate guard.
+  if (target.role === 'admin' && target.active === 1 && activeAdminCount() <= 1) {
+    return res.status(400).json({ error: 'Cannot reset the last active admin — add another admin first.' });
+  }
   // Back to TOFU — and RE-MINT the invite token. A reset account would otherwise be hammerable
   // again (the whole point of the token), so a reset must produce a fresh single-use link.
   const token = mintInviteToken();
@@ -1791,7 +1897,7 @@ app.put('/api/me', requireAuth, (req, res) => {
 // Changing your own password REQUIRES the current one — a session cookie alone (e.g. a walk-up at an
 // unlocked screen) shouldn't silently re-key the account. Unlike the admin reset this sets pw_hash
 // directly (no TOFU/invite round-trip) and leaves the session valid, so you stay signed in.
-app.post('/api/me/password', requireAuth, (req, res) => {
+app.post('/api/me/password', requireAuth, async (req, res) => {
   const username = req.session.user.username;
   const u = db.prepare('SELECT * FROM users WHERE username = ?').get(username);
   if (!u) return res.status(404).json({ error: 'Not found' });
@@ -1801,9 +1907,9 @@ app.post('/api/me/password', requireAuth, (req, res) => {
   // here with no password to verify. Don't silently re-key (that would bypass the invite-only TOFU
   // gate) — send them back through the invite link, which is the only sanctioned way to set it.
   if (!u.pw_hash) return res.status(409).json({ error: 'Your password was reset by an admin — sign out and use your invite link to set a new one.' });
-  if (!verifyPassword(current, u.pw_hash)) return res.status(403).json({ error: 'Current password is incorrect' });
+  if (!(await verifyPassword(current, u.pw_hash))) return res.status(403).json({ error: 'Current password is incorrect' });
   if (!next) return res.status(400).json({ error: 'New password required' });
-  db.prepare('UPDATE users SET pw_hash = ? WHERE username = ?').run(hashPassword(next), username);
+  db.prepare('UPDATE users SET pw_hash = ? WHERE username = ?').run(await hashPassword(next), username);
   res.json({ ok: true });
 });
 
@@ -1852,12 +1958,22 @@ async function computeUpdateStatus(doFetch) {
   try { s.dirty = (await git(['status', '--porcelain'])).length > 0; } catch {}
   return s;
 }
+// A single in-flight fetch shared by the live route AND the background poller, so concurrent calls
+// (an admin clicking "Check now" while the poller ticks, or two admins at once) reuse one `git fetch`
+// instead of spawning parallel fetches that contend on the repo's .git locks.
+let updateStatusInFlight = null;
+function fetchUpdateStatus() {
+  if (updateStatusInFlight) return updateStatusInFlight;
+  updateStatusInFlight = computeUpdateStatus(true)
+    .then(s => { if (s.isGitRepo) setUpdateCache(s); return s; })
+    .finally(() => { updateStatusInFlight = null; });
+  return updateStatusInFlight;
+}
 // Live check (admin). Runs git (with the fetch), refreshes the cache, returns the status. Updating
 // stays manual — there is deliberately NO apply/restart route.
 app.get('/api/update/status', requireAdmin, async (req, res) => {
-  const s = await computeUpdateStatus(true);
-  if (s.isGitRepo) setUpdateCache(s);
-  res.json(s);
+  try { res.json(await fetchUpdateStatus()); }
+  catch (e) { console.error('[update] status check failed:', e && e.message); res.status(500).json({ error: 'Update check failed' }); }
 });
 
 // ── Settings (admin) ─────────────────────────────────────────
@@ -1880,22 +1996,35 @@ app.put('/api/settings', requireAdmin, (req, res) => {
 // in-flight flag, with the setting re-read each tick (toggling it off stops checks without a
 // restart) and a hard per-call timeout. On a genuine change vs the cached state, nudge admins via
 // SSE. unref() so neither timer keeps the process alive at shutdown.
-let updateCheckInFlight = false;
 async function runUpdateCheck() {
-  if (updateCheckInFlight || !settingOn('auto_update_check')) return;
-  updateCheckInFlight = true;
+  if (!settingOn('auto_update_check')) return;
   try {
     const prev = getUpdateCache();
-    const s = await computeUpdateStatus(true);
-    setUpdateCache(s);
+    const s = await fetchUpdateStatus();   // shares the in-flight fetch + cache write with the live route
     if (s.isGitRepo && s.behind > 0 && (!prev || prev.latest !== s.latest || (prev.behind || 0) !== s.behind)) {
       broadcastUpdate(s);
     }
   } catch { /* never let a poll crash the process */ }
-  finally { updateCheckInFlight = false; }
 }
 setTimeout(runUpdateCheck, 25000).unref();           // warm the cache shortly after boot
 setInterval(runUpdateCheck, 24 * 60 * 60 * 1000).unref(); // then once a day
+
+// ── Terminal error handler ───────────────────────────────────
+// Anything that reaches here — most importantly multer's own errors on the big upload routes (file
+// over the 1 GB limit, malformed multipart), which otherwise fall through to Express's default HTML
+// 500 with a stack trace — becomes a clean JSON response. The client's api() helper parses JSON, so
+// this is what lets the toast show a real reason; it also stops internal paths leaking in 500 bodies.
+// eslint-disable-next-line no-unused-vars
+app.use((err, req, res, next) => {
+  if (res.headersSent) return next(err);
+  const isMulter = err && err.name === 'MulterError';
+  const status = isMulter ? (err.code === 'LIMIT_FILE_SIZE' ? 413 : 400) : (err.status || 500);
+  if (status >= 500) console.error('[error]', (err && err.stack) || err);
+  const msg = isMulter
+    ? (err.code === 'LIMIT_FILE_SIZE' ? 'File too large' : 'Upload failed')
+    : (status < 500 ? (err.message || 'Request failed') : 'Server error');
+  res.status(status).json({ error: msg });
+});
 
 // ── Start ────────────────────────────────────────────────────
 app.listen(PORT, HOST, () => {

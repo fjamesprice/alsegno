@@ -669,9 +669,14 @@ const vidmi=document.getElementById('vidmicro'); // 240p micro tier (loads first
 const VIDELS=[vid,vidpx,vidmi];                  // high→low; all muted, all slaved to the audio clock
 vid.muted=true; vidpx.muted=true; vidmi.muted=true;
 let userVol = (()=>{ const v=parseFloat(localStorage.getItem('at_vol')); return isFinite(v)?v:1; })();
-let crossing=false, xfRaf=null, pendingRev=null;
+let crossing=false, xfRaf=null, pendingRev=null, pendingPause=false;
 let dragSeek=null;                              // non-null while a waveform scrub/seek drag is in flight
 let peakMaxHold=-Infinity;   // peak meter max-hold (resets on revision/track load)
+let loadSeq=0;               // generation token so a stale loadedmetadata 'begin' closure no-ops
+let commentsReq=0;           // generation token so a slow comments fetch can't overwrite a newer panel
+let doneDragging=false;      // true while a doneness slider is being dragged (defer SSE re-renders)
+let uploadsInFlight=0;       // studio uploads in progress (defer SSE re-renders that would nuke the UI)
+let resyncRetry=null;        // pending retry of a deferred SSE resync
 
 // ───────── API ─────────
 async function api(path, opts={}){
@@ -1159,7 +1164,12 @@ function trackRow(t,i){
 
   const rng=li.querySelector('input[type=range]'), dval=li.querySelector('.dval'), dbar=li.querySelector('.dbar>i');
   rng.addEventListener('input',()=>{ dval.textContent=rng.value+'%'; dbar.style.width=rng.value+'%'; });
-  rng.addEventListener('change',()=>setDoneness(t,parseInt(rng.value,10)));
+  // Mark the drag in-flight so a remote SSE re-render doesn't rip the slider out mid-drag (finding):
+  // the rebuild would destroy this element before 'change' fires, dropping the user's value.
+  rng.addEventListener('pointerdown',()=>{ doneDragging=true; });
+  const endDrag=()=>{ doneDragging=false; };
+  rng.addEventListener('pointerup',endDrag); rng.addEventListener('pointercancel',endDrag); rng.addEventListener('blur',endDrag);
+  rng.addEventListener('change',()=>{ doneDragging=false; setDoneness(t,parseInt(rng.value,10)); });
 
   return li;
 }
@@ -1192,11 +1202,12 @@ function setupDrag(li){
 }
 
 async function setDoneness(t,val){
+  const prev=t.doneness;                 // remember so we can roll back the optimistic update on failure
   t.doneness=val;
   const body={doneness:val};
   if(val>=100){ const latest=t.revisions[t.revisions.length-1]; if(latest) body.revision_id=latest.id; }
   try{ const r=await api(`tracks/${t.id}/doneness`,{method:'PUT',body}); t.done_revision_id=r.done_revision_id; render(); }
-  catch(e){ toast(e.message,true); }
+  catch(e){ t.doneness=prev; render(); toast(e.message,true); }   // server rejected → restore the real value (drives the album progress bar)
 }
 
 // ───────── player engine ─────────
@@ -1206,6 +1217,7 @@ function revById(t,id){ return t && t.revisions.find(r=>r.id===id); }
 async function loadTrack(trackId, revId, {play=false, keepPos=null}={}){
   const t=trackById(trackId); if(!t)return;
   const rev=revById(t,revId)||t.revisions[t.revisions.length-1]; if(!rev)return;
+  if(crossing) await settleCrossfade();   // don't fight an in-flight A/B crossfade over the audio elements
   if(nullOn) stopNull();
   const other=players[1-act]; try{other.pause();}catch{} other.volume=0; other._revId=null;
   curTrackId=trackId; curRevId=rev.id; stepT=null;   // new track/rev → drop the frame-step accumulator
@@ -1215,7 +1227,10 @@ async function loadTrack(trackId, revId, {play=false, keepPos=null}={}){
   audio.src='api/audio/'+rev.stored_name;
   audio.load();
   const startAt = keepPos!=null? keepPos : 0;
-  const begin=()=>{ const sa=startAt?Math.min(startAt, rev.duration||startAt):0; if(startAt) audio.currentTime=sa; audio.volume=userVol; if(play) audio.play().catch(()=>{}); seekPicture(sa); syncVid(); };
+  // Token-guard so a stale 'begin' from a superseded loadTrack (its {once:true} listener never fired
+  // before this call replaced the src) can't seek/play the new media to the previous call's position.
+  const myLoad=++loadSeq;
+  const begin=()=>{ if(myLoad!==loadSeq) return; const sa=startAt?Math.min(startAt, rev.duration||startAt):0; if(startAt) audio.currentTime=sa; audio.volume=userVol; if(play) audio.play().catch(()=>{}); seekPicture(sa); syncVid(); };
   audio.addEventListener('loadedmetadata',begin,{once:true});
   syncPlayerSelectors(t);
   $('#nowTitle').textContent=t.title;
@@ -1271,7 +1286,13 @@ async function ensurePeaks(revId){
   return peaksCache[revId];
 }
 
-function togglePlay(){ if(nullOn){ toggleNull(); return;} if(audio.paused){ audio.volume=userVol; audio.play().catch(()=>{}); } else audio.pause(); }
+function togglePlay(){
+  if(nullOn){ toggleNull(); return; }
+  // During a crossfade `audio` is still the OUTGOING element; pausing it does nothing and the fade
+  // resumes on the incoming element. Defer the pause: crossfadeTo honors pendingPause when it settles.
+  if(crossing){ pendingPause=true; $('#playBtn').textContent='▶'; return; }
+  if(audio.paused){ audio.volume=userVol; audio.play().catch(()=>{}); } else audio.pause();
+}
 function stopAll(){ players.forEach(p=>{try{p.pause()}catch{}}); stopNull(); curTrackId=null; curRevId=null; dragSeek=null; stepT=null; scrubEl=null; $('#pbActive').classList.add('hidden'); $('#cpanel').classList.add('hidden'); $('#addc').classList.add('hidden'); $('#vnotePanel').classList.add('hidden'); $('.pb-inner').classList.remove('with-notes'); applyVidWide(); updateBarVis(); updateStage(); render(); }
 
 $('#playBtn').addEventListener('click',togglePlay);
@@ -1283,9 +1304,12 @@ $('#fsF1').addEventListener('click',()=>frameStep(1));
 $('#fsF5').addEventListener('click',()=>frameStep(5));
 function step(dir){
   const idx=TRACKS.findIndex(t=>t.id===curTrackId); if(idx<0)return;
-  const ni=idx+dir; if(ni<0||ni>=TRACKS.length)return;
-  const nt=TRACKS[ni]; const latest=nt.revisions[nt.revisions.length-1];
-  if(latest) loadTrack(nt.id,latest.id,{play:true});
+  // Skip past tracks that have no audio yet (common in an album still being built) so Next/auto-advance
+  // lands on the next PLAYABLE track instead of dead-ending at an empty one.
+  for(let ni=idx+dir; ni>=0 && ni<TRACKS.length; ni+=dir){
+    const nt=TRACKS[ni], latest=nt.revisions[nt.revisions.length-1];
+    if(latest){ loadTrack(nt.id,latest.id,{play:true}); return; }
+  }
 }
 // Media events fire on both audio elements; only the active one drives the UI (and the picture).
 players.forEach(el=>{
@@ -1336,7 +1360,34 @@ function drainPendingRev(){ const p=pendingRev; pendingRev=null; if(p && p!==cur
 // fight crossfadeTo over the active element. Bounded — the fade is ~80ms, hard-capped ~1.2s.
 function settleCrossfade(){ return new Promise(res=>{ if(!crossing) return res(); const t0=performance.now();
   const iv=setInterval(()=>{ if(!crossing || performance.now()-t0>1500){ clearInterval(iv); res(); } },40); }); }
-$('#cmpSel').addEventListener('change',()=>preloadInactive());
+$('#cmpSel').addEventListener('change',()=>{
+  // In null mode the new compare buffer was never decoded — re-run the null setup (decode + restart)
+  // instead of leaving startNull to bail silently and wedge null playback.
+  if(nullOn){ renullForCompareChange(); return; }
+  // Mid-crossfade `players[1-act]` is the element being faded in; reassigning its src here aborts the
+  // fade. Skip — crossfadeTo calls preloadInactive() itself once it settles (using the new value).
+  if(crossing) return;
+  preloadInactive();
+});
+// Compare revision changed while a null comparison is active: stop, decode the new pair, and restart
+// at the current null playhead (preserving play/pause). Without this startNull would no-op on the
+// undecoded buffer and null mode would appear stuck until toggled off/on.
+async function renullForCompareChange(){
+  const t=trackById(curTrackId); if(!t) return;
+  const a=revById(t,+$('#revSel').value), b=revById(t,+$('#cmpSel').value);
+  if(!a||!b||a.id===b.id) return;   // syncPlayerSelectors keeps them distinct; ignore a transient equal pick
+  const was=nullPlaying, pos=nullTime();
+  stopNullSources();
+  try{
+    $('#playBtn').innerHTML='<span class="spin"></span>';
+    const [bufA,bufB]=await Promise.all([getDecoded(a.stored_name),getDecoded(b.stored_name)]);
+    nDur=Math.min(bufA.duration,bufB.duration);
+    nOffset=Math.min(pos,nDur);
+    $('#nullHint').innerHTML='Null: <b>v'+a.rev_number+' − v'+b.rev_number+'</b> — you hear only what changed. Previews are MP3 so a faint hiss remains where nothing changed; real mix moves sit above it. Raise boost for quiet differences.';
+    $('#nowTitle').textContent=t.title+'  (null v'+a.rev_number+'−v'+b.rev_number+')';
+    if(was) startNull(nOffset); else { nullPlaying=false; updateTime(nOffset,nDur); $('#playBtn').textContent='▶'; }
+  }catch(e){ toast('Null decode failed: '+e.message,true); stopNull(); $('#nowTitle').textContent=(trackById(curTrackId)||{}).title||''; }
+}
 $('#autoAdv').addEventListener('change',e=>autoAdvance=e.target.checked);
 $('#dlBtn').addEventListener('click',()=>{ const t=trackById(curTrackId); const r=revById(t,curRevId); if(r) window.location='api/audio/'+r.stored_name+'?dl=1'; });
 
@@ -1434,7 +1485,14 @@ async function crossfadeTo(revId){
       render();
     }
   }catch(e){ /* swallow — finally guarantees the controls recover */ }
-  finally{ crossing=false; drainPendingRev(); }
+  finally{
+    crossing=false;
+    if(pendingPause){            // the user hit pause/Space mid-fade — honor it now that we've settled on the new rev
+      pendingPause=false; pendingRev=null;
+      players.forEach(p=>{ try{ p.pause(); }catch{} });
+      $('#playBtn').textContent='▶'; syncVid();
+    } else drainPendingRev();
+  }
 }
 
 function updateTime(cur,dur){ $('#timeLbl').textContent=fmtCur(cur)+' / '+fmt(dur||0); $('#cPinTime').textContent=fmt(cur); drawBars(); if(nullOn) blankMeters(); else updateMeters(cur); }
@@ -1511,7 +1569,7 @@ function scrubMove(e){
   updateTime(t,dur);
 }
 cv.addEventListener('pointerdown',e=>{
-  if(!curRevId || dragSeek) return;          // ignore a second pointer while a drag is already in flight
+  if(!curRevId || dragSeek || crossing) return;   // ignore a 2nd pointer mid-drag, and don't seek during an A/B fade (the seek would be discarded on swap)
   e.preventDefault();
   try{ cv.setPointerCapture(e.pointerId); }catch{}   // guarantees pointerup even if the cursor leaves the window — prevents a stuck dragSeek
   dragSeek={ wasPlaying:(nullOn?nullPlaying:!audio.paused), moved:false, x:e.clientX, y:e.clientY, id:e.pointerId };
@@ -1554,7 +1612,9 @@ function drawPins(){
     const el=document.createElement('div'); el.className='pin'; el.textContent='▾';
     el.style.left=Math.max(0,Math.min(1,c.ts/dur))*100+'%';
     el.title=`${c.author} @ ${fmt(c.ts)}: ${c.body}`;
-    el.addEventListener('click',()=>{ if(nullOn){nullSeek(c.ts)}else if(audio.duration){const t=Math.min(c.ts,audio.duration); audio.currentTime=t; seekPicture(t); audio.play().catch(()=>{});} });
+    el.addEventListener('click',()=>{ if(nullOn){ nullSeek(c.ts); return; }
+      const dur=audio.duration||peaksCache[curRevId]?.duration;   // metadata may not be ready yet; fall back to the peaks duration so the click still seeks
+      if(dur){ const t=Math.min(c.ts,dur); try{ audio.currentTime=t; }catch{} seekPicture(t); audio.play().catch(()=>{}); } });
     wrap.appendChild(el);
   });
 }
@@ -1638,6 +1698,14 @@ function resetNullUI(){ $('#nullBox').classList.remove('on'); $('#nullToggle').c
 function stopNull(){ stopNullSources(); for(const k in decoded) delete decoded[k]; nullOn=false; nDur=0; nOffset=0; $('#playBtn').textContent='▶'; resetNullUI(); }
 
 // ───────── comments ─────────
+// Fetch a track's comments into the global `comments`, guarded by a generation token so a slow
+// response can't clobber the panel after the user has already switched to a different track.
+async function fetchCommentsInto(trackId){
+  const myReq=++commentsReq;
+  const data=await api('tracks/'+trackId+'/comments');
+  if(myReq!==commentsReq) return false;   // a newer fetch superseded this one
+  comments=data; return true;
+}
 async function openTrack(trackId, fromPlayer){
   const t=trackById(trackId); if(!t)return;
   panelTrackId=trackId;
@@ -1648,7 +1716,7 @@ async function openTrack(trackId, fromPlayer){
   applyVidWide();                                 // notes column now present → reveal the "Wide" button (and honor wide mode)
   if(curRevId) drawWave();                        // the engine column width changed → re-layout the canvas
   $('#cTitleText').textContent='Notes — '+t.title;
-  comments=await api('tracks/'+trackId+'/comments');
+  if(!await fetchCommentsInto(trackId)) return;   // a newer openTrack superseded this fetch — don't paint stale notes
   renderComments();
   drawPins();
   // tag which revision new comments attach to
@@ -1707,7 +1775,7 @@ function renderComments(){
         try{
           await api('comments/'+c.id,{method:'PUT',body:{body:nb}});
           editingId=null;
-          comments=await api('tracks/'+panelTrackId+'/comments'); renderComments(); drawPins();
+          if(await fetchCommentsInto(panelTrackId)){ renderComments(); drawPins(); }
         }catch(e){ toast(e.message,true); }
       };
       div.querySelector('.esave').addEventListener('click',save);
@@ -1745,9 +1813,11 @@ function renderComments(){
       if(c.ts!=null) div.querySelector('.tsbtn').addEventListener('click',()=>{
         if(curTrackId!==c.track_id){ const t=trackById(c.track_id); const rv=revById(t,c.revision_id)||t.revisions.at(-1); loadTrack(c.track_id, rv.id,{play:true,keepPos:c.ts}); }
         else if(c.revision_id && c.revision_id!==curRevId){ loadTrack(c.track_id,c.revision_id,{play:true,keepPos:c.ts}); }
-        else if(nullOn){ nullSeek(c.ts); } else if(audio.duration){ const t=Math.min(c.ts,audio.duration); audio.currentTime=t; seekPicture(t); audio.play().catch(()=>{}); }
+        else if(nullOn){ nullSeek(c.ts); } else { const dur=audio.duration||peaksCache[curRevId]?.duration; if(dur){ const t=Math.min(c.ts,dur); try{ audio.currentTime=t; }catch{} seekPicture(t); audio.play().catch(()=>{}); } }
       });
-      div.querySelector('.res').addEventListener('click',async()=>{ await api('comments/'+c.id,{method:'PUT',body:{resolved:c.resolved?0:1}}); c.resolved=c.resolved?0:1; renderComments(); refreshCounts(); });
+      div.querySelector('.res').addEventListener('click',async()=>{ const nv=c.resolved?0:1;
+        try{ await api('comments/'+c.id,{method:'PUT',body:{resolved:nv}}); }catch(e){ toast(e.message,true); return; }
+        c.resolved=nv; renderComments(); refreshCounts(); });
       div.querySelector('.reply').addEventListener('click',()=>{ replyingId=(replyingId===c.id?null:c.id); renderComments(); });
     }
     const ed=div.querySelector('.edit'); if(ed) ed.addEventListener('click',()=>{ editingId=c.id; renderComments(); });
@@ -1760,8 +1830,7 @@ function renderComments(){
       try{ await api('comments/'+c.id,{method:'DELETE'}); }catch(e){ toast(e.message,true); return; }
       // Soft-delete server-side; re-fetch so the list reflects the setting (an admin with
       // "show deleted notes" on keeps the note, greyed; everyone else sees it vanish).
-      comments=await api('tracks/'+panelTrackId+'/comments');
-      renderComments(); drawPins(); refreshCounts();
+      if(await fetchCommentsInto(panelTrackId)){ renderComments(); drawPins(); refreshCounts(); }
     });
     return div;
   };
@@ -1786,7 +1855,7 @@ function renderComments(){
         try{
           await api('tracks/'+panelTrackId+'/comments',{method:'POST',body:{parent_id:note.id, body:nb}});
           replyingId=null;
-          comments=await api('tracks/'+panelTrackId+'/comments'); renderComments(); refreshCounts();
+          if(await fetchCommentsInto(panelTrackId)){ renderComments(); refreshCounts(); }
         }catch(e){ toast(e.message,true); }
       };
       ed.querySelector('.rsave').addEventListener('click',save);
@@ -1820,7 +1889,7 @@ async function sendComment(){
   try{
     await api('tracks/'+tId+'/comments',{method:'POST',body:{revision_id:revId, ts, body}});
     $('#cInput').value=''; $('#cPin').checked=false;
-    comments=await api('tracks/'+tId+'/comments'); renderComments(); drawPins(); refreshCounts();
+    if(await fetchCommentsInto(tId)){ renderComments(); drawPins(); refreshCounts(); }
   }catch(e){ toast(e.message,true); }
 }
 
@@ -1911,8 +1980,10 @@ function buildStudioBody(el,t){
   tools.innerHTML=`<input class="rn" value="${esc(t.title)}" style="flex:1;min-width:160px">
     <button class="btn sm rnsave">Rename</button>
     <button class="btn sm danger tdel" style="margin-left:auto">Delete track</button>`;
-  tools.querySelector('.rnsave').addEventListener('click',async()=>{ const v=tools.querySelector('.rn').value.trim(); if(!v)return; await api('tracks/'+t.id,{method:'PUT',body:{title:v}}); await reload(); toast('Renamed'); });
-  tools.querySelector('.tdel').addEventListener('click',async()=>{ if(!confirm('Delete "'+t.title+'" and all its revisions?'))return; await api('tracks/'+t.id,{method:'DELETE'}); openStudio.delete(t.id); await reload(); toast('Track deleted'); });
+  tools.querySelector('.rnsave').addEventListener('click',async()=>{ const v=tools.querySelector('.rn').value.trim(); if(!v)return;
+    try{ await api('tracks/'+t.id,{method:'PUT',body:{title:v}}); await reload(); toast('Renamed'); }catch(e){ toast(e.message,true); } });
+  tools.querySelector('.tdel').addEventListener('click',async()=>{ if(!confirm('Delete "'+t.title+'" and all its revisions?'))return;
+    try{ await api('tracks/'+t.id,{method:'DELETE'}); openStudio.delete(t.id); await reload(); toast('Track deleted'); }catch(e){ toast(e.message,true); } });
   el.appendChild(tools);
 
   const isVid=isVideoProject();
@@ -1939,9 +2010,10 @@ function buildStudioBody(el,t){
       vbtn.addEventListener('click',async()=>{
         if(!vfile.files[0]){ toast('Choose a video file',true); return; }
         const fd=new FormData(); fd.append('file',vfile.files[0]);
-        vbtn.disabled=true; vstat.innerHTML='<span class="spin"></span> uploading…';
+        vbtn.disabled=true; vstat.innerHTML='<span class="spin"></span> uploading…'; uploadsInFlight++;
         try{ await api('tracks/'+t.id+'/video',{method:'POST',body:fd}); await reload(); toast('Uploaded — processing in the background'); }
         catch(e){ toast(e.message,true); vstat.textContent=''; vbtn.disabled=false; }
+        finally{ uploadsInFlight--; }
       });
       el.appendChild(vsec);
     }
@@ -1965,9 +2037,10 @@ function buildStudioBody(el,t){
   btn.addEventListener('click',async()=>{
     if(!fileEl.files[0]){ toast('Choose a file',true); return; }
     const fd=new FormData(); fd.append('file',fileEl.files[0]); fd.append('notes',up.querySelector('.unotes').value);
-    btn.disabled=true; stat.innerHTML='<span class="spin"></span> uploading…';
+    btn.disabled=true; stat.innerHTML='<span class="spin"></span> uploading…'; uploadsInFlight++;
     try{ await api('tracks/'+t.id+'/revisions',{method:'POST',body:fd}); await reload(); toast('Uploaded — processing in the background'); }
     catch(e){ toast(e.message,true); stat.textContent=''; btn.disabled=false; }
+    finally{ uploadsInFlight--; }
   });
   el.appendChild(up);
 
@@ -2000,34 +2073,26 @@ function buildStudioBody(el,t){
       <textarea class="rnotes" rows="2" placeholder="e.g. brightened vocals, tightened low end, new master chain">${esc(r.notes)}</textarea></div>
       <div class="row" style="margin-top:7px">${actions}</div>
       ${replBox}`;
-    d.querySelector('.nsave').addEventListener('click',async()=>{ await api('revisions/'+r.id,{method:'PUT',body:{notes:d.querySelector('.rnotes').value}}); r.notes=d.querySelector('.rnotes').value; if(curRevId===r.id)updateRevNote(r); toast('Notes saved'); });
+    d.querySelector('.nsave').addEventListener('click',async()=>{ const nv=d.querySelector('.rnotes').value;
+      try{ await api('revisions/'+r.id,{method:'PUT',body:{notes:nv}}); r.notes=nv; if(curRevId===r.id)updateRevNote(r); toast('Notes saved'); }catch(e){ toast(e.message,true); } });
     const box=d.querySelector('.rrepl-box'), rfile=d.querySelector('.rfile'), rstat=d.querySelector('.rstat'), rup=d.querySelector('.rupload'), rreplBtn=d.querySelector('.rrepl'), rcancelBtn=d.querySelector('.rcancel'), rdelBtn=d.querySelector('.rdel');
     if(rreplBtn) rreplBtn.addEventListener('click',()=>{ box.classList.toggle('hidden'); });
     if(rcancelBtn) rcancelBtn.addEventListener('click',()=>{ box.classList.add('hidden'); rfile.value=''; rstat.textContent=''; });
     if(rup) rup.addEventListener('click',async()=>{
       if(!rfile.files[0]){ toast('Choose a file',true); return; }
       const fd=new FormData(); fd.append('file',rfile.files[0]);
-      rup.disabled=true; rstat.innerHTML='<span class="spin"></span> uploading & converting…';
+      rup.disabled=true; rstat.innerHTML='<span class="spin"></span> uploading…'; uploadsInFlight++;
       try{
+        // Like create/video, replace now transcodes in the background queue and lands via SSE — the
+        // stale-cache cleanup + dead-src re-point for the loaded rev is handled centrally in the SSE
+        // resync (so OTHER viewers get it too), not just here.
         await api('revisions/'+r.id+'/replace',{method:'POST',body:fd});
-        // If the replaced rev is part of an active null comparison (either side), exit null cleanly:
-        // its decoded buffer is keyed by the now-stale stored_name, so null would keep playing the old
-        // audio and silently fail on the next play. (The loaded-rev case is also covered here.)
-        if(nullOn && (r.id===curRevId || r.id===+$('#cmpSel').value)) stopNull();
-        const oldName=r.stored_name;
-        delete peaksCache[r.id]; delete decoded[oldName];
-        players.forEach(p=>{ if(p._revId===r.id) p._revId=null; });
-        const wasLoaded=(curRevId===r.id);
-        const keepPos = (wasLoaded && !nullOn) ? audio.currentTime : null;
-        const wasPlaying = wasLoaded && !nullOn && !audio.paused;
-        await reload();                                  // rebuilds studio + track list with the new stored_name/metadata
-        if(wasLoaded){ await settleCrossfade();          // don't reload mid A/B fade
-          if(curRevId===r.id) loadTrack(t.id, r.id, {play:wasPlaying, keepPos}); }   // force-reload off the new URL
-        toast('Audio replaced');
+        await reload(); toast('Replacing — processing in the background');
       }catch(e){ toast(e.message,true); rstat.textContent=''; rup.disabled=false; }
+      finally{ uploadsInFlight--; }
     });
     if(rdelBtn) rdelBtn.addEventListener('click',async()=>{ if(!confirm('Delete '+revLabel(r)+'?'))return;
-      await api('revisions/'+r.id,{method:'DELETE'});
+      try{ await api('revisions/'+r.id,{method:'DELETE'}); }catch(e){ toast(e.message,true); return; }
       delete peaksCache[r.id];
       players.forEach(p=>{ if(p._revId===r.id) p._revId=null; });   // drop any preloaded handle on the deleted file
       const wasLoaded=(curRevId===r.id);
@@ -2366,18 +2431,53 @@ function scheduleSync(){ if(syncT) return; syncT=setTimeout(async()=>{ syncT=nul
 // any in-progress edit/reply via renderComments' draft+caret guard). The player is left alone.
 async function resyncOpenProject(){
   if(!PROJECT) return;
+  // Defer the re-render while the user is mid-interaction — render() rebuilds #trackList and the studio
+  // bodies via innerHTML, which would abort an in-progress doneness drag or wipe a chosen file / the
+  // "uploading…" spinner. Retry shortly; the data update lands once they're done.
+  if(doneDragging || uploadsInFlight>0 || studioHasPendingFile()){
+    clearTimeout(resyncRetry); resyncRetry=setTimeout(()=>{ syncProj=true; scheduleSync(); }, 500);
+    return;
+  }
   const wasPlaying=curTrackId;
+  // Snapshot each revision's stored_name BEFORE the refetch so we can detect audio that was replaced
+  // remotely (same revId, new stored_name) or removed, and drop the now-stale caches / dead src.
+  const before={}; TRACKS.forEach(t=>t.revisions.forEach(r=>{ before[r.id]=r.stored_name; }));
   try{ await reload(true); }                                             // refetch + re-render WITHOUT pausing the player
   catch(e){
     if(e && e.message==='unauth') return;                               // session expired: api() already showed login — don't re-show projects
     PROJECT=null; stopAll(); setView('projects'); return;              // access revoked / project deleted → leave it (whole project gone)
   }
+  // Invalidate caches for any revision whose audio changed underneath us (replace / video re-extract)
+  // or that vanished — otherwise the waveform/meters keep the old analysis and the audio src points at
+  // a file the server already unlinked (404 on the next seek/reload).
+  const changed=[];
+  TRACKS.forEach(t=>t.revisions.forEach(r=>{ if(before[r.id]!==undefined && before[r.id]!==r.stored_name) changed.push(r.id); }));
+  for(const id in before){ const gone=!TRACKS.some(t=>t.revisions.some(r=>r.id===Number(id))); if(gone) changed.push(Number(id)); }
+  changed.forEach(id=>{ delete peaksCache[id]; if(before[id]) delete decoded[before[id]]; players.forEach(p=>{ if(p._revId===id) p._revId=null; }); });
+  // If the CURRENTLY-LOADED revision's audio was replaced (it still exists, just new bytes), re-point
+  // the element off the new URL so playback keeps working. A removed rev is left alone (the existing
+  // invariant: buffered audio plays on and self-heals) — revById is null so we skip it.
+  if(curRevId && changed.includes(curRevId)){
+    const r=revById(trackById(curTrackId), curRevId);
+    if(r){
+      if(nullOn) stopNull();
+      const keepPos=(!nullOn && isFinite(audio.currentTime))?audio.currentTime:null;
+      const wasP=!nullOn && !audio.paused;
+      await settleCrossfade();
+      loadTrack(curTrackId, curRevId, {play:wasP, keepPos});
+    }
+  }
   // The very track being played was deleted remotely: per the invariant we don't touch the transport
   // here (it keeps its buffered audio and self-heals on the next action) — just say why the row vanished.
   if(wasPlaying && !trackById(curTrackId)) toast('The track you were playing was removed');
   if(panelTrackId && trackById(panelTrackId)){
-    try{ comments=await api('tracks/'+panelTrackId+'/comments'); renderComments(); drawPins(); }catch{}
+    try{ if(await fetchCommentsInto(panelTrackId)){ renderComments(); drawPins(); } }catch{}
   }
+}
+// True when the studio has a file staged in any uploader (chosen but not yet uploaded) — used to defer
+// an SSE re-render that would clear the picker out from under the user.
+function studioHasPendingFile(){
+  return VIEW==='studio' && [...document.querySelectorAll('#studioView input[type=file]')].some(i=>i.files && i.files.length);
 }
 // The set of projects / who can see them / a user's role changed → refresh whatever's on screen and
 // re-validate the open project (a revoked member is dropped to the list by resyncOpenProject).
