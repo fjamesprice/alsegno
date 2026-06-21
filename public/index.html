@@ -92,7 +92,7 @@
   .play-btn:hover{border-color:var(--accent);color:#fff}
   .play-btn.on{background:var(--accent2);border-color:var(--accent2);color:#fff}
   .tmid{flex:1;min-width:0}
-  .tname{font-weight:600;display:flex;align-items:center;gap:8px;min-width:0}
+  .tname{font-weight:600;display:flex;align-items:center;gap:8px;min-width:0;cursor:pointer}
   .tname span.nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .badge{font-size:10.5px;font-weight:700;letter-spacing:.4px;padding:2px 6px;border-radius:5px;flex:none}
   .badge.new{background:var(--accent);color:#0b1020}
@@ -192,6 +192,41 @@
   .addc{display:flex;flex-direction:column;gap:8px}
   .addc .arow{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 
+  .open-note{color:var(--warn)}  /* unresolved-notes count stands out (item 6) */
+
+  /* Version notes block.  In the bar (audio) it's a compact note-mini line; in the video theater
+     it's a titled panel in the notes column.  Same #vnotePanel element, relocated + reclassed. */
+  .vnote.bar{font-size:12.5px;color:var(--muted);margin-top:7px;border-left:2px solid var(--line);padding-left:9px}
+  .vnote.bar h3{display:none}
+  .vnote.panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:14px 16px}
+  .vnote.panel h3{font-size:14px;margin:0 0 8px;font-weight:600}
+  .vnote-body{font-size:13.5px;color:var(--muted);line-height:1.55;word-wrap:break-word}
+
+  /* VIDEO theater (video project + player view): the player bar leaves its fixed-bottom dock and
+     becomes the page — video+controls on the left, notes column on the right, track list below the
+     controls.  Audio projects and video-in-studio keep the fixed bottom bar untouched. */
+  #playerBar.theater{position:static;background:none;backdrop-filter:none;border-top:none;z-index:auto}
+  #playerBar.theater #pbResize{display:none}
+  .pb-inner.theater{display:grid;grid-template-columns:1fr;grid-template-areas:"engine" "tracks";
+    gap:18px;align-items:start;max-width:940px;padding-top:0;padding-bottom:24px}
+  /* the notes column only appears once a track is open (.with-notes); before that it's a single column */
+  .pb-inner.theater.with-notes{grid-template-columns:minmax(0,1fr) minmax(300px,360px);grid-template-areas:"engine notes" "tracks notes"}
+  .pb-inner.theater:not(.with-notes) > #theaterNotes{display:none}
+  .pb-inner.theater > #pbActive{grid-area:engine;min-width:0}
+  /* Theater video: width fills the engine column, height follows the video's aspect ratio (set inline). */
+  #playerBar.theater #vstage{height:auto;width:100%}
+  .pb-inner.theater > #theaterTracks{grid-area:tracks;min-width:0;display:flex;flex-direction:column;gap:8px}
+  .pb-inner.theater > #theaterNotes{grid-area:notes;min-width:0;display:flex;flex-direction:column;gap:14px;
+    position:sticky;top:12px;max-height:calc(100vh - 24px);overflow:auto}
+  .pb-inner.theater #cpanel{margin-top:0}
+  /* the note-input box is its own card when lifted out of #cpanel (above it in both audio + theater) */
+  #playerView > .addc, #theaterNotes > .addc{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:14px 16px}
+  #playerView > .addc{margin-top:14px}
+  @media(max-width:860px){
+    .pb-inner.theater.with-notes{grid-template-columns:1fr;grid-template-areas:"engine" "notes" "tracks"}
+    .pb-inner.theater > #theaterNotes{position:static;max-height:none}
+  }
+
   /* Studio */
   .stx{display:flex;flex-direction:column;gap:14px}
   .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:16px}
@@ -284,9 +319,12 @@
     <div id="noProjects" class="pb-empty hidden">No projects yet.</div>
   </div>
 
-  <!-- PLAYER VIEW -->
+  <!-- PLAYER VIEW.  Audio projects: album progress + track list here, the fixed #playerBar (below)
+       carries the engine, comments sit under the track list.  VIDEO projects in the player view go
+       "theater" (see applyLayout): #albumProg/#trackList/#emptyHint move into #theaterTracks and
+       #cpanel/#vnotePanel into #theaterNotes, inside a restyled (in-flow) #playerBar. -->
   <div id="playerView">
-    <div class="album-prog">
+    <div class="album-prog" id="albumProg">
       <img id="albArt" class="alb-art hidden" alt="Album art">
       <div style="flex:1;min-width:0">
         <div class="lbl"><span id="apDone">0 / 0 done</span><span id="apAvg">0%</span></div>
@@ -296,11 +334,11 @@
     <div class="tracks" id="trackList"></div>
     <div id="emptyHint" class="pb-empty hidden">No tracks in this project yet.</div>
 
-    <!-- comments for currently-open track -->
+    <!-- comments for the open track (audio home: below the track list) -->
     <div class="cpanel hidden" id="cpanel">
       <h3 id="cTitle">Notes</h3>
       <div class="clist" id="clist"></div>
-      <div class="addc">
+      <div class="addc hidden" id="addc">
         <textarea id="cInput" rows="2" placeholder="Leave a note…"></textarea>
         <div class="arow">
           <label class="toggle"><input type="checkbox" id="cPin"> Pin at <b id="cPinTime" style="margin-left:3px">0:00</b></label>
@@ -382,7 +420,6 @@
 <div id="playerBar" class="hidden">
   <div class="pb-resize" id="pbResize" title="Drag to resize the video"></div>
   <div class="pb-inner">
-    <div id="pbEmpty" class="pb-empty">Select a track to play</div>
     <div id="pbActive" class="hidden">
       <div class="vstage" id="vstage">
         <video id="vidpic" class="vhide" playsinline preload="auto" muted></video>
@@ -435,9 +472,18 @@
         <label class="toggle" title="Auto-advance: when a track finishes, automatically play the next track in the list."><input type="checkbox" id="autoAdv"> Auto-advance</label>
         <button class="btn ghost sm" id="dlBtn" title="Download preview MP3">⬇</button>
       </div>
-      <div class="note-mini hidden" id="revNote"></div>
       <div class="note-mini hidden" id="nullHint" style="border-color:var(--warn);color:var(--warn)"></div>
+      <!-- Version notes for the loaded revision.  AUDIO: a compact note-mini line here in the bar
+           (.vnote.bar).  VIDEO theater: relocated into #theaterNotes and shown as a titled panel
+           (.vnote.panel).  Toggled/filled by updateRevNote(); relocated by applyLayout(). -->
+      <div class="vnote bar hidden" id="vnotePanel"><h3>Version notes</h3><div id="revNote" class="vnote-body"></div></div>
     </div>
+    <!-- Theater-only slots (empty for audio / video-in-studio).  For a video project in the player
+         view, applyLayout() makes .pb-inner a grid (video+controls | notes / tracks | notes) and
+         moves #albumProg/#trackList/#emptyHint into #theaterTracks and #vnotePanel/#cpanel into
+         #theaterNotes.  The engine (#pbActive) itself never moves. -->
+    <div id="theaterTracks"></div>
+    <div id="theaterNotes"></div>
   </div>
 </div>
 
@@ -543,7 +589,36 @@ function applyNullVis(){
   $('#nullBox').classList.toggle('hidden', !v && !NULL_VIS);
   $('#nullToggle').classList.toggle('hidden', v);
 }
-function applyMediaMode(){ applyNullVis(); updateStage(); }
+function applyMediaMode(){ applyNullVis(); applyLayout(); updateStage(); }
+
+// Arrange the player for the project's media type + current view.  Audio (any view) and
+// video-in-studio keep the fixed bottom #playerBar.  A VIDEO project in the PLAYER view goes
+// "theater": the bar becomes the page (video+controls left, notes right, track list below the
+// controls).  Only light, id-referenced nodes move (#albumProg/#trackList/#emptyHint and
+// #vnotePanel/#cpanel); the engine (#pbActive — video tiers, canvas, transport) never moves, so its
+// listeners + media state are untouched.  Idempotent (guarded by parentNode checks).
+function applyLayout(){
+  const theater = isVideoProject() && VIEW==='player';
+  const bar=$('#playerBar'), inner=bar.querySelector('.pb-inner');
+  const pv=$('#playerView'), pbActive=$('#pbActive'), vn=$('#vnotePanel');
+  if(theater){
+    bar.classList.add('theater'); inner.classList.add('theater');
+    const tt=$('#theaterTracks'), tn=$('#theaterNotes');
+    [$('#albumProg'),$('#trackList'),$('#emptyHint')].forEach(el=>{ if(el.parentNode!==tt) tt.appendChild(el); });
+    vn.classList.remove('bar'); vn.classList.add('panel');
+    [vn,$('#cpanel')].forEach(el=>{ if(el.parentNode!==tn) tn.appendChild(el); });
+    tn.insertBefore($('#addc'), $('#cpanel'));   // note-input box sits between version notes and the comments
+  } else {
+    bar.classList.remove('theater'); inner.classList.remove('theater');
+    vn.classList.remove('panel'); vn.classList.add('bar');
+    [$('#albumProg'),$('#trackList'),$('#emptyHint'),$('#cpanel')].forEach(el=>{ if(el.parentNode!==pv) pv.appendChild(el); });
+    if(vn.parentNode!==pbActive) pbActive.appendChild(vn);
+    pv.insertBefore($('#addc'), $('#cpanel'));   // note-input box sits above the comments panel
+  }
+  inner.classList.toggle('with-notes', !$('#cpanel').classList.contains('hidden'));   // notes column shows only while a track is open
+  applyVideoH(); syncBottomPad();
+  if(curRevId) drawWave();   // engine column width may have changed → re-layout the canvas
+}
 
 // ── Video picture (audio-post model, Phase 6d adaptive tiers) ────────────────────────
 // The track's picture is shown MUTED and slaved to the active audio mix's clock. Up to three quality
@@ -599,12 +674,19 @@ function pickDisplay(){
   }
   for(const el of VIDELS) el.classList.toggle('vhide', el!==chosen);
 }
+// Lock #vstage to the track's native aspect ratio (theater fills the width; height follows). Starts
+// from the stored upload dims; refined to the real intrinsic ratio when a tier's metadata loads.
+function setVideoAspect(){
+  const t=trackById(curTrackId);
+  const w=t&&t.video_width, h=t&&t.video_height;
+  $('#vstage').style.aspectRatio = (w>0&&h>0) ? (w+'/'+h) : '16 / 9';
+}
 function updateStage(){
   const show = !!curVideoName() && !!curRevId;
   $('#vstage').classList.toggle('show', show);
   $('#pbResize').classList.toggle('show', show);
   $('#framestep').classList.toggle('show', show && curFps()>0);   // frame-step needs a known fps
-  if(show){ tierPump(); applyVideoH(); pickDisplay(); }
+  if(show){ setVideoAspect(); tierPump(); applyVideoH(); pickDisplay(); }
   else { for(const el of VIDELS) unloadTier(el); tiersTrackId=null; }
   syncBottomPad();
 }
@@ -675,6 +757,8 @@ VIDELS.forEach(el=>{
     el.addEventListener(ev, ()=>{ if(curVideoName()){ tierPump(); pickDisplay(); } }));
   // a fatally-errored tier (404/decode) must mark itself done so it can't block the higher tiers.
   el.addEventListener('error', ()=>{ el._err=true; if(curVideoName()){ tierPump(); pickDisplay(); } });
+  // refine the stage aspect ratio to the real intrinsic dims once any tier reports them
+  el.addEventListener('loadedmetadata', ()=>{ if(curVideoName() && el.videoWidth>0) $('#vstage').style.aspectRatio = el.videoWidth+'/'+el.videoHeight; });
 });
 
 // ── Resizable video + dynamic player-bar clearance ──────────
@@ -686,12 +770,29 @@ let videoH = (()=>{ const v=parseFloat(localStorage.getItem('at_video_h')); retu
 function videoMax(){ return Math.max(160, window.innerHeight - 200); }   // leave room for transport + topbar
 function applyVideoH(){
   const vs=$('#vstage');
+  if($('#playerBar').classList.contains('theater')){
+    vs.style.removeProperty('height');   // theater: width fills the column, height follows the video aspect ratio (CSS + setVideoAspect)
+    return;
+  }
   if(videoH>0){ videoH=Math.max(120, Math.min(videoMax(), videoH)); vs.style.height=videoH+'px'; }
   else vs.style.removeProperty('height');   // 0 ⇒ use the CSS default (38vh)
 }
 function syncBottomPad(){
   const bar=$('#playerBar'), mv=$('#mainView');
+  // Theater mode: the bar is in-flow (not fixed). #playerView is emptied into the theater, so drop
+  // #mainView's bottom padding too — otherwise it sits as dead space between the nav and the theater.
+  if(bar.classList.contains('theater')){ mv.style.paddingBottom='0px'; return; }
   mv.style.paddingBottom = bar.classList.contains('hidden') ? '' : (bar.offsetHeight + 16) + 'px';
+}
+// Show the player bar only when it has something to show: in the player/studio view AND either a
+// track is loaded or we're in the video theater (which hosts the track list). No empty strip.
+function updateBarVis(){
+  const bar=$('#playerBar');
+  const show = (VIEW==='player'||VIEW==='studio') && (bar.classList.contains('theater') || !!curRevId);
+  const wasHidden=bar.classList.contains('hidden');
+  bar.classList.toggle('hidden', !show);
+  syncBottomPad();
+  if(show && wasHidden && curRevId) drawWave();   // the canvas had no width while the bar was hidden
 }
 (function(){
   const h=$('#pbResize'); if(!h) return;
@@ -708,7 +809,7 @@ function syncBottomPad(){
   window.addEventListener('pointerup',end); window.addEventListener('pointercancel',end);
 })();
 if(window.ResizeObserver){ try{ new ResizeObserver(syncBottomPad).observe($('#playerBar')); }catch{} }
-window.addEventListener('resize',()=>{ applyVideoH(); syncBottomPad(); });
+window.addEventListener('resize',()=>{ applyVideoH(); syncBottomPad(); if(curRevId) drawWave(); });
 
 async function boot(){
   const data=await api('bootstrap');
@@ -739,7 +840,7 @@ function renderProjects(){
   PROJECTS.forEach(p=>{
     const card=document.createElement('div'); card.className='pcard';
     const unseen=(ME.role==='client' && p.unseen_count)?'<span class="badge new">NEW</span>':'';
-    const open=p.open_comment_count?`<span>💬 ${p.open_comment_count} open</span>`:'';
+    const open=p.open_comment_count?`<span class="open-note">💬 ${p.open_comment_count} open</span>`:'';
     const thumb=p.art_stored_name?`<img class="pthumb" src="api/art/${esc(p.art_stored_name)}" alt="">`:'';
     card.innerHTML=`
       ${thumb}
@@ -781,7 +882,8 @@ function setView(v){
   if((v==='admin'||v==='settings') && (!ME||ME.role!=='admin')) v='projects';
   VIEW=v;
   ['projects','player','studio','admin','settings'].forEach(n=>{ const el=$('#'+n+'View'); if(el) el.classList.toggle('hidden', n!==v); });
-  $('#playerBar').classList.toggle('hidden', !(v==='player'||v==='studio'));
+  applyLayout();      // theater (video+player) vs fixed bottom bar (audio / video-in-studio)
+  updateBarVis();     // show the bar only when there's a track / theater to display
   $('#albumTitle').textContent = v==='projects'?'Projects' : v==='admin'?'Admin' : v==='settings'?'Settings' : ALBUM;
   document.title = (v==='player'||v==='studio') ? ALBUM : 'Album Tracker';
   renderNav();
@@ -840,7 +942,7 @@ function trackRow(t,i){
       <div class="tname"><span class="nm">${esc(t.title)}</span>${newBadge}${doneBadge}${revBadge}</div>
       <div class="tmeta">
         ${latest?`<span>${fmt(latest.duration)}</span>`:''}
-        <span class="cc">💬 ${t.comment_count}${t.open_comment_count?` (${t.open_comment_count} open)`:''}</span>
+        <span class="cc">💬 ${t.comment_count}${t.open_comment_count?` <span class="open-note">(${t.open_comment_count} open)</span>`:''}</span>
       </div>
     </div>
     <div class="done-ctl">
@@ -851,7 +953,10 @@ function trackRow(t,i){
 
   li.querySelector('.play-btn').addEventListener('click',e=>{e.stopPropagation(); if(!latest)return;
     if(t.id===curTrackId){ togglePlay(); } else { loadTrack(t.id, latest.id, {play:true}); } });
-  li.querySelector('.cc').addEventListener('click',e=>{e.stopPropagation(); if(latest) loadTrack(t.id, latest.id,{play:false}); else openTrack(t.id);});
+  // Open the track without playing (load the latest rev paused, or just open its notes if no audio).
+  const openNoPlay=e=>{e.stopPropagation(); if(latest) loadTrack(t.id, latest.id,{play:false}); else openTrack(t.id);};
+  li.querySelector('.cc').addEventListener('click',openNoPlay);
+  li.querySelector('.tname').addEventListener('click',openNoPlay);
   if(!isSong){   // ordering affordances exist only for albums
     li.querySelector('.up').addEventListener('click',e=>{e.stopPropagation(); move(i,-1);});
     li.querySelector('.dn').addEventListener('click',e=>{e.stopPropagation(); move(i,1);});
@@ -910,7 +1015,8 @@ async function loadTrack(trackId, revId, {play=false, keepPos=null}={}){
   if(nullOn) stopNull();
   const other=players[1-act]; try{other.pause();}catch{} other.volume=0; other._revId=null;
   curTrackId=trackId; curRevId=rev.id; stepT=null;   // new track/rev → drop the frame-step accumulator
-  $('#pbEmpty').classList.add('hidden'); $('#pbActive').classList.remove('hidden');
+  $('#pbActive').classList.remove('hidden');
+  updateBarVis();   // a track is now active → reveal the bar if it was hidden
   audio.volume=userVol;
   audio.src='api/audio/'+rev.stored_name;
   audio.load();
@@ -957,9 +1063,9 @@ function syncPlayerSelectors(t){
 }
 
 function updateRevNote(rev){
-  const el=$('#revNote');
-  if(rev && rev.notes && rev.notes.trim()){ el.classList.remove('hidden'); el.innerHTML=`<b>${esc(revLabel(rev))} notes:</b> ${esc(rev.notes)}`; }
-  else el.classList.add('hidden');
+  const panel=$('#vnotePanel'), el=$('#revNote');
+  if(rev && rev.notes && rev.notes.trim()){ panel.classList.remove('hidden'); el.innerHTML=`<b>${esc(revLabel(rev))}:</b> ${esc(rev.notes)}`; }
+  else { panel.classList.add('hidden'); el.innerHTML=''; }
 }
 
 async function ensurePeaks(revId){
@@ -969,7 +1075,7 @@ async function ensurePeaks(revId){
 }
 
 function togglePlay(){ if(nullOn){ toggleNull(); return;} if(audio.paused){ audio.volume=userVol; audio.play().catch(()=>{}); } else audio.pause(); }
-function stopAll(){ players.forEach(p=>{try{p.pause()}catch{}}); stopNull(); curTrackId=null; curRevId=null; dragSeek=null; stepT=null; scrubEl=null; $('#pbActive').classList.add('hidden'); $('#pbEmpty').classList.remove('hidden'); $('#cpanel').classList.add('hidden'); updateStage(); render(); }
+function stopAll(){ players.forEach(p=>{try{p.pause()}catch{}}); stopNull(); curTrackId=null; curRevId=null; dragSeek=null; stepT=null; scrubEl=null; $('#pbActive').classList.add('hidden'); $('#cpanel').classList.add('hidden'); $('#addc').classList.add('hidden'); $('#vnotePanel').classList.add('hidden'); $('.pb-inner').classList.remove('with-notes'); updateBarVis(); updateStage(); render(); }
 
 $('#playBtn').addEventListener('click',togglePlay);
 $('#prevBtn').addEventListener('click',()=>step(-1));
@@ -1321,6 +1427,9 @@ async function openTrack(trackId, fromPlayer){
   panelTrackId=trackId;
   editingId=null; replyingId=null;
   $('#cpanel').classList.remove('hidden');
+  $('#addc').classList.remove('hidden');          // show the note-input box (it lives above #cpanel)
+  $('.pb-inner').classList.add('with-notes');   // theater: reveal the notes column now a track is open
+  if(curRevId) drawWave();                        // the engine column width changed → re-layout the canvas
   $('#cTitle').textContent='Notes — '+t.title;
   comments=await api('tracks/'+trackId+'/comments');
   renderComments();
@@ -1440,8 +1549,8 @@ function renderComments(){
     return div;
   };
 
-  // Pass 2: render each note, its replies, then its reply editor (if open), inside a thread wrapper.
-  notes.forEach(note=>{
+  // Pass 2: render each note (newest first), its replies, then its reply editor, in a thread wrapper.
+  [...notes].reverse().forEach(note=>{
     const thread=document.createElement('div');
     thread.className='thread'+(note.resolved?' resolved':'');
     thread.appendChild(buildRow(note,false));
