@@ -30,6 +30,9 @@ Installing ffmpeg manually, if you prefer:
 
 ## Quick start
 
+This is the **native install** (Node + ffmpeg on the host). Prefer containers? Skip to
+[Option B: Run with Docker](#option-b-run-with-docker) — ffmpeg and Node come baked into the image.
+
 Clone the repo, then run the installer for your OS.
 
 ### Linux / macOS
@@ -76,6 +79,77 @@ service step backs off if the port is already in use.
 
 ---
 
+## Option B: Run with Docker
+
+If you'd rather not install Node and ffmpeg on the host, run Album Tracker in a container. You
+need **Docker** with the Compose plugin (check with `docker compose version`). The image bundles
+Node 22 and ffmpeg — nothing else is required on the host (you can skip the Prerequisites above).
+
+```bash
+git clone <your-repo-url> album-tracker
+cd album-tracker
+
+# A long random secret that signs session cookies (keep it stable — changing it logs everyone out):
+export SESSION_SECRET=$(openssl rand -hex 48)
+# Optional: first admin username (default "admin") and host port (default 3458):
+export ADMIN_USER=james
+export PORT=3458
+
+docker compose up -d --build
+```
+
+Then open **http://localhost:3458** (or whichever `PORT` you chose) and log in as your
+`ADMIN_USER` — the first login sets that account's password permanently (trust-on-first-use).
+
+Instead of `export`ing the variables you can drop them in a **`.env` file** next to
+`docker-compose.yml`:
+
+```
+SESSION_SECRET=<paste a long random hex string>
+ADMIN_USER=james
+PORT=3458
+```
+
+`SESSION_SECRET` is **required**: `docker compose up` fails fast with a reminder if it is unset.
+
+**Data & persistence.** Two named Docker volumes hold your data across restarts and rebuilds:
+`at-data` (the SQLite database — including its WAL and the sessions table) and `at-uploads` (all
+transcoded audio/video). They survive `docker compose down`. Remove them deliberately with
+`docker compose down -v`, which **permanently deletes all data**.
+
+**Managing it:**
+```bash
+docker compose ps                 # status + health
+docker compose logs -f            # live logs
+docker compose restart            # restart the container
+docker compose down               # stop & remove the container (volumes/data kept)
+```
+
+**Updating:** `git pull`, then `docker compose up -d --build` rebuilds the image and recreates
+the container; your volumes (and data) are untouched. The schema migrates itself on startup.
+
+**Notes & caveats:**
+- **One writer only.** SQLite allows a single writer, so run exactly one replica — don't
+  `docker compose up --scale album-tracker=2` or set `deploy.replicas` > 1.
+- **Exposing on your network.** The compose file publishes the port on all host interfaces, so
+  the app is reachable from other devices over **plain HTTP (no TLS)** — see the network warning
+  below. Only do this on a trusted network. To bind to this machine only, change the port mapping
+  to `"127.0.0.1:${PORT:-3458}:3458"`, and for internet-facing use put a reverse proxy with HTTPS
+  in front.
+- **The container runs as a non-root user (uid 1000).** With the default *named* volumes this is
+  seamless. If you instead bind-mount host directories for `/data` or `/uploads`, make them
+  writable by uid 1000 (`sudo chown -R 1000:1000 ./your-dir`) or the app can't write the database
+  and uploads.
+- **Compose auto-reads a `.env` next to `docker-compose.yml`** for `${SESSION_SECRET}`/`${PORT}`
+  substitution — the *same* filename the native installer (Option A) writes. So if you run Docker
+  from a directory that already holds an Option-A `.env`, the container reuses **that** install's
+  session secret and host port. It's harmless if the port is already taken (Docker just refuses to
+  start — it can't disturb a running native instance), but to run both on one machine use a
+  separate clone, or set a distinct `SESSION_SECRET` and `PORT` for the container.
+- **ffmpeg lives inside the image** — you do **not** need it on the host for the Docker route.
+
+---
+
 ## Configuration (`.env`)
 
 The installer writes these; you can edit `.env` by hand and restart afterwards. See
@@ -86,7 +160,7 @@ The installer writes these; you can edit `.env` by hand and restart afterwards. 
 | `PORT`           | `3458`       | Port the server listens on. |
 | `HOST`           | `127.0.0.1`  | Bind address. `127.0.0.1` = this machine only. `0.0.0.0` = reachable from other devices on your network. |
 | `SESSION_SECRET` | *(random)*   | Signs session cookies. Keep it secret; changing it logs everyone out. |
-| `ADMIN_USER`     | `james`      | Username of the first/owner admin, seeded on first run. |
+| `ADMIN_USER`     | `admin`      | Username of the first/owner admin, seeded on first run. The install scripts default it to your OS account name; the Docker image defaults to `admin`. |
 | `DATA_DIR`       | `./data`     | Where `tracker.db` lives. Optional. |
 | `UPLOADS_DIR`    | `./uploads`  | Where uploaded/transcoded audio lives (this is the "media store"). Optional. |
 

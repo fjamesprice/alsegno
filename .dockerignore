@@ -1,0 +1,42 @@
+# Keep the build context tiny and secrets/data out of the image.
+# (The Dockerfile also COPYs only specific files, so this is defense-in-depth.)
+
+# Dependencies — reinstalled with `npm ci` inside the image (a host build may be a different arch)
+node_modules
+
+# Version control
+.git
+.gitignore
+.gitattributes
+
+# Live runtime data & secrets — NEVER in an image
+data
+uploads
+.env
+.env.*
+
+# Logs / OS / editor cruft
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+*.swp
+
+# Local Claude Code state
+.claude
+
+# Planning / internal docs (not needed at runtime)
+app-stuff.md
+roadmap2.md
+ROADMAP.md
+CLAUDE.md
+
+# Host installers & their guide (the image is the alternative to these)
+install.sh
+install.ps1
+INSTALL.md
+
+# Docker scaffolding itself
+Dockerfile
+docker-compose.yml
+.dockerignore

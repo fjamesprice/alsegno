@@ -8,6 +8,8 @@
 
   Safe to re-run: an existing .env is never overwritten, and the service step backs off
   if the port is already in use.
+
+  Prefer containers? See INSTALL.md "Option B: Run with Docker" for a docker compose setup instead.
 #>
 [CmdletBinding()]
 param(

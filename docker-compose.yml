@@ -1,0 +1,35 @@
+# Album Tracker — single-container deployment.
+#
+#   SESSION_SECRET=$(openssl rand -hex 48) docker compose up -d --build
+#
+# or put SESSION_SECRET (and optionally ADMIN_USER / PORT) in a .env file beside this one.
+# Data persists in the named volumes at-data (SQLite DB) and at-uploads (media) across rebuilds
+# and restarts. See INSTALL.md → "Option B: Run with Docker".
+#
+# SQLite has ONE writer: run a SINGLE replica only. Do not `docker compose up --scale
+# album-tracker=N` (N>1) or set deploy.replicas > 1 — concurrent writers corrupt the database.
+
+services:
+  album-tracker:
+    build: .
+    image: album-tracker:latest
+    # tini as PID 1: clean SIGTERM shutdown + reaps stray ffmpeg children. (Docker's bundled init.)
+    init: true
+    restart: unless-stopped
+    environment:
+      # REQUIRED. Signs session cookies; changing it logs everyone out. Fail fast with a helpful
+      # message if it is unset or empty.
+      SESSION_SECRET: "${SESSION_SECRET:?SESSION_SECRET is required. Generate one with: openssl rand -hex 48 and export it, or add it to a .env file beside docker-compose.yml.}"
+      # First/owner admin, seeded on first run (TOFU: its first login sets the password). Lowercased.
+      ADMIN_USER: "${ADMIN_USER:-admin}"
+    ports:
+      # host:container. Override only the HOST port, e.g. PORT=8080 docker compose up; the
+      # container always listens on 3458 internally (matching the image's PORT/EXPOSE).
+      - "${PORT:-3458}:3458"
+    volumes:
+      - at-data:/data
+      - at-uploads:/uploads
+
+volumes:
+  at-data:
+  at-uploads:

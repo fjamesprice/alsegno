@@ -10,6 +10,8 @@
 # Safe to re-run: an existing .env is never overwritten, and the service step backs off
 # if the port is already in use (so it won't fight an instance you're already running).
 #
+# Prefer containers? See INSTALL.md "Option B: Run with Docker" for a `docker compose` setup instead.
+#
 set -euo pipefail
 
 # ── args ─────────────────────────────────────────────────────
