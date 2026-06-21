@@ -63,6 +63,15 @@
   .segctl button:last-child{border-right:none}
   .segctl button:hover{color:var(--text)}
   .segctl button.on{background:var(--accent2);color:#fff;font-weight:600}
+  .exfmts{display:flex;flex-direction:column;gap:7px;margin-top:4px}
+  .exrow{display:flex;align-items:center;gap:11px;padding:9px 11px;background:var(--panel2);border:1px solid var(--line);border-radius:9px}
+  .exrow .gly{flex:0 0 auto;color:var(--muted);display:flex}
+  .exrow .gly svg{width:20px;height:20px;display:block}
+  .exrow .exmeta{flex:1;min-width:0}
+  .exrow .exname{font-size:13px;font-weight:600}
+  .exrow .exapps{font-size:11px;color:var(--faint)}
+  .exrow .btn{flex:0 0 auto}
+  #cTitle #exportBtn{margin-left:auto;font-weight:500}
   .modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:22px}
   .badge.media{background:rgba(122,162,255,.16);color:var(--accent);border:1px solid var(--accent);text-transform:uppercase}
 
@@ -343,7 +352,7 @@
 
     <!-- comments for the open track (audio home: below the track list) -->
     <div class="cpanel hidden" id="cpanel">
-      <h3 id="cTitle">Notes</h3>
+      <h3 id="cTitle"><span id="cTitleText">Notes</span><button class="btn ghost sm" id="exportBtn" title="Export timed notes as DAW / editor marker files">⤓ Export</button></h3>
       <div class="clist" id="clist"></div>
       <div class="addc hidden" id="addc">
         <textarea id="cInput" rows="2" placeholder="Leave a note…"></textarea>
@@ -528,12 +537,46 @@
   </div>
 </div>
 
+<!-- Notes-export modal (Cluster C): timed notes → DAW / video-editor marker files -->
+<div id="exportModal" class="modal-bg hidden">
+  <div class="modal-card" role="dialog" aria-modal="true" aria-label="Export notes">
+    <h2>Export notes</h2>
+    <div class="mfield">
+      <label>What to export</label>
+      <div class="segctl" id="exScope">
+        <button type="button" data-v="rev">This revision</button>
+        <button type="button" data-v="track">Whole track</button>
+      </div>
+    </div>
+    <div class="mfield">
+      <div class="row" style="gap:12px">
+        <input type="text" id="exFps" inputmode="decimal" autocomplete="off" spellcheck="false" style="width:110px">
+        <label style="margin:0;color:var(--muted);font-size:13px;line-height:1.35">Frame rate<br><span class="faint small">for Resolve EDL + Avid only</span></label>
+      </div>
+    </div>
+    <div class="exfmts" id="exFmts"></div>
+    <p class="faint small" style="margin:12px 0 0">Markers come from timed (pinned) notes. General notes &amp; replies aren't placed on a timeline — they're listed in the .zip README.</p>
+    <div class="modal-actions">
+      <button class="btn ghost" type="button" id="exClose">Close</button>
+      <button class="btn primary" type="button" id="exZip">⤓ Download all (.zip)</button>
+    </div>
+  </div>
+</div>
+
 <script>
 "use strict";
 const $ = s => document.querySelector(s);
 const $$ = s => Array.from(document.querySelectorAll(s));
 const esc = s => String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmt = t => { if(!isFinite(t)||t<0)t=0; const m=Math.floor(t/60),s=Math.floor(t%60); return m+':'+String(s).padStart(2,'0'); };
+// Playhead readout. For a video track, append the SMPTE-style frame within the current second
+// (m:ss:ff, non-drop) so you can see the exact frame; audio tracks fall back to plain m:ss.
+const fmtCur = t => {
+  const fps=curFps(); if(!fps) return fmt(t);
+  if(!isFinite(t)||t<0)t=0; const nominal=Math.round(fps);
+  let ff=Math.floor((t-Math.floor(t))*fps); if(ff>=nominal) ff=nominal-1;
+  return fmt(t)+':'+String(ff).padStart(2,'0');
+};
 // SQLite UTC timestamp ("YYYY-MM-DD HH:MM:SS") → compact local datetime
 const fmtDate = s => { if(!s) return ''; const d=new Date(String(s).replace(' ','T')+'Z'); return isNaN(d)?String(s):d.toLocaleString([],{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}); };
 
@@ -1277,7 +1320,7 @@ async function crossfadeTo(revId){
   finally{ crossing=false; drainPendingRev(); }
 }
 
-function updateTime(cur,dur){ $('#timeLbl').textContent=fmt(cur)+' / '+fmt(dur||0); $('#cPinTime').textContent=fmt(cur); drawBars(); if(nullOn) blankMeters(); else updateMeters(cur); }
+function updateTime(cur,dur){ $('#timeLbl').textContent=fmtCur(cur)+' / '+fmt(dur||0); $('#cPinTime').textContent=fmt(cur); drawBars(); if(nullOn) blankMeters(); else updateMeters(cur); }
 
 // ── meters: peak dBFS (current + max-hold) and EBU R128 LUFS (short-term + integrated) ──
 // Values come from the file (volume-independent program level), read at the playhead.
@@ -1486,7 +1529,7 @@ async function openTrack(trackId, fromPlayer){
   $('#addc').classList.remove('hidden');          // show the note-input box (it lives above #cpanel)
   $('.pb-inner').classList.add('with-notes');   // theater: reveal the notes column now a track is open
   if(curRevId) drawWave();                        // the engine column width changed → re-layout the canvas
-  $('#cTitle').textContent='Notes — '+t.title;
+  $('#cTitleText').textContent='Notes — '+t.title;
   comments=await api('tracks/'+trackId+'/comments');
   renderComments();
   drawPins();
@@ -2033,6 +2076,78 @@ $('#npCreate').addEventListener('click',async()=>{
     else { await loadProjects(); if(r&&r.id) await openProject(r.id); }
   }catch(e){ toast(e.message,true); }
 });
+
+// ───────── notes export (Cluster C) ─────────
+// Timed (pinned) notes → marker/locator files for DAWs + video editors. The download is a plain
+// relative-URL anchor click; the server sends Content-Disposition: attachment so the browser saves
+// it without navigating. Neutral glyphs (no brand logos — trademark-safe for the public repo).
+const EXPORT_ROWS = [
+  { fmt:'audacity', glyph:'tag',  name:'Audacity labels',   apps:'Audacity' },
+  { fmt:'reaper',   glyph:'rows', name:'Reaper region CSV', apps:'Reaper' },
+  { fmt:'wav',      glyph:'wave', name:'WAV cue markers',   apps:'FL Studio · Cubase · Reaper' },
+  { fmt:'midi',     glyph:'note', name:'MIDI markers',      apps:'Pro Tools · Cubase · Logic' },
+  { fmt:'edl',      glyph:'film', name:'Resolve EDL',       apps:'DaVinci Resolve' },
+  { fmt:'avid',     glyph:'film', name:'Avid locators',     apps:'Media Composer' },
+];
+const EXPORT_GLYPHS = {
+  tag:'<path d="M3 12l9-9h8v8l-9 9z"/><circle cx="15.5" cy="7.5" r="1.4"/>',
+  rows:'<line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/>',
+  wave:'<line x1="5" y1="9" x2="5" y2="15"/><line x1="9.5" y1="5" x2="9.5" y2="19"/><line x1="14" y1="8" x2="14" y2="16"/><line x1="18.5" y1="6" x2="18.5" y2="18"/>',
+  note:'<circle cx="8" cy="17" r="2.4"/><circle cx="16" cy="15" r="2.4"/><path d="M10.4 17V5l8-2v12"/>',
+  film:'<rect x="4" y="5.5" width="16" height="13" rx="1.5"/><line x1="8" y1="5.5" x2="8" y2="18.5"/><line x1="16" y1="5.5" x2="16" y2="18.5"/>',
+};
+const svgGlyph = g => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${EXPORT_GLYPHS[g]||''}</svg>`;
+let exRevId=null;
+function openExport(){
+  const t=trackById(panelTrackId);
+  if(!t || !t.revisions || !t.revisions.length){ toast('Open a track with a revision first',true); return; }
+  // "This revision" = the rev in focus for this track (else its newest).
+  exRevId = (panelTrackId===curTrackId && curRevId) ? curRevId : t.revisions[t.revisions.length-1].id;
+  const rv=revById(t, exRevId);
+  $('#exScope').querySelector('[data-v="rev"]').textContent = 'This revision'+(rv?' ('+revLabel(rv)+')':'');
+  setSeg('exScope','rev');
+  // fps prefilled from the uploaded video's actual rate (kept exact, e.g. 29.97), editable in case
+  // the final export differs. Audio tracks have no video fps → default 30. Only EDL/Avid use it.
+  $('#exFps').value = String((t.video_fps && t.video_fps > 0) ? t.video_fps : 30);
+  $('#exFmts').innerHTML = EXPORT_ROWS.map(r=>`
+    <div class="exrow">
+      <span class="gly">${svgGlyph(r.glyph)}</span>
+      <span class="exmeta"><div class="exname">${esc(r.name)}</div><div class="exapps">${esc(r.apps)}</div></span>
+      <button class="btn sm" data-fmt="${r.fmt}" title="Download ${esc(r.name)}">⤓</button>
+    </div>`).join('');
+  $('#exportModal').classList.remove('hidden');
+}
+function closeExport(){ $('#exportModal').classList.add('hidden'); }
+function exportUrl(fmt){
+  const scope=segValue('exScope')||'rev';
+  const p=new URLSearchParams({fmt, scope});
+  const fps=($('#exFps').value||'').trim();
+  if(fps) p.set('fps', fps);                       // free-text; server validates + falls back if bad
+  if(scope==='rev' && exRevId) p.set('rev', String(exRevId));
+  return 'api/tracks/'+panelTrackId+'/notes/export?'+p.toString();   // relative → subpath-safe
+}
+async function doExport(fmt){
+  if(panelTrackId==null) return;
+  // fetch→blob (not a bare anchor): a server error (403/404/400) shows a toast instead of navigating
+  // the SPA away to a JSON error page. Filename comes from the server's Content-Disposition.
+  try{
+    const r=await fetch(exportUrl(fmt),{credentials:'same-origin'});
+    if(!r.ok){ toast('Export failed',true); return; }
+    const cd=r.headers.get('content-disposition')||'';
+    const m=cd.match(/filename="([^"]+)"/);
+    const blob=await r.blob(); const url=URL.createObjectURL(blob);
+    const a=document.createElement('a'); a.href=url; a.download=m?m[1]:(fmt+'.dat');
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url),4000);
+  }catch{ toast('Export failed',true); }
+}
+$('#exportBtn').addEventListener('click',openExport);
+$('#exClose').addEventListener('click',closeExport);
+$('#exZip').addEventListener('click',()=>doExport('zip'));
+$('#exFmts').addEventListener('click',e=>{ const b=e.target.closest('button[data-fmt]'); if(b) doExport(b.dataset.fmt); });
+$('#exScope').addEventListener('click',e=>{ const b=e.target.closest('button'); if(b) setSeg('exScope',b.dataset.v); });
+$('#exportModal').addEventListener('click',e=>{ if(e.target===$('#exportModal')) closeExport(); });
+document.addEventListener('keydown',e=>{ if(e.key==='Escape' && !$('#exportModal').classList.contains('hidden')) closeExport(); });
 
 // ───────── keyboard ─────────
 document.addEventListener('keydown',e=>{

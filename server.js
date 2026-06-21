@@ -8,6 +8,7 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const os = require('os');
+const zlib = require('zlib');
 const { execFile } = require('child_process');
 
 const app = express();
@@ -1374,9 +1375,13 @@ app.post('/api/tracks/:id/comments', requireProjectAccess(pTrack), (req, res) =>
   // project's revision id in (leaking its existence/rev_number via the comments GET join) or trip a
   // raw FK-constraint 500. The frontend only ever sends the open track's own revision.
   if (revisionId != null) {
-    const rv = db.prepare('SELECT track_id FROM revisions WHERE id = ?').get(revisionId);
+    const rv = db.prepare('SELECT track_id, duration FROM revisions WHERE id = ?').get(revisionId);
     if (!rv || rv.track_id !== Number(req.params.id)) return res.status(400).json({ error: 'Revision is not on this track' });
+    // Clamp a pin to [0, duration]: the playhead can't be past the audio, and this keeps a bogus ts
+    // (e.g. a hand-crafted huge value) from later driving an unbounded silent-WAV bed in the export.
+    if (ts != null && Number.isFinite(ts) && rv.duration > 0) ts = Math.min(Math.max(0, ts), rv.duration);
   }
+  if (ts != null && !Number.isFinite(ts)) ts = null; // NaN/Infinity ts → unpinned (defensive)
   const r = db.prepare('INSERT INTO comments (track_id, revision_id, author, ts, body, parent_id) VALUES (?, ?, ?, ?, ?, ?)')
     .run(req.params.id, revisionId, req.session.user.username, ts, body, parentId);
   broadcastChange(req.projectId);
@@ -1424,6 +1429,271 @@ app.delete('/api/comments/:id', requireProjectAccess(pComment), (req, res) => {
   })();
   if (changed) broadcastChange(req.projectId); // idempotent re-delete of an already-gone note: nothing to announce
   res.json({ ok: true });
+});
+
+// ── Notes export for DAWs / video editors (Cluster C) ────────────────────────
+// Turn a track's timed notes (top-level pinned notes that carry a `ts`) into marker/locator files
+// that import into common audio + video tools. Everything here is pure Node (Buffer math + the
+// built-in zlib for the zip) — no ffmpeg, no new dependency. Untimed notes (general notes + replies)
+// are NEVER faked to 0:00; they go into the zip's README so nothing is silently dropped.
+//
+// Timing: a marker sits at the note's `ts` (seconds into the revision). Audacity / Reaper / WAV-cue /
+// MIDI are second/sample/tick-exact and ignore fps. EDL + Avid are frame-based, so they take an fps
+// (default 30, or a video track's real fps) and place markers at a +1h record-TC offset (Resolve and
+// Avid default their sequences to 01:00:00:00).
+
+// ASCII-only, single-line marker text (tabs/newlines/control chars → space; non-ASCII → '?').
+function asciiLine(s) {
+  return String(s == null ? '' : s)
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/[^\x20-\x7e]/g, '?')
+    .replace(/\s+/g, ' ').trim();
+}
+const fmtSeconds = (s, dp = 6) => Math.max(0, s).toFixed(dp);
+const markerText = m => asciiLine(`${m.author}: ${m.body}`);   // author-prefixed (Avid keeps author in its own column)
+// Record timecode (HH:MM:SS:FF) for a marker at real-time offset `ts` seconds, on a timeline that
+// starts at 01:00:00:00. Frames are counted at the TRUE fps — so a fractional rate (23.976, 29.97,
+// 59.94) lands on the correct frame instead of drifting ~0.1% — then formatted NON-DROP at the
+// nominal integer rate (29.97→30, 23.976→24). Import onto a non-drop timeline; drop-frame TC for a
+// 29.97/59.94 DF timeline isn't emitted (can be added if needed). `extraFrames` makes the +1 out-TC.
+function recTimecode(ts, fps, extraFrames = 0) {
+  const nominal = Math.max(1, Math.round(fps));
+  const idx = nominal * 3600 + Math.max(0, Math.round(ts * fps)) + extraFrames; // 01:00:00:00 start, in frames
+  const ff = idx % nominal;
+  const secs = Math.floor(idx / nominal);
+  const ss = secs % 60;
+  const mins = Math.floor(secs / 60);
+  const mm = mins % 60;
+  const hh = Math.floor(mins / 60) % 24;
+  const p2 = n => String(n).padStart(2, '0');
+  return `${p2(hh)}:${p2(mm)}:${p2(ss)}:${p2(ff)}`;
+}
+
+// CRC-32 (IEEE) for zip entries.
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1); t[n] = c >>> 0; }
+  return t;
+})();
+function crc32(buf) {
+  let c = 0xFFFFFFFF;
+  for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xFF] ^ (c >>> 8);
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+// Minimal ZIP archive, DEFLATE via built-in zlib (still "no new dependency"; deflate collapses the
+// silent WAV bed to ~nothing, which a stored zip could not). files: [{ name, data:Buffer }].
+function makeZip(files) {
+  const parts = [], central = [];
+  let offset = 0;
+  const dosTime = 0, dosDate = 0x21;     // fixed 1980-01-01 → byte-for-byte reproducible
+  for (const f of files) {
+    const nameBuf = Buffer.from(f.name, 'ascii');
+    const crc = crc32(f.data);
+    const comp = zlib.deflateRawSync(f.data, { level: 6 });
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0); local.writeUInt16LE(20, 4); local.writeUInt16LE(0, 6);
+    local.writeUInt16LE(8, 8); local.writeUInt16LE(dosTime, 10); local.writeUInt16LE(dosDate, 12);
+    local.writeUInt32LE(crc, 14); local.writeUInt32LE(comp.length, 18); local.writeUInt32LE(f.data.length, 22);
+    local.writeUInt16LE(nameBuf.length, 26); local.writeUInt16LE(0, 28);
+    parts.push(local, nameBuf, comp);
+    const cen = Buffer.alloc(46);
+    cen.writeUInt32LE(0x02014b50, 0); cen.writeUInt16LE(20, 4); cen.writeUInt16LE(20, 6); cen.writeUInt16LE(0, 8);
+    cen.writeUInt16LE(8, 10); cen.writeUInt16LE(dosTime, 12); cen.writeUInt16LE(dosDate, 14);
+    cen.writeUInt32LE(crc, 16); cen.writeUInt32LE(comp.length, 20); cen.writeUInt32LE(f.data.length, 24);
+    cen.writeUInt16LE(nameBuf.length, 28); cen.writeUInt32LE(0, 38); cen.writeUInt32LE(offset, 42);
+    central.push(cen, nameBuf);
+    offset += local.length + nameBuf.length + comp.length;
+  }
+  const centralBuf = Buffer.concat(central);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(files.length, 8); eocd.writeUInt16LE(files.length, 10);
+  eocd.writeUInt32LE(centralBuf.length, 12); eocd.writeUInt32LE(offset, 16);
+  return Buffer.concat([...parts, centralBuf, eocd]);
+}
+
+// Silent PCM WAV (mono / 16-bit / 44.1k) carrying cue points + adtl/labl names — the marker WAV that
+// FL Studio (Edison), Cubase/Nuendo and Reaper read. Sample offsets are exact at 44100 Hz.
+const MAX_WAV_SECONDS = 30 * 60; // hard cap on the silent bed (~158 MB) so a pathological note ts
+                                 // can't drive an unbounded Buffer.alloc. Covers any realistic track
+                                 // (notes are clamped to the revision duration on create); a marker
+                                 // past the cap still gets an exact cue offset, just a shorter bed.
+function makeCueWav(markers) {
+  const sampleRate = 44100, blockAlign = 2;
+  const maxTs = markers.reduce((m, k) => Math.max(m, k.ts), 0);
+  const frames = Math.max(1, Math.min(Math.ceil((maxTs + 0.5) * sampleRate), MAX_WAV_SECONDS * sampleRate));
+  const data = Buffer.alloc(frames * blockAlign); // zero-filled = silence (length is even)
+
+  const fmt = Buffer.alloc(16);
+  fmt.writeUInt16LE(1, 0); fmt.writeUInt16LE(1, 2); fmt.writeUInt32LE(sampleRate, 4);
+  fmt.writeUInt32LE(sampleRate * blockAlign, 8); fmt.writeUInt16LE(blockAlign, 12); fmt.writeUInt16LE(16, 14);
+
+  const cue = Buffer.alloc(4 + markers.length * 24);
+  cue.writeUInt32LE(markers.length, 0);
+  markers.forEach((k, i) => {
+    // dwPosition / dwSampleOffset are unsigned 32-bit (≈27h of headroom @44.1k). Clamp so a
+    // pathological ts can't overflow writeUInt32LE (which would throw); real markers are exact.
+    const o = 4 + i * 24, pos = Math.min(Math.max(0, Math.round(k.ts * sampleRate)), 0xffffffff);
+    cue.writeUInt32LE(i + 1, o); cue.writeUInt32LE(pos, o + 4); cue.write('data', o + 8, 'ascii');
+    cue.writeUInt32LE(0, o + 12); cue.writeUInt32LE(0, o + 16); cue.writeUInt32LE(pos, o + 20);
+  });
+
+  const labls = markers.map((k, i) => {
+    const txt = Buffer.from(markerText(k) + '\0', 'ascii');
+    const body = Buffer.concat([Buffer.alloc(4), txt]); body.writeUInt32LE(i + 1, 0);
+    const pad = body.length % 2;                    // chunk data padded to even (pad byte not counted in size)
+    const sub = Buffer.alloc(8 + body.length + pad);
+    sub.write('labl', 0, 'ascii'); sub.writeUInt32LE(body.length, 4); body.copy(sub, 8);
+    return sub;
+  });
+  const adtl = Buffer.concat([Buffer.from('adtl', 'ascii'), ...labls]);
+  const list = Buffer.concat([Buffer.alloc(8), adtl]); list.write('LIST', 0, 'ascii'); list.writeUInt32LE(adtl.length, 4);
+
+  const chunk = (id, payload) => { const h = Buffer.alloc(8); h.write(id, 0, 'ascii'); h.writeUInt32LE(payload.length, 4); return Buffer.concat([h, payload]); };
+  const body = Buffer.concat([Buffer.from('WAVE', 'ascii'), chunk('fmt ', fmt), chunk('data', data), chunk('cue ', cue), list]);
+  const riff = Buffer.concat([Buffer.alloc(8), body]); riff.write('RIFF', 0, 'ascii'); riff.writeUInt32LE(body.length, 4);
+  return riff;
+}
+
+// Standard MIDI File (format 0): a 120 BPM tempo + one Marker meta (FF 06) per note. At 120 BPM /
+// 480 PPQ, a note at t seconds → round(t * 480 * 2) ticks. Pro Tools etc. import these as markers.
+function makeMidi(markers) {
+  const PPQ = 480;
+  const u32be = n => { const b = Buffer.alloc(4); b.writeUInt32BE(n, 0); return b; };
+  const vlq = n => { n = Math.max(0, Math.round(n)); const out = [n & 0x7f]; n = Math.floor(n / 128); while (n > 0) { out.unshift((n & 0x7f) | 0x80); n = Math.floor(n / 128); } return Buffer.from(out); };
+  const events = [Buffer.concat([vlq(0), Buffer.from([0xff, 0x51, 0x03, 0x07, 0xa1, 0x20])])]; // 500000 µs/qn
+  let prevTick = 0;
+  for (const k of [...markers].sort((a, b) => a.ts - b.ts)) {
+    const tick = Math.round(k.ts * PPQ * 2), delta = Math.max(0, tick - prevTick); prevTick = tick;
+    const txt = Buffer.from(markerText(k), 'ascii');
+    events.push(Buffer.concat([vlq(delta), Buffer.from([0xff, 0x06]), vlq(txt.length), txt]));
+  }
+  events.push(Buffer.concat([vlq(0), Buffer.from([0xff, 0x2f, 0x00])])); // end of track
+  const trk = Buffer.concat(events);
+  const head = Buffer.alloc(14);
+  head.write('MThd', 0, 'ascii'); head.writeUInt32BE(6, 4); head.writeUInt16BE(0, 8); head.writeUInt16BE(1, 10); head.writeUInt16BE(PPQ, 12);
+  return Buffer.concat([head, Buffer.from('MTrk', 'ascii'), u32be(trk.length), trk]);
+}
+
+function makeAudacity(markers) { // start<TAB>end<TAB>label, decimal seconds; point label start==end
+  return markers.length ? markers.map(k => `${fmtSeconds(k.ts)}\t${fmtSeconds(k.ts)}\t${markerText(k)}`).join('\n') + '\n' : '';
+}
+const csvField = s => { s = asciiLine(s); return /[",]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+function makeReaper(markers) { // Region/Marker Manager CSV — decimal seconds (set ruler to Seconds)
+  const rows = ['#,Name,Start,End,Length,Color'];
+  markers.forEach((k, i) => rows.push(`M${i + 1},${csvField(markerText(k))},${fmtSeconds(k.ts)},${fmtSeconds(k.ts)},0,`));
+  return rows.join('\r\n') + '\r\n';
+}
+function makeEdl(markers, fps, title) { // CMX3600 + Resolve marker tags; record TC at a +1h start
+  const out = [`TITLE: ${asciiLine(title).slice(0, 70) || 'Notes'}`, 'FCM: NON-DROP FRAME'];
+  markers.forEach((k, i) => {
+    const tin = recTimecode(k.ts, fps), tout = recTimecode(k.ts, fps, 1);
+    out.push(`${String(i + 1).padStart(3, '0')}  AX       V     C        ${tin} ${tout} ${tin} ${tout}`);
+    out.push(`|C:ResolveColorBlue |M:${asciiLine(markerText(k)).replace(/\|/g, '/')} |D:1`);
+  });
+  return out.join('\r\n') + '\r\n';
+}
+function makeAvid(markers, fps) { // Author<TAB>TC<TAB>Track<TAB>Color<TAB>Comment — no header, LF ONLY
+  return markers.length
+    ? markers.map(k => `${asciiLine(k.author) || 'note'}\t${recTimecode(k.ts, fps)}\tV1\tred\t${asciiLine(k.body)}`).join('\n') + '\n'
+    : '';
+}
+function makeReadme(track, scopeLabel, fps, markers, untimed, replies) {
+  const L = [];
+  L.push(`Notes export — ${asciiLine(track.title)}`);
+  L.push(`Scope: ${scopeLabel}`);
+  L.push(`Frame rate: ${fps} fps (used only by resolve.edl and avid-locators.txt)`);
+  L.push('');
+  L.push('FILES');
+  L.push('  audacity-labels.txt  Audacity: File > Import > Labels');
+  L.push('  reaper.csv           Reaper: Region/Marker Manager > (right-click) Import — set the ruler to Seconds first');
+  L.push('  markers.wav          FL Studio (open in Edison, not the Playlist), Cubase/Nuendo, Reaper — silent WAV with cue markers @44100 Hz');
+  L.push('  markers.mid          Pro Tools etc.: import as MIDI; markers land as memory locations (120 BPM, 480 PPQ)');
+  L.push('  resolve.edl          DaVinci Resolve: import EDL onto a timeline — markers at +1h record TC');
+  L.push('  avid-locators.txt    Avid Media Composer: import locators (sequence start assumed 01:00:00:00)');
+  L.push('');
+  L.push(`Timed markers placed: ${markers.length}`);
+  if (untimed.length || replies.length) {
+    L.push('');
+    L.push('UNTIMED NOTES (no timestamp — not placed on the timeline):');
+    untimed.forEach(n => L.push(`  [general] ${asciiLine(n.author)}: ${asciiLine(n.body)}`));
+    replies.forEach(n => L.push(`  [reply] ${asciiLine(n.author)}: ${asciiLine(n.body)}`));
+  }
+  return L.join('\n') + '\n';
+}
+
+const EXPORT_FMTS = {
+  audacity: { file: 'audacity-labels.txt', type: 'text/plain; charset=utf-8' },
+  reaper:   { file: 'reaper.csv',          type: 'text/csv; charset=utf-8' },
+  wav:      { file: 'markers.wav',         type: 'audio/wav' },
+  midi:     { file: 'markers.mid',         type: 'audio/midi' },
+  edl:      { file: 'resolve.edl',         type: 'text/plain; charset=utf-8' },
+  avid:     { file: 'avid-locators.txt',   type: 'text/plain; charset=utf-8' },
+};
+function genFormat(fmt, markers, fps, title) {
+  switch (fmt) {
+    case 'audacity': return Buffer.from(makeAudacity(markers), 'utf8');
+    case 'reaper':   return Buffer.from(makeReaper(markers), 'utf8');
+    case 'wav':      return makeCueWav(markers);
+    case 'midi':     return makeMidi(markers);
+    case 'edl':      return Buffer.from(makeEdl(markers, fps, title), 'utf8');
+    case 'avid':     return Buffer.from(makeAvid(markers, fps), 'utf8');
+    default:         return null;
+  }
+}
+
+app.get('/api/tracks/:id/notes/export', requireProjectAccess(pTrack), (req, res) => {
+ try {
+  const trackId = Number(req.params.id);
+  const track = db.prepare('SELECT id, title, video_fps FROM tracks WHERE id = ?').get(trackId);
+  if (!track) return res.status(404).json({ error: 'Not found' });
+
+  const fmt = String(req.query.fmt || '');
+  const scope = req.query.scope === 'rev' ? 'rev' : 'track';
+  // fps only matters for EDL/Avid. Honor the exact value the user passes (a fractional rate like
+  // 29.97/23.976 is fed straight in — recTimecode counts frames at the true rate). Fall back to the
+  // uploaded video's own fps, else 30. NOT rounded — rounding would re-introduce the drift.
+  let fps = Number(req.query.fps);
+  if (!(Number.isFinite(fps) && fps > 0 && fps <= 240)) fps = (track.video_fps > 0) ? track.video_fps : 30;
+
+  let scopeLabel = 'whole track', revId = null;
+  if (scope === 'rev') {
+    revId = Number(req.query.rev);
+    const rv = db.prepare('SELECT rev_number, is_orig_audio FROM revisions WHERE id = ? AND track_id = ?').get(revId, trackId);
+    if (!rv) return res.status(400).json({ error: 'Revision is not on this track' });
+    scopeLabel = rv.is_orig_audio ? 'Original audio' : ('v' + rv.rev_number);
+  }
+
+  // Timed markers = top-level, non-deleted notes that carry a ts (INNER JOIN ⇒ must have a revision).
+  let mSql = `SELECT c.ts, c.body, c.author FROM comments c JOIN revisions r ON c.revision_id = r.id
+              WHERE c.track_id = ? AND c.parent_id IS NULL AND c.ts IS NOT NULL AND c.deleted_at IS NULL`;
+  const mArgs = [trackId];
+  if (scope === 'rev') { mSql += ' AND c.revision_id = ?'; mArgs.push(revId); }
+  mSql += ' ORDER BY c.ts, c.id';
+  const markers = db.prepare(mSql).all(...mArgs);
+
+  const slug = (asciiLine(track.title).replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40)) || 'track';
+  const send = (buf, filename, type) => {
+    res.setHeader('Content-Type', type);
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(buf);
+  };
+
+  if (fmt === 'zip') {
+    const untimed = db.prepare(`SELECT body, author FROM comments WHERE track_id = ? AND parent_id IS NULL AND ts IS NULL AND deleted_at IS NULL ORDER BY created_at, id`).all(trackId);
+    const replies = db.prepare(`SELECT body, author FROM comments WHERE track_id = ? AND parent_id IS NOT NULL AND deleted_at IS NULL ORDER BY created_at, id`).all(trackId);
+    const files = Object.entries(EXPORT_FMTS).map(([f, m]) => ({ name: m.file, data: genFormat(f, markers, fps, track.title) }));
+    files.push({ name: 'README.txt', data: Buffer.from(makeReadme(track, scopeLabel, fps, markers, untimed, replies), 'utf8') });
+    return send(makeZip(files), `${slug}-notes.zip`, 'application/zip');
+  }
+
+  const meta = EXPORT_FMTS[fmt];
+  if (!meta) return res.status(400).json({ error: 'Unknown export format' });
+  return send(genFormat(fmt, markers, fps, track.title), `${slug}-${meta.file}`, meta.type);
+ } catch (e) {
+  console.error('[notes export] failed:', e.message);
+  if (!res.headersSent) res.status(500).json({ error: 'Export failed' });
+ }
 });
 
 // ── User management (admin) ──────────────────────────────────
