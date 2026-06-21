@@ -137,6 +137,10 @@ db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('null_test_visib
 db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('keep_lossless', '0')").run();
 db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('show_deleted_notes', '0')").run();
 db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('video_enabled', '0')").run();
+// auto_update_check: periodically check whether this install is behind its git origin and notify
+// admins (Cluster E — check-and-notify only; never pulls/installs/restarts). The companion
+// 'update_status' row is the cached result (written on each check, served to admins by bootstrap).
+db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('auto_update_check', '1')").run();
 
 // Migration: loudness/peak metering columns on revisions
 {
@@ -766,6 +770,14 @@ function broadcastChange(projectId) {
 function broadcastProjects() {
   for (const c of [...sseClients]) if (isActiveUser(c.username)) sseSend(c, 'projects', {});
 }
+// Admin-only: the "update available" badge (Cluster E). Mirrors the live role re-check of the
+// broadcasts above — a demoted/deactivated admin on a still-open stream stops receiving it.
+function broadcastUpdate(status) {
+  for (const c of [...sseClients]) {
+    const u = db.prepare('SELECT role, active FROM users WHERE username = ?').get(c.username);
+    if (u && u.active === 1 && u.role === 'admin') sseSend(c, 'update', status);
+  }
+}
 
 // ── Auth routes ──────────────────────────────────────────────
 app.post('/api/login', (req, res) => {
@@ -911,7 +923,10 @@ app.get('/api/bootstrap', requireAuth, (req, res) => {
   res.json({ user, projects, last_project_id,
     null_test_visible: settingOn('null_test_visible'),
     keep_lossless: settingOn('keep_lossless', false),
-    video_enabled: settingOn('video_enabled', false) });
+    video_enabled: settingOn('video_enabled', false),
+    // Admin-only: the cached self-update status (cheap settings-row read — no git shell-out here;
+    // the live GET /api/update/status and the background poller refresh the cache).
+    update: user.role === 'admin' ? getUpdateCache() : null });
 });
 
 // Full payload for one project. requireProjectAccess proves membership/admin BEFORE we record it
@@ -1758,10 +1773,63 @@ app.put('/api/users/:u', requireAdmin, (req, res) => {
   res.json({ ok: true });
 });
 
+// ── Self-update check — notify only (Cluster E) ──────────────
+// We tell admins when `origin` is ahead; we NEVER pull, install, or restart (that stays a manual,
+// documented step — auto-restart-on-clean-exit, dirty-tree-on-the-live-checkout, and SSH-key
+// footguns aren't worth it). Every git call runs in __dirname with a hard timeout and a
+// non-interactive env, so a hung or auth-prompting fetch can't wedge the request or the poller.
+const GIT_TIMEOUT = 20000;
+function git(args, timeout = GIT_TIMEOUT) {
+  return new Promise((resolve, reject) => {
+    execFile('git', args, { cwd: __dirname, timeout, maxBuffer: 1024 * 1024, encoding: 'utf8',
+        env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_SSH_COMMAND: 'ssh -oBatchMode=yes -oStrictHostKeyChecking=accept-new' } },
+      (err, stdout) => err ? reject(err) : resolve(String(stdout).trim()));
+  });
+}
+// Cached status lives in a single settings row (JSON). bootstrap serves it to admins so the badge
+// shows with no git shell-out per page load; the live route + poller refresh it.
+function getUpdateCache() {
+  const v = db.prepare("SELECT value FROM settings WHERE key = 'update_status'").get()?.value;
+  if (!v) return null;
+  try { return JSON.parse(v); } catch { return null; }
+}
+function setUpdateCache(obj) {
+  db.prepare("INSERT INTO settings (key, value) VALUES ('update_status', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(JSON.stringify(obj));
+}
+// Current HEAD vs origin/<branch>. doFetch updates remote-tracking refs first (needs network/SSH;
+// failure is non-fatal → we report a stale count + fetch_error). NEVER throws. A non-git install
+// (downloaded zip/tarball) degrades cleanly to { isGitRepo:false }.
+async function computeUpdateStatus(doFetch) {
+  const checked_at = new Date().toISOString();
+  let branch;
+  try { branch = await git(['rev-parse', '--abbrev-ref', 'HEAD']); }
+  catch { return { isGitRepo: false, checked_at }; }
+  const s = { isGitRepo: true, branch, checked_at, current: null, latest: null,
+    behind: null, latestSubject: null, dirty: false, fetch_error: null };
+  try { s.current = await git(['rev-parse', '--short', 'HEAD']); } catch {}
+  if (doFetch) {
+    try { await git(['fetch', '--quiet', 'origin', branch]); }
+    catch (e) { s.fetch_error = String(e && e.message || e).replace(/\s+/g, ' ').slice(0, 200); }
+  }
+  const ref = `origin/${branch}`;
+  try { const n = parseInt(await git(['rev-list', '--count', `HEAD..${ref}`]), 10); s.behind = Number.isNaN(n) ? null : n; } catch {}
+  try { s.latest = await git(['rev-parse', '--short', ref]); } catch {}
+  try { s.latestSubject = await git(['log', '-1', '--format=%s', ref]); } catch {}
+  try { s.dirty = (await git(['status', '--porcelain'])).length > 0; } catch {}
+  return s;
+}
+// Live check (admin). Runs git (with the fetch), refreshes the cache, returns the status. Updating
+// stays manual — there is deliberately NO apply/restart route.
+app.get('/api/update/status', requireAdmin, async (req, res) => {
+  const s = await computeUpdateStatus(true);
+  if (s.isGitRepo) setUpdateCache(s);
+  res.json(s);
+});
+
 // ── Settings (admin) ─────────────────────────────────────────
-// Only null_test_visible is honored this session (player hides null UI when '0'); the rest land
-// with their wiring in Phase 3d. Keep the allowlist tight so PUT can't write arbitrary keys.
-const SETTING_KEYS = new Set(['null_test_visible', 'keep_lossless', 'show_deleted_notes', 'video_enabled']);
+// Keep the allowlist tight so PUT can't write arbitrary keys. (update_status is intentionally NOT
+// here — it's the cached check result, written by the update routine, not a user-set toggle.)
+const SETTING_KEYS = new Set(['null_test_visible', 'keep_lossless', 'show_deleted_notes', 'video_enabled', 'auto_update_check']);
 app.get('/api/settings', requireAdmin, (req, res) => {
   const out = {};
   for (const k of SETTING_KEYS) out[k] = settingOn(k) ? '1' : '0';
@@ -1772,6 +1840,28 @@ app.put('/api/settings', requireAdmin, (req, res) => {
   for (const k of SETTING_KEYS) if (req.body[k] !== undefined) set.run(k, req.body[k] ? '1' : '0');
   res.json({ ok: true });
 });
+
+// ── Background update poller (Cluster E) ─────────────────────
+// Daily check when auto_update_check is on. Cheap (one fetch + a few rev-parses), guarded by an
+// in-flight flag, with the setting re-read each tick (toggling it off stops checks without a
+// restart) and a hard per-call timeout. On a genuine change vs the cached state, nudge admins via
+// SSE. unref() so neither timer keeps the process alive at shutdown.
+let updateCheckInFlight = false;
+async function runUpdateCheck() {
+  if (updateCheckInFlight || !settingOn('auto_update_check')) return;
+  updateCheckInFlight = true;
+  try {
+    const prev = getUpdateCache();
+    const s = await computeUpdateStatus(true);
+    setUpdateCache(s);
+    if (s.isGitRepo && s.behind > 0 && (!prev || prev.latest !== s.latest || (prev.behind || 0) !== s.behind)) {
+      broadcastUpdate(s);
+    }
+  } catch { /* never let a poll crash the process */ }
+  finally { updateCheckInFlight = false; }
+}
+setTimeout(runUpdateCheck, 25000).unref();           // warm the cache shortly after boot
+setInterval(runUpdateCheck, 24 * 60 * 60 * 1000).unref(); // then once a day
 
 // ── Start ────────────────────────────────────────────────────
 app.listen(PORT, HOST, () => {

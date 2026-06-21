@@ -435,6 +435,9 @@
       <div class="setrow"><label class="toggle"><input type="checkbox" id="set_keep_lossless"> <b>Keep lossless originals</b></label><div class="faint small">Keep each uploaded file for lossless download. Playback still uses a 320k MP3 preview. Off = the original is discarded after conversion (saves space). Applies to new uploads.</div></div>
       <div class="setrow"><label class="toggle"><input type="checkbox" id="set_show_deleted_notes"> <b>Show deleted notes</b></label><div class="faint small">Admins see soft-deleted notes (greyed, with who &amp; when) so deletions can be reviewed.</div></div>
       <div class="setrow"><label class="toggle"><input type="checkbox" id="set_video_enabled"> <b>Video projects</b></label><div class="faint small">Allow creating video projects (video playback with the audio waveform, comments &amp; doneness). When off, all new projects are audio.</div></div>
+      <div class="setrow"><label class="toggle"><input type="checkbox" id="set_auto_update_check"> <b>Check for updates</b></label><div class="faint small">Periodically check whether this install is behind its Git origin and notify admins. It only <b>checks</b> — it never downloads, installs, or restarts; updating stays a manual step.</div>
+        <div id="updateStatus" class="small" style="margin-top:8px"></div>
+      </div>
     </div>
   </div>
 </div>
@@ -586,6 +589,7 @@ let PROJECT=null;                              // the currently-open project ({i
 let NULL_VIS=true;                             // instance setting: null-test button visible in player
 let KEEP_LOSSLESS=false;                        // instance setting: uploads keep the lossless original
 let VIDEO_ENABLED=false;                        // instance setting: video projects may be created (Phase 6)
+let UPDATE_INFO=null;                            // admin-only cached self-update status (bootstrap / SSE 'update')
 let curTrackId=null, curRevId=null;           // what's loaded in the player
 const peaksCache={};                           // revId -> {duration,peaks}
 let comments=[];                               // comments for the open track
@@ -919,7 +923,7 @@ window.addEventListener('resize',()=>{ applyVideoH(); syncBottomPad(); if(curRev
 
 async function boot(){
   const data=await api('bootstrap');
-  ME=data.user; PROJECTS=data.projects||[]; NULL_VIS=data.null_test_visible!==false; KEEP_LOSSLESS=data.keep_lossless===true; VIDEO_ENABLED=data.video_enabled===true;
+  ME=data.user; PROJECTS=data.projects||[]; NULL_VIS=data.null_test_visible!==false; KEEP_LOSSLESS=data.keep_lossless===true; VIDEO_ENABLED=data.video_enabled===true; UPDATE_INFO=data.update||null;
   $('#loginView').classList.add('hidden'); $('#mainView').classList.remove('hidden');
   $('#who').textContent=displayName(ME);
   $('#newProjectBtn').classList.toggle('hidden', ME.role!=='admin');
@@ -937,7 +941,7 @@ async function boot(){
 // ───────── projects list ─────────
 async function loadProjects(){
   const data=await api('bootstrap');
-  ME=data.user; PROJECTS=data.projects||[]; NULL_VIS=data.null_test_visible!==false; KEEP_LOSSLESS=data.keep_lossless===true; VIDEO_ENABLED=data.video_enabled===true;
+  ME=data.user; PROJECTS=data.projects||[]; NULL_VIS=data.null_test_visible!==false; KEEP_LOSSLESS=data.keep_lossless===true; VIDEO_ENABLED=data.video_enabled===true; UPDATE_INFO=data.update||null;
   applyNullVis(); renderProjects();
 }
 function renderProjects(){
@@ -979,7 +983,7 @@ function renderNav(){
   $('#nav').innerHTML = btn('projects','Projects')
     + (has?btn('player','Player'):'')
     + (manage?btn('studio','Studio'):'')
-    + (ME.role==='admin'?btn('admin','Admin')+btn('settings','Settings'):'');
+    + (ME.role==='admin'?btn('admin','Admin')+btn('settings','Settings'+(UPDATE_INFO&&UPDATE_INFO.behind>0?' <span style="color:var(--warn)" title="Update available">●</span>':'')):'');
 }
 function setView(v){
   // Guard the views that need context/role; silently fall back rather than show an empty/forbidden page.
@@ -1929,10 +1933,43 @@ function buildStudioBody(el,t){
 }
 
 // ───────── SETTINGS (admin) ─────────
-const SETTING_TOGGLES=['null_test_visible','keep_lossless','show_deleted_notes','video_enabled'];
+const SETTING_TOGGLES=['null_test_visible','keep_lossless','show_deleted_notes','video_enabled','auto_update_check'];
 async function renderSettings(){
   try{ const s=await api('settings'); SETTING_TOGGLES.forEach(k=>{ const el=$('#set_'+k); if(el) el.checked = s[k]!=='0'; }); }
   catch(e){ toast(e.message,true); }
+  renderUpdateStatus();   // show the cached status immediately; "Check now" does a live check
+}
+// Render the (admin-only) self-update status into the Settings page from UPDATE_INFO.
+function fmtUpdate(u){
+  if(!u) return 'No update check has run yet — click “Check now”.';
+  if(u.isGitRepo===false) return 'This install isn’t a Git checkout, so update checks don’t apply (you installed from a download or container image). Update by replacing the files / pulling a new image.';
+  const when = u.checked_at ? new Date(u.checked_at).toLocaleString() : '';
+  let h='';
+  if(u.behind>0){
+    h += `<b style="color:var(--warn)">Update available — ${u.behind} commit${u.behind===1?'':'s'} behind.</b>`;
+    if(u.latestSubject) h += `<div class="faint">Latest on origin: “${esc(u.latestSubject)}”${u.latest?` (${esc(u.latest)})`:''}</div>`;
+  } else if(u.behind===0){
+    h += `<b style="color:var(--done)">Up to date.</b>${u.current?` <span class="faint">(${esc(u.current)})</span>`:''}`;
+  } else {
+    h += `Couldn’t determine how far behind${u.branch?` (origin/${esc(u.branch)} not fetched yet)`:''}.`;
+  }
+  if(u.dirty) h += `<div class="faint">The server’s working tree has uncommitted local changes.</div>`;
+  if(u.fetch_error) h += `<div class="faint">Last fetch from origin failed (showing the last known state): ${esc(u.fetch_error)}</div>`;
+  h += `<div class="faint" style="margin-top:6px">To update: <code>git pull &amp;&amp; npm install</code>, then restart the app (e.g. <code>pm2 restart album-tracker</code>, <code>sudo systemctl restart album-tracker</code>, or restart the container). This page never updates for you.</div>`;
+  if(when) h += `<div class="faint" style="margin-top:4px">Last checked ${esc(when)}.</div>`;
+  return h;
+}
+function renderUpdateStatus(){
+  const box=$('#updateStatus'); if(!box) return;
+  box.innerHTML = `<div id="updateInfo">${fmtUpdate(UPDATE_INFO)}</div>`
+    + `<button id="updateCheckBtn" style="margin-top:7px;padding:5px 12px;border:1px solid var(--line);border-radius:7px;color:var(--text)">Check now</button>`;
+  $('#updateCheckBtn').addEventListener('click',checkForUpdate);
+}
+async function checkForUpdate(){
+  const btn=$('#updateCheckBtn'); if(btn){ btn.disabled=true; btn.textContent='Checking…'; }
+  try{ UPDATE_INFO=await api('update/status'); }
+  catch(e){ toast(e.message,true); }
+  renderUpdateStatus(); renderNav();   // refresh the panel + the nav badge
 }
 SETTING_TOGGLES.forEach(k=>{
   const el=document.getElementById('set_'+k); if(!el) return;
@@ -1943,6 +1980,7 @@ SETTING_TOGGLES.forEach(k=>{
       if(k==='null_test_visible'){ NULL_VIS=on; applyNullVis(); }
       if(k==='keep_lossless'){ KEEP_LOSSLESS=on; if(VIEW==='studio') renderStudio(); }
       if(k==='video_enabled'){ VIDEO_ENABLED=on; }   // gates the media-type prompt in newProjectFlow
+      if(k==='auto_update_check' && on){ checkForUpdate(); }   // turning it on → run one now
       // Re-fetch the open track's notes so toggling deleted-note visibility takes effect live
       // (the server filters per the new setting) instead of waiting for a page reload.
       if(k==='show_deleted_notes' && panelTrackId){
@@ -2208,6 +2246,8 @@ function connectEvents(){
     else if(PROJECT && d.projectId===PROJECT.id){ syncProj=true; scheduleSync(); } // the open project changed
   });
   es.addEventListener('projects',()=>{ syncList=true; scheduleSync(); });
+  // Admin-only update-available nudge (Cluster E): refresh the badge + panel, toast once.
+  es.addEventListener('update',e=>{ try{ UPDATE_INFO=JSON.parse(e.data); }catch{} renderNav(); if(VIEW==='settings') renderUpdateStatus(); if(UPDATE_INFO&&UPDATE_INFO.behind>0) toast('Update available — see Settings'); });
   // 'open' fires on first connect AND every reconnect; only a RECONNECT may have missed events → resync.
   es.addEventListener('open',()=>{ if(esWasOpen){ syncList=true; scheduleSync(); } esWasOpen=true; });
   // A transient drop leaves readyState=CONNECTING and EventSource auto-reconnects (the 'open' above
