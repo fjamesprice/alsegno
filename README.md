@@ -55,7 +55,28 @@ Emailing `whatever_v3_r09.mp3` around and getting back "the twangy part is too l
 
 ## Quick start
 
-**Docker** (ffmpeg baked into the image):
+**Download a release** — no git, no Docker, the easiest way:
+
+1. Grab the latest `alsegno-x.y.z.zip` from the [**Releases**](https://github.com/fjamesprice/alsegno/releases/latest) page and unzip it.
+2. From the unzipped `alsegno` folder, run the installer:
+   - **macOS** — `./install.sh` in Terminal (or double-click `start-macos.command`; if macOS blocks it as "unidentified", run `xattr -dr com.apple.quarantine .` in the folder first, or use **System Settings → Privacy & Security → Open Anyway**)
+   - **Windows** — double-click `start-windows.cmd`
+   - **Linux** — `./install.sh`
+
+It checks for **Node ≥ 18** and `ffmpeg`/`ffprobe`, prints a one-line install hint if either is missing, writes a `.env` with a random secret, and offers to start the app on boot. Then open the URL it prints (default http://localhost:3458).
+
+<details>
+<summary>Prefer git, or Docker?</summary>
+
+**git clone** (same installer, always the latest code, updates with `git pull`):
+
+```bash
+git clone https://github.com/fjamesprice/alsegno.git
+cd alsegno
+./install.sh          # Linux / macOS   (Windows: install.ps1)
+```
+
+**Docker** (Node + ffmpeg baked into the image):
 
 ```bash
 git clone https://github.com/fjamesprice/alsegno.git
@@ -63,14 +84,7 @@ cd alsegno
 SESSION_SECRET=$(openssl rand -hex 48) docker compose up -d --build
 # then open http://localhost:3458
 ```
-
-**Native** (Node ≥ 18 + `ffmpeg`/`ffprobe` on PATH):
-
-```bash
-git clone https://github.com/fjamesprice/alsegno.git
-cd alsegno
-./install.sh          # Linux / macOS   (Windows: install.ps1)
-```
+</details>
 
 The **first login** for the admin account sets its password (trust-on-first-use). Services, reverse-proxy/HTTPS, and all configuration are covered in **[INSTALL.md](INSTALL.md)**.
 

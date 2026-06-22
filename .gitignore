@@ -10,6 +10,9 @@ uploads/
 # ── Dependencies ───────────────────────────────────────
 node_modules/
 
+# ── Release build output (scripts/package-release.sh) ──
+dist/
+
 # ── Local Claude Code state (machine-specific) ─────────
 .claude/settings.local.json
 .claude/*.lock

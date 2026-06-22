@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # alsegno — installer for Linux & macOS.
-# Takes a fresh clone to a running app with a first admin login.
+# Takes a fresh download (or clone) to a running app with a first admin login.
 #
 #   ./install.sh              interactive: prompts for port / admin / LAN exposure / service
 #   ./install.sh --yes        non-interactive: accept every default

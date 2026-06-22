@@ -11,9 +11,9 @@ and uploaded audio in `uploads/`, both created on first run.
 
 ## Prerequisites
 
-| Requirement        | Why | Check |
-| ------------------ | --- | ----- |
-| **Node.js ≥ 18**   | Runs the server. | `node -v` |
+| Requirement                    | Why                                                                                          | Check             |
+| ------------------------------ | -------------------------------------------------------------------------------------------- | ----------------- |
+| **Node.js ≥ 18**               | Runs the server.                                                                             | `node -v`         |
 | **ffmpeg + ffprobe** on `PATH` | Every upload is transcoded/analysed (waveform, LUFS, true-peak). Without them, uploads fail. | `ffmpeg -version` |
 
 The installer checks both and prints OS-specific install hints if either is missing.
@@ -30,26 +30,33 @@ Installing ffmpeg manually, if you prefer:
 
 ## Quick start
 
-This is the **native install** (Node + ffmpeg on the host). Prefer containers? Skip to
+This is the **native install** (Node + ffmpeg on the host). For Docker, skip to
 [Option B: Run with Docker](#option-b-run-with-docker) — ffmpeg and Node come baked into the image.
 
-Clone the repo, then run the installer for your OS.
+### 1. Get the files
 
-### Linux / macOS
+**Download a release (recommended — no git needed).** Grab the latest `alsegno-x.y.z.zip`
+(or `.tar.gz`) from the [Releases page](https://github.com/fjamesprice/alsegno/releases/latest)
+and unzip it. You get a single `alsegno` folder with everything in it.
+
+**Or clone the repo** — tracks the latest code and lets you update with `git pull`:
 
 ```bash
-git clone <your-repo-url> alsegno
+git clone https://github.com/fjamesprice/alsegno.git alsegno
 cd alsegno
-./install.sh
 ```
 
-### Windows (PowerShell)
+### 2. Run the installer
 
-```powershell
-git clone <your-repo-url> alsegno
-cd alsegno
-powershell -ExecutionPolicy Bypass -File .\install.ps1
-```
+From inside the `alsegno` folder:
+
+- **macOS** — in Terminal: `./install.sh` (the reliable path — Terminal isn't affected by macOS
+  download quarantine). To use the double-click `start-macos.command` instead, first clear the
+  quarantine flag browsers add: run `xattr -dr com.apple.quarantine .` from the `alsegno` folder,
+  or, after a blocked launch, open **System Settings → Privacy & Security** and click **Open Anyway**.
+- **Linux** — `./install.sh`
+- **Windows** — double-click `start-windows.cmd`, or in PowerShell:
+  `powershell -ExecutionPolicy Bypass -File .\install.ps1`
 
 The installer will:
 
@@ -68,11 +75,11 @@ sign-up step). From the admin pages you can then add users and create projects.
 
 ### Installer options
 
-| Flag (sh / ps1)            | Effect |
-| -------------------------- | ------ |
-| `--yes` / `-Yes`           | Non-interactive: accept every default (port 3458, admin `james`, localhost-only, install service). |
-| `--no-service` / `-NoService` | Do everything except install/start a service; just print the start command. |
-| `-h` / `--help`            | (sh) Show usage. |
+| Flag (sh / ps1)               | Effect                                                                                             |
+| ----------------------------- | -------------------------------------------------------------------------------------------------- |
+| `--yes` / `-Yes`              | Non-interactive: accept every default (port 3458, admin `james`, localhost-only, install service). |
+| `--no-service` / `-NoService` | Do everything except install/start a service; just print the start command.                        |
+| `-h` / `--help`               | (sh) Show usage.                                                                                   |
 
 Re-running the installer is safe: an existing `.env` is **never overwritten**, and the
 service step backs off if the port is already in use.
@@ -86,7 +93,7 @@ need **Docker** with the Compose plugin (check with `docker compose version`). T
 Node 22 and ffmpeg — nothing else is required on the host (you can skip the Prerequisites above).
 
 ```bash
-git clone <your-repo-url> alsegno
+git clone https://github.com/fjamesprice/alsegno.git alsegno
 cd alsegno
 
 # A long random secret that signs session cookies (keep it stable — changing it logs everyone out):
@@ -118,6 +125,7 @@ transcoded audio/video). They survive `docker compose down`. Remove them deliber
 `docker compose down -v`, which **permanently deletes all data**.
 
 **Managing it:**
+
 ```bash
 docker compose ps                 # status + health
 docker compose logs -f            # live logs
@@ -129,6 +137,7 @@ docker compose down               # stop & remove the container (volumes/data ke
 the container; your volumes (and data) are untouched. The schema migrates itself on startup.
 
 **Notes & caveats:**
+
 - **One writer only.** SQLite allows a single writer, so run exactly one replica — don't
   `docker compose up --scale alsegno=2` or set `deploy.replicas` > 1.
 - **Exposing on your network.** The compose file publishes the port on all host interfaces, so
@@ -155,14 +164,14 @@ the container; your volumes (and data) are untouched. The schema migrates itself
 The installer writes these; you can edit `.env` by hand and restart afterwards. See
 `.env.example` for the annotated template.
 
-| Key              | Default      | Meaning |
-| ---------------- | ------------ | ------- |
-| `PORT`           | `3458`       | Port the server listens on. |
-| `HOST`           | `127.0.0.1`  | Bind address. `127.0.0.1` = this machine only. `0.0.0.0` = reachable from other devices on your network. |
-| `SESSION_SECRET` | *(random)*   | Signs session cookies. Keep it secret; changing it logs everyone out. |
-| `ADMIN_USER`     | `admin`      | Username of the first/owner admin, seeded on first run. The install scripts default it to your OS account name; the Docker image defaults to `admin`. |
-| `DATA_DIR`       | `./data`     | Where `tracker.db` lives. Optional. |
-| `UPLOADS_DIR`    | `./uploads`  | Where uploaded/transcoded audio lives (this is the "media store"). Optional. |
+| Key              | Default     | Meaning                                                                                                                                               |
+| ---------------- | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PORT`           | `3458`      | Port the server listens on.                                                                                                                           |
+| `HOST`           | `127.0.0.1` | Bind address. `127.0.0.1` = this machine only. `0.0.0.0` = reachable from other devices on your network.                                              |
+| `SESSION_SECRET` | *(random)*  | Signs session cookies. Keep it secret; changing it logs everyone out.                                                                                 |
+| `ADMIN_USER`     | `admin`     | Username of the first/owner admin, seeded on first run. The install scripts default it to your OS account name; the Docker image defaults to `admin`. |
+| `DATA_DIR`       | `./data`    | Where `tracker.db` lives. Optional.                                                                                                                   |
+| `UPLOADS_DIR`    | `./uploads` | Where uploaded/transcoded audio lives (this is the "media store"). Optional.                                                                          |
 
 ### ⚠️ Exposing on a network (`HOST=0.0.0.0`)
 
@@ -179,6 +188,7 @@ uses relative URLs throughout, so it works unchanged behind a sub-path proxy.
 If you let the installer set up a service, it's already running and will start on boot.
 
 **Linux (systemd):**
+
 ```bash
 sudo systemctl status alsegno      # is it running?
 sudo systemctl restart alsegno     # apply changes / after editing .env
@@ -187,6 +197,7 @@ journalctl -u alsegno -f           # live logs
 ```
 
 **macOS (launchd):**
+
 ```bash
 launchctl unload ~/Library/LaunchAgents/com.alsegno.server.plist   # stop
 launchctl load   ~/Library/LaunchAgents/com.alsegno.server.plist   # start
@@ -194,6 +205,7 @@ launchctl load   ~/Library/LaunchAgents/com.alsegno.server.plist   # start
 ```
 
 **Windows (NSSM):**
+
 ```powershell
 nssm restart alsegno
 nssm stop alsegno
@@ -202,6 +214,7 @@ nssm remove alsegno confirm   # uninstall the service
 ```
 
 **No service (manual / development):**
+
 ```bash
 npm start         # runs node server.js in the foreground; Ctrl-C to stop
 ```
@@ -214,12 +227,30 @@ boot start.
 
 ## Updating
 
+**If you cloned with git:**
+
 ```bash
 git pull
 npm install          # in case dependencies changed
 # then restart the service, e.g.:
 sudo systemctl restart alsegno
 ```
+
+**If you downloaded a release:** stop the app, then extract the newer release **over** your
+existing `alsegno` folder so the code is replaced in place. Your `data/`, `uploads/`, and `.env`
+aren't in the archive, so they stay exactly as they are — your database, media, and login carry
+straight over. From a terminal in the directory that *contains* `alsegno`:
+
+```bash
+tar xzf alsegno-x.y.z.tar.gz      # or:  unzip -o alsegno-x.y.z.zip
+cd alsegno
+npm install                       # in case dependencies changed
+sudo systemctl restart alsegno    # or your service manager, or `npm start`
+```
+
+Because the folder path doesn't change, the service you installed keeps working as-is. (Don't
+skip `npm install`: a release may bump a native dependency, and the old `node_modules` would
+otherwise be stale.)
 
 The database schema migrates itself on startup (additive only — no data loss).
 
