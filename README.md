@@ -63,7 +63,7 @@ Emailing `whatever_v3_r09.mp3` around and getting back "the twangy part is too l
    - **Windows** — double-click `start-windows.cmd`
    - **Linux** — `./install.sh`
 
-It checks for **Node ≥ 18** and `ffmpeg`/`ffprobe`, prints a one-line install hint if either is missing, writes a `.env` with a random secret, and offers to start the app on boot. Then open the URL it prints (default http://localhost:3458).
+It checks for **Node ≥ 18** and `ffmpeg`/`ffprobe` (with a one-line install hint if either is missing) and writes a `.env` with a random secret. The double-click launchers then **start alsegno and open it in your browser**; unless you opt into a boot service, alsegno runs in that window — keep it open while you use it, and close it (or press Ctrl+C) to stop. (Default URL: http://localhost:3458.)
 
 <details>
 <summary>Prefer git, or Docker?</summary>

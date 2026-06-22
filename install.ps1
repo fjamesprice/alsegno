@@ -5,6 +5,10 @@
     powershell -ExecutionPolicy Bypass -File .\install.ps1            # interactive
     powershell -ExecutionPolicy Bypass -File .\install.ps1 -Yes       # accept defaults
     powershell -ExecutionPolicy Bypass -File .\install.ps1 -NoService # set up only, no service
+    powershell -ExecutionPolicy Bypass -File .\install.ps1 -Launch    # set up, then start the app
+
+  -Launch is what start-windows.cmd uses: after setup it opens the app in your browser, and
+  (unless you installed a boot service) runs the app in this window — close it to stop.
 
   Safe to re-run: an existing .env is never overwritten, and the service step backs off
   if the port is already in use.
@@ -14,7 +18,8 @@
 [CmdletBinding()]
 param(
   [switch]$NoService,
-  [switch]$Yes
+  [switch]$Yes,
+  [switch]$Launch
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -23,11 +28,18 @@ $RepoDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $RepoDir
 $ServiceName    = 'alsegno'
 $ServiceStarted = $false
+$ServiceInstalledButStopped = $false   # a boot service was installed but failed to start
 
 function Info($m){ Write-Host "==> $m" -ForegroundColor Cyan }
 function Ok($m)  { Write-Host "  ok  $m" -ForegroundColor Green }
 function Warn($m){ Write-Host "warn  $m" -ForegroundColor Yellow }
-function Die($m) { Write-Host "error $m" -ForegroundColor Red; exit 1 }
+function Die($m) {
+  Write-Host "error $m" -ForegroundColor Red
+  # When double-clicked via start-windows.cmd the window would otherwise vanish before the
+  # error can be read, so hold it open until the user acknowledges.
+  if($Launch){ Write-Host ""; Read-Host "Setup stopped. Press Enter to close" | Out-Null }
+  exit 1
+}
 function Have($c){ [bool](Get-Command $c -ErrorAction SilentlyContinue) }
 
 function AskYN($q,$def){
@@ -162,6 +174,7 @@ if($NoService){
         Ok "Service '$ServiceName' installed and started (NSSM)."
         Write-Host "  Manage:  nssm {stop|start|restart|remove} $ServiceName"
       } else {
+        $ServiceInstalledButStopped = $true
         Warn "Service '$ServiceName' is installed but did not start (exit $LASTEXITCODE). Check data\alsegno.err.log, then run: nssm start $ServiceName"
       }
     }
@@ -184,12 +197,68 @@ if($NoService){
 
 # ── done ─────────────────────────────────────────────────────
 $urlHost = if($HostVal -eq '0.0.0.0'){ 'localhost' } else { $HostVal }
+$url = "http://${urlHost}:$PortVal"
 Write-Host ""
 Ok "Setup complete."
-Write-Host "  Open:  http://${urlHost}:$PortVal"
+Write-Host "  Open:  $url"
 if($HostVal -eq '0.0.0.0'){ Write-Host "         (or http://<this-machine-ip>:$PortVal from another device on your network)" }
 Write-Host "  Log in as '$AdminVal' - the password you type on its FIRST login becomes the account password."
-if(-not $ServiceStarted){
+
+if($Launch){
+  if($ServiceInstalledButStopped){
+    # A boot service is installed but didn't start. Do NOT run a foreground copy - it would fight
+    # the service for the port the next time the service (auto)starts. Help the user recover instead.
+    Write-Host ""
+    Warn "A background service 'alsegno' is installed but isn't running."
+    Warn "Fix the cause (see data\alsegno.err.log), then run:  nssm start $ServiceName"
+    Write-Host ""
+    Read-Host "Press Enter to close" | Out-Null
+  } elseif($ServiceStarted){
+    # We started a boot service. Wait until it's actually listening, THEN open the browser - the
+    # service-control call returns before node has bound the port, so opening immediately races it.
+    Write-Host ""
+    Ok "alsegno is starting as a background service..."
+    for($i=0; $i -lt 150 -and -not (PortInUse $HostVal $PortVal); $i++){ Start-Sleep -Milliseconds 200 }
+    Ok "Opening $url ..."
+    try { Start-Process $url } catch {}
+  } elseif(PortInUse $HostVal $PortVal){
+    # Something already holds the port and we didn't start it: maybe an alsegno instance you already
+    # have open, maybe another program. Don't claim success, and don't risk an EADDRINUSE crash.
+    Write-Host ""
+    Warn "Port $PortVal is already in use."
+    Write-Host "  If alsegno is already running, it's at $url (opening it now)."
+    Write-Host "  If another program uses that port, set a different PORT in .env and run this again."
+    try { Start-Process $url } catch {}
+    Write-Host ""
+    Read-Host "Press Enter to close" | Out-Null
+  } else {
+    # No background service: run the app in THIS window. The window IS the running app.
+    Write-Host ""
+    Ok "Starting alsegno. Keep this window open while you use it; close it (or press Ctrl+C) to stop."
+    # Open the browser once the server is accepting connections, without blocking the server.
+    Start-Job -ScriptBlock {
+      param($u,$p)
+      for($i=0; $i -lt 150; $i++){
+        try { $c = New-Object Net.Sockets.TcpClient; $c.Connect('127.0.0.1',[int]$p); $c.Close(); break }
+        catch { Start-Sleep -Milliseconds 200 }
+      }
+      try { Start-Process $u } catch {}
+    } -ArgumentList $url,$PortVal | Out-Null
+    Write-Host ""
+    # Run node directly (not 'npm start') so there's no npm.cmd batch wrapper: Ctrl+C stops cleanly
+    # with no "Terminate batch job (Y/N)?" prompt, and we get node's real exit code below.
+    & $NodePath $ServerJs
+    if($LASTEXITCODE -ne 0){
+      # node exited on its own - a crash (e.g. a port grabbed after our check, or a broken native
+      # module). A user Ctrl+C / window-close does NOT reach here, so this only fires on real failure.
+      Write-Host ""
+      Warn "alsegno stopped unexpectedly (exit $LASTEXITCODE). The error is shown above."
+      Write-Host "  If the port is already in use, an instance or service may already be running."
+      Read-Host "Press Enter to close" | Out-Null
+    }
+  }
+} elseif(-not $ServiceStarted){
+  # Ran as a plain installer (not via the launcher): tell the user how to start it themselves.
   Write-Host ""
   Warn "The app is not running yet - start it with 'npm start', then open the URL."
 }

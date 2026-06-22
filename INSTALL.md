@@ -69,6 +69,12 @@ The installer will:
    (systemd on Linux, launchd on macOS, NSSM on Windows).
 6. Print the URL to open.
 
+If you launched via **`start-windows.cmd` / `start-macos.command`** (or passed `--launch` /
+`-Launch`), it then goes one step further: it **opens the app in your browser**, and — unless you
+installed a boot service — **runs the app right in that window**. Keep the window open while you
+use alsegno; close it (or press Ctrl+C) to stop. Running `install.sh` / `install.ps1` *directly*
+just sets things up and tells you how to start it.
+
 When it finishes, open the printed URL and **log in as your admin username**. The very first
 login sets that account's password permanently (trust-on-first-use — there is no separate
 sign-up step). From the admin pages you can then add users and create projects.

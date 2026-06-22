@@ -6,6 +6,7 @@
 #   ./install.sh              interactive: prompts for port / admin / LAN exposure / service
 #   ./install.sh --yes        non-interactive: accept every default
 #   ./install.sh --no-service set up only; don't install or start a background service
+#   ./install.sh --launch     set up, then start the app + open the browser (start-macos.command uses this)
 #
 # Safe to re-run: an existing .env is never overwritten, and the service step backs off
 # if the port is already in use (so it won't fight an instance you're already running).
@@ -17,11 +18,13 @@ set -euo pipefail
 # ── args ─────────────────────────────────────────────────────
 SKIP_SERVICE=0
 ASSUME_YES=0
-usage() { sed -n '3,11p' "$0" | sed 's/^# \{0,1\}//'; }
+LAUNCH=0
+usage() { sed -n '3,12p' "$0" | sed 's/^# \{0,1\}//'; }
 for arg in "$@"; do
   case "$arg" in
     --no-service) SKIP_SERVICE=1 ;;
     --yes|-y)     ASSUME_YES=1 ;;
+    --launch)     LAUNCH=1 ;;
     -h|--help)    usage; exit 0 ;;
     *) printf 'Unknown option: %s\n' "$arg" >&2; usage; exit 1 ;;
   esac
@@ -290,12 +293,54 @@ fi
 
 # ── done ─────────────────────────────────────────────────────
 url_host="$HOST_VAL"; [ "$HOST_VAL" = "0.0.0.0" ] && url_host="localhost"
+URL="http://$url_host:$PORT_VAL"
 say ""
 ok "${BOLD}Setup complete.${RST}"
-say "  Open:  ${BOLD}http://$url_host:$PORT_VAL${RST}"
+say "  Open:  ${BOLD}$URL${RST}"
 [ "$HOST_VAL" = "0.0.0.0" ] && say "         (or http://<this-machine-ip>:$PORT_VAL from another device on your network)"
 say "  Log in as ${BOLD}$ADMIN_VAL${RST} — the password you type on its FIRST login becomes the account password."
-if [ "$SERVICE_STARTED" != 1 ]; then
+
+# best-effort "open in browser" (no-op on a headless box, which is fine)
+open_url() {
+  if [ "$PLATFORM" = macos ] && have open; then ( open "$1" >/dev/null 2>&1 & )
+  elif have xdg-open; then ( xdg-open "$1" >/dev/null 2>&1 & )
+  fi
+}
+
+if [ "$LAUNCH" = 1 ]; then
+  if [ "$SERVICE_STARTED" = 1 ]; then
+    # We started a boot service. Wait until it's actually listening, THEN open the browser — the
+    # service manager returns before the server has bound the port, so opening immediately races it.
+    say ""
+    ok "alsegno is starting as a background service…"
+    for _ in $(seq 1 150); do
+      if (exec 3<>"/dev/tcp/127.0.0.1/$PORT_VAL") 2>/dev/null; then exec 3>&- 3<&-; break; fi
+      sleep 0.2
+    done
+    ok "Opening $URL …"
+    open_url "$URL"
+  elif port_in_use "$HOST_VAL" "$PORT_VAL"; then
+    # Something already holds the port and we didn't start it: maybe an alsegno instance you already
+    # have open, maybe another program. Don't claim success, and don't risk an address-in-use crash.
+    say ""
+    warn "Port $PORT_VAL is already in use."
+    say "  If alsegno is already running, it's at $URL (opening it now)."
+    say "  If another program uses that port, set a different PORT in .env and run this again."
+    open_url "$URL"
+  else
+    # No background service: run the app in THIS window. The window IS the running app.
+    say ""
+    ok "${BOLD}Starting alsegno.${RST} Keep this window open while you use it; press Ctrl+C (or close it) to stop."
+    # Open the browser once the server is accepting connections, without blocking 'npm start'.
+    ( for _ in $(seq 1 150); do
+        if (exec 3<>"/dev/tcp/127.0.0.1/$PORT_VAL") 2>/dev/null; then exec 3>&- 3<&-; open_url "$URL"; break; fi
+        sleep 0.2
+      done ) &
+    say ""
+    npm start               # blocks until the window is closed / Ctrl+C — the window IS the app
+  fi
+elif [ "$SERVICE_STARTED" != 1 ]; then
+  # Ran as a plain installer (not via the launcher): tell the user how to start it themselves.
   say ""
   warn "The app is not running yet — start it (see above), then open the URL."
 fi
