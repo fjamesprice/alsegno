@@ -13,6 +13,9 @@ node_modules/
 # ── Release build output (scripts/package-release.sh) ──
 dist/
 
+# ── Auto-downloaded helper binaries (e.g. cloudflared for SHARE=cloudflare) ──
+bin/
+
 # ── Local Claude Code state (machine-specific) ─────────
 .claude/settings.local.json
 .claude/*.lock

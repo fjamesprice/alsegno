@@ -176,6 +176,7 @@ The installer writes these; you can edit `.env` by hand and restart afterwards. 
 | `HOST`           | `127.0.0.1` | Bind address. `127.0.0.1` = this machine only. `0.0.0.0` = reachable from other devices on your network.                                              |
 | `SESSION_SECRET` | *(random)*  | Signs session cookies. Keep it secret; changing it logs everyone out.                                                                                 |
 | `ADMIN_USER`     | `admin`     | Username of the first/owner admin, seeded on first run. The install scripts default it to your OS account name; the Docker image defaults to `admin`. |
+| `SHARE`          | `local`     | How the `start-*` launchers expose the app: `local` (this machine), `lan` (= `HOST=0.0.0.0`), `cloudflare` (public quick-tunnel link), or `tailscale` (Funnel link). Set by the installer's reach menu. |
 | `DATA_DIR`       | `./data`    | Where `tracker.db` lives. Optional.                                                                                                                   |
 | `UPLOADS_DIR`    | `./uploads` | Where uploaded/transcoded audio lives (this is the "media store"). Optional.                                                                          |
 
@@ -186,6 +187,29 @@ a client reviewing a mix from their phone. But the bare port speaks **plain HTTP
 TLS**, so only do this on a network you trust. For internet-facing deployments, keep
 `HOST=127.0.0.1` and put a reverse proxy (nginx, Caddy) with HTTPS in front of it — the app
 uses relative URLs throughout, so it works unchanged behind a sub-path proxy.
+
+### Sharing a link over the internet (no router setup)
+
+The installer's **"How should people reach alsegno?"** menu can set up an *outbound* tunnel, so you
+can send a reviewer a working `https://` link **without opening any ports on your router**. Your
+choice is saved as `SHARE` in `.env`, and the `start-windows.cmd` / `start-macos.command` launchers
+act on it each time they start the app:
+
+- **`SHARE=cloudflare`** — the launcher downloads Cloudflare's official `cloudflared` (~35 MB, into
+  `./bin/` the first time) and runs a free **quick tunnel**, printing a public
+  `https://…trycloudflare.com` link. No account, no config. The link is **new each time you start**
+  (quick tunnels are ephemeral) — fine for one-off reviews. Closing the window (or Ctrl+C) stops both
+  the app and the tunnel.
+- **`SHARE=tailscale`** — the launcher publishes the app with **Tailscale Funnel** for a **stable**
+  link (`https://<machine>.<tailnet>.ts.net`). Install Tailscale, run `tailscale up`, and enable
+  Funnel once; the link then persists across restarts. If Tailscale isn't installed or signed in, the
+  launcher prints the steps and falls back to a local run.
+
+**Security.** These links are public: anyone with the URL reaches alsegno's **login page**. Access is
+still gated by alsegno's own auth (invite links + trust-on-first-use passwords) and the random URLs
+are unguessable — but treat the link like a password and only send it to people you want reviewing.
+For a permanent, fully-controlled setup, prefer a reverse proxy with HTTPS on your own domain (or a
+Cloudflare *named* tunnel) over a quick tunnel.
 
 ---
 

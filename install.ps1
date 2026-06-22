@@ -54,6 +54,44 @@ function AskVal($q,$def){
   $a = Read-Host "$q [$def]"
   if([string]::IsNullOrWhiteSpace($a)){ return $def } else { return $a }
 }
+function ReachLabel($share,$port){
+  switch($share){
+    'lan'        { "your local network - http://<this-computer-ip>:$port" }
+    'cloudflare' { "a public Cloudflare link (a fresh one each time you start)" }
+    'tailscale'  { "a public Tailscale Funnel link" }
+    default      { "this computer only - http://localhost:$port" }
+  }
+}
+# AskReach: returns @{ Share=...; HostAddr=... } from a menu (defaults to local under -Yes).
+function AskReach($port){
+  if($Yes){ return @{ Share='local'; HostAddr='127.0.0.1' } }
+  Write-Host ""
+  Write-Host "How should people reach alsegno?" -ForegroundColor White
+  Write-Host ""
+  Write-Host "  1) This computer only  (default - most private)"
+  Write-Host "     Just this machine, at http://localhost:$port. Choose this if alsegno is only for"
+  Write-Host "     you, or if you'll put your own reverse proxy / HTTPS in front of it."
+  Write-Host ""
+  Write-Host "  2) Your local network (Wi-Fi/LAN)"
+  Write-Host "     Other devices on your network reach http://<this-computer-ip>:$port - handy to review"
+  Write-Host "     from your phone at home. Plain HTTP (no HTTPS); use only on a network you trust."
+  Write-Host ""
+  Write-Host "  3) A shareable internet link - Cloudflare  (no router setup, no account)"
+  Write-Host "     Downloads Cloudflare's free 'cloudflared' (~35 MB, official) and gives you a public"
+  Write-Host "     https://...trycloudflare.com link when you start. Simplest way to send someone a link."
+  Write-Host "     The link is a new one each time you start the app."
+  Write-Host ""
+  Write-Host "  4) A shareable internet link - Tailscale  (stable link, needs a free account)"
+  Write-Host "     A permanent https://...ts.net link. You install Tailscale, sign in, and turn on Funnel"
+  Write-Host "     once; the link then stays the same. Whoever you send it to needs nothing installed."
+  Write-Host ""
+  switch(AskVal 'Choose 1-4' '1'){
+    '2'     { Warn "Local-network mode has no HTTPS - only use it on a network you trust."; return @{ Share='lan'; HostAddr='0.0.0.0' } }
+    '3'     { return @{ Share='cloudflare'; HostAddr='127.0.0.1' } }
+    '4'     { return @{ Share='tailscale';  HostAddr='127.0.0.1' } }
+    default { return @{ Share='local';      HostAddr='127.0.0.1' } }
+  }
+}
 function PortInUse($h,$p){
   # Probe the address the server actually binds. A 0.0.0.0 (or ::) listener accepts on loopback,
   # so map those to 127.0.0.1; otherwise probe the specific host so a LAN-IP bind is detected too.
@@ -110,29 +148,49 @@ if(Test-Path $EnvFile){
   Ok ".env already exists - leaving it untouched"
 } else {
   Info "Generating .env..."
-  $portVal  = AskVal 'Port to listen on' '3458'
-  # ^\d{1,5}$ caps the value at 99999 so the [int] casts below can never overflow Int32 (which
-  # would throw an unhandled error under StrictMode/Stop); -gt 65535 still rejects 65536-99999.
-  if($portVal -notmatch '^\d{1,5}$' -or [int]$portVal -lt 1 -or [int]$portVal -gt 65535){
-    Die "Port must be a number 1-65535 (got '$portVal')."
-  }
+  Write-Host "I'll ask three quick things. After the last one you'll get a summary and can redo them all."
   # Default the owner-admin to the current Windows account, not a hardcoded name.
   $defaultAdmin = if([string]::IsNullOrWhiteSpace($env:USERNAME)){ 'admin' } else { $env:USERNAME }
-  $adminVal = AskVal 'Admin username (its FIRST login sets the password)' $defaultAdmin
-  $hostVal  = '127.0.0.1'
-  if(AskYN "Make the app reachable from other devices on your network (LAN)?" 'N'){
-    $hostVal = '0.0.0.0'
-    Warn "Binding to 0.0.0.0 - only on a network you trust (the bare port has no HTTPS)."
+  $portVal = ''; $adminVal = ''; $shareVal = 'local'; $hostVal = '127.0.0.1'
+  # Loop so a typo is fixable: answer "no" at the summary to go back and re-enter everything.
+  while($true){
+    # ── Port ──
+    Write-Host ""
+    Write-Host "Port - the number in the web address, e.g. http://localhost:3458."
+    Write-Host "Keep the default unless 3458 is already used by another program."
+    $portVal = AskVal 'Port' '3458'
+    # ^\d{1,5}$ caps the value at 99999 so the [int] casts can never overflow Int32; -gt 65535 still rejects 65536-99999.
+    if($portVal -notmatch '^\d{1,5}$' -or [int]$portVal -lt 1 -or [int]$portVal -gt 65535){
+      Warn "Port must be a number 1-65535 - let's try again."; continue
+    }
+    # ── Admin username ──
+    Write-Host ""
+    Write-Host "Admin username - a NAME for the owner account (e.g. '$defaultAdmin'). This is NOT a password."
+    Write-Host "You'll choose the password later, the first time you log in. Lowercase, no spaces."
+    $adminVal = AskVal 'Admin username' $defaultAdmin
+    # ── How people reach it ──
+    $reach = AskReach $portVal
+    $shareVal = $reach.Share; $hostVal = $reach.HostAddr
+    # ── Review & confirm (answer "no" to go back and redo all three) ──
+    Write-Host ""
+    Write-Host "Please check these:" -ForegroundColor White
+    Write-Host "  Port:           $portVal"
+    Write-Host "  Admin username: $adminVal  (you'll set its password on first login)"
+    Write-Host "  Reachable via:  $(ReachLabel $shareVal $portVal)"
+    Write-Host ""
+    if(AskYN "Is this correct?" 'Y'){ break }
+    Write-Host ""
+    Info "No problem - let's go through them again."
   }
   $secret = node -e "process.stdout.write(require('crypto').randomBytes(48).toString('hex'))"
-  @("PORT=$portVal","HOST=$hostVal","SESSION_SECRET=$secret","ADMIN_USER=$adminVal") `
+  @("PORT=$portVal","HOST=$hostVal","SESSION_SECRET=$secret","ADMIN_USER=$adminVal","SHARE=$shareVal") `
     -join "`r`n" | Set-Content -Path $EnvFile -Encoding ascii
   # Mirror the chmod 600 the sh installer applies: the file holds SESSION_SECRET, so strip inherited
   # ACEs and grant only the current user — otherwise a repo cloned outside the user profile (e.g. C:\)
   # inherits a readable-by-all-users ACL and the cookie-signing secret leaks to other local accounts.
   try { icacls $EnvFile /inheritance:r /grant:r "$($env:USERNAME):F" | Out-Null }
   catch { Warn "Could not restrict .env permissions (continuing): $_" }
-  Ok ".env written (random SESSION_SECRET; admin=$adminVal; HOST=$hostVal; PORT=$portVal)"
+  Ok ".env written (random SESSION_SECRET; admin=$adminVal; reach=$shareVal; PORT=$portVal)"
 }
 
 function GetEnv($key){
@@ -142,6 +200,7 @@ function GetEnv($key){
 $PortVal  = GetEnv 'PORT';       if(-not $PortVal){ $PortVal = '3458' }
 $HostVal  = GetEnv 'HOST';       if(-not $HostVal){ $HostVal = '127.0.0.1' }
 $AdminVal = GetEnv 'ADMIN_USER'; if(-not $AdminVal){ $AdminVal = 'james' }
+$ShareVal = GetEnv 'SHARE';      if(-not $ShareVal){ $ShareVal = 'local' }
 $NodePath = (Get-Command node).Source
 $ServerJs = Join-Path $RepoDir 'server.js'
 
@@ -151,6 +210,11 @@ if($NoService){
   Write-Host "  Start it with:  npm start"
 } elseif(PortInUse $HostVal $PortVal){
   Warn "Port $PortVal is already in use - an instance may already be running. Skipping service install."
+} elseif($ShareVal -eq 'cloudflare' -or $ShareVal -eq 'tailscale'){
+  # A boot service runs only `node server.js` - it never recreates the tunnel/link. Offering
+  # "start on boot" here would mislead a share-mode user into thinking their link stays live.
+  Info "You chose a shareable link, which runs from this launcher window - skipping the boot-service step."
+  Write-Host "  (A boot service would start alsegno locally on boot, but would NOT recreate your public link.)"
 } elseif(AskYN "Install a Windows service so the app starts on boot?" 'Y'){
   if(Have nssm){
     # Note: $ErrorActionPreference='Stop' does NOT abort on a native exe's non-zero exit, so each
@@ -204,8 +268,128 @@ Write-Host "  Open:  $url"
 if($HostVal -eq '0.0.0.0'){ Write-Host "         (or http://<this-machine-ip>:$PortVal from another device on your network)" }
 Write-Host "  Log in as '$AdminVal' - the password you type on its FIRST login becomes the account password."
 
+# ── shareable-link helpers (SHARE=cloudflare / tailscale) ────
+$script:AppProc = $null
+$script:CfProc  = $null
+$script:CfBin   = ''
+$script:ShareOk = $false
+# Start the app in the background if nothing already serves the port. -NoNewWindow keeps node
+# attached to THIS console, so closing the window (CTRL_CLOSE) stops it too.
+function Ensure-AppRunning {
+  if(PortInUse $HostVal $PortVal){ return $true }
+  Ok "Starting alsegno..."
+  $log = Join-Path $RepoDir 'data\alsegno.log'; $errlog = Join-Path $RepoDir 'data\alsegno.err.log'
+  $script:AppProc = Start-Process -FilePath $NodePath -ArgumentList $ServerJs -NoNewWindow -PassThru -RedirectStandardOutput $log -RedirectStandardError $errlog
+  for($i=0; $i -lt 150 -and -not (PortInUse $HostVal $PortVal); $i++){ Start-Sleep -Milliseconds 200 }
+  if(PortInUse $HostVal $PortVal){ return $true }
+  Warn "alsegno didn't start (see data\alsegno.err.log)."; return $false
+}
+# Download Cloudflare's cloudflared into .\bin if it isn't already available; sets $script:CfBin.
+# Is the file a runnable cloudflared? (guards against a truncated download being cached + re-run forever)
+function Test-CfBinary($p){
+  if(-not (Test-Path $p)){ return $false }
+  try { & $p --version *> $null; return ($LASTEXITCODE -eq 0) } catch { return $false }
+}
+function Ensure-Cloudflared {
+  $c = Get-Command cloudflared -ErrorAction SilentlyContinue
+  if($c){ $script:CfBin = $c.Source; return $true }
+  $bindir = Join-Path $RepoDir 'bin'; $script:CfBin = Join-Path $bindir 'cloudflared.exe'
+  if(Test-CfBinary $script:CfBin){ return $true }                                   # cached + runnable
+  Remove-Item $script:CfBin -Force -ErrorAction SilentlyContinue                    # truncated cache -> re-fetch
+  New-Item -ItemType Directory -Force -Path $bindir | Out-Null
+  $arch = if($env:PROCESSOR_ARCHITECTURE -eq 'ARM64'){ 'arm64' } elseif([Environment]::Is64BitOperatingSystem){ 'amd64' } else { '386' }
+  $dl = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-$arch.exe"
+  Info "Downloading Cloudflare cloudflared (~35 MB, official)..."
+  try { $op = $ProgressPreference; $ProgressPreference = 'SilentlyContinue'; Invoke-WebRequest -Uri $dl -OutFile $script:CfBin -UseBasicParsing; $ProgressPreference = $op }
+  catch { Warn "Download failed: $_"; return $false }
+  if(Test-CfBinary $script:CfBin){ return $true }
+  Warn "The downloaded cloudflared isn't runnable (incomplete download?). Removing it - try again."
+  Remove-Item $script:CfBin -Force -ErrorAction SilentlyContinue
+  return $false
+}
+# Run app + a Cloudflare quick tunnel and print the public link. Sets $script:ShareOk on success.
+function Launch-WithCloudflare {
+  if(-not (Ensure-Cloudflared)){ return }
+  if(-not (Ensure-AppRunning)){ return }
+  Write-Host ""
+  Ok "Creating your public link..."
+  $cflog = Join-Path $env:TEMP ("alsegno-cf-" + [Guid]::NewGuid().ToString('N') + ".log")
+  $script:CfProc = Start-Process -FilePath $script:CfBin -ArgumentList @('tunnel','--url',"http://127.0.0.1:$PortVal",'--no-autoupdate') -NoNewWindow -PassThru -RedirectStandardOutput $cflog -RedirectStandardError "$cflog.err"
+  $link = ''
+  for($i=0; $i -lt 150; $i++){
+    foreach($f in @($cflog, "$cflog.err")){
+      if(Test-Path $f){
+        $m = Select-String -Path $f -Pattern 'https://[a-z0-9-]+\.trycloudflare\.com' -ErrorAction SilentlyContinue | Select-Object -First 1
+        if($m){ $link = $m.Matches[0].Value; break }
+      }
+    }
+    if($link){ break }
+    if($script:CfProc.HasExited){ break }
+    Start-Sleep -Milliseconds 300
+  }
+  Write-Host ""
+  if($link){
+    Write-Host "========================================================" -ForegroundColor Green
+    Write-Host "  Send this link to anyone you want to review:"
+    Write-Host ""
+    Write-Host "      $link" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "  (On this computer: http://localhost:$PortVal)"
+    Write-Host "========================================================" -ForegroundColor Green
+    try { Start-Process $link } catch {}
+  } else {
+    Warn "Couldn't get a Cloudflare link. cloudflared said:"
+    if(Test-Path "$cflog.err"){ Get-Content "$cflog.err" -Tail 6 }
+    elseif(Test-Path $cflog){ Get-Content $cflog -Tail 6 }
+    return   # no link -> leave ShareOk false; the dispatch's finally stops app+cloudflared and falls back to a local run
+  }
+  Write-Host ""
+  Write-Host "Keep this window open while you share. Close it (or press Ctrl+C) to stop alsegno and the link."
+  try { Wait-Process -Id $script:CfProc.Id -ErrorAction SilentlyContinue } catch {}
+  $script:ShareOk = $true
+}
+# Publish over Tailscale Funnel (stable link). Sets $script:ShareOk on success.
+function Launch-WithTailscale {
+  if(-not (Get-Command tailscale -ErrorAction SilentlyContinue)){
+    Warn "Tailscale isn't installed, so there's no stable link yet. To set it up:"
+    Write-Host "  1) Install Tailscale:   https://tailscale.com/download"
+    Write-Host "  2) Sign in:             tailscale up"
+    Write-Host "  3) Run this again - it will publish alsegno with:  tailscale funnel $PortVal"
+    return
+  }
+  & tailscale status *> $null
+  if($LASTEXITCODE -ne 0){
+    Warn "Tailscale is installed but you're not signed in yet. Run:  tailscale up"
+    Write-Host "  Then run this again to publish alsegno over Funnel."
+    return
+  }
+  if(-not (Ensure-AppRunning)){ return }
+  Write-Host ""
+  Ok "Publishing alsegno over Tailscale Funnel..."
+  Write-Host "  If Tailscale asks you to turn on Funnel, follow the link it prints, then it'll show your URL."
+  Write-Host "  Keep this window open while you share; press Ctrl+C to stop."
+  & tailscale funnel $PortVal
+  $script:ShareOk = $true
+}
+
 if($Launch){
-  if($ServiceInstalledButStopped){
+  if($ShareVal -eq 'cloudflare' -or $ShareVal -eq 'tailscale'){
+    try {
+      if($ShareVal -eq 'cloudflare'){ Launch-WithCloudflare } else { Launch-WithTailscale }
+    } finally {
+      if($script:CfProc  -and -not $script:CfProc.HasExited){  Stop-Process -Id $script:CfProc.Id  -Force -ErrorAction SilentlyContinue }
+      if($script:AppProc -and -not $script:AppProc.HasExited){ Stop-Process -Id $script:AppProc.Id -Force -ErrorAction SilentlyContinue }
+    }
+    # If a share mode was chosen but couldn't be set up, say so before falling through to a local run.
+    if(-not $script:ShareOk){
+      Write-Host ""
+      Warn "Couldn't set up the public link - starting alsegno locally instead (reachable only on this computer)."
+      Write-Host "  Re-run this when you're back online to try the link again, or change SHARE in .env."
+    }
+  }
+  if($script:ShareOk){
+    # the share helper already ran alsegno + the tunnel; nothing more to do
+  } elseif($ServiceInstalledButStopped){
     # A boot service is installed but didn't start. Do NOT run a foreground copy - it would fight
     # the service for the port the next time the service (auto)starts. Help the user recover instead.
     Write-Host ""

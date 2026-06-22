@@ -65,6 +65,49 @@ ask_val() {
   printf '%s' "${ans:-$def}"
 }
 
+# reach_label SHARE PORT -> one-line human summary of the chosen reach method
+reach_label() {
+  case "$1" in
+    lan)        printf 'your local network — http://<this-computer-ip>:%s' "$2" ;;
+    cloudflare) printf 'a public Cloudflare link (a fresh one each time you start)' ;;
+    tailscale)  printf 'a public Tailscale Funnel link' ;;
+    *)          printf 'this computer only — http://localhost:%s' "$2" ;;
+  esac
+}
+
+# ask_reach -> sets globals host_val + share_val from a menu (defaults to local when non-interactive)
+ask_reach() {
+  share_val="local"; host_val="127.0.0.1"
+  if [ "$ASSUME_YES" = 1 ] || [ ! -t 0 ]; then return; fi
+  say ""
+  say "${BOLD}How should people reach alsegno?${RST} (you can pick again at the summary if unsure)"
+  say ""
+  say "  ${BOLD}1) This computer only${RST}  (default — most private)"
+  say "     Just this machine, at http://localhost:$port_val. Choose this if alsegno is only for"
+  say "     you, or if you'll put your own reverse proxy / HTTPS in front of it."
+  say ""
+  say "  ${BOLD}2) Your local network (Wi-Fi/LAN)${RST}"
+  say "     Other devices on your network reach http://<this-computer-ip>:$port_val — handy to review"
+  say "     from your phone at home. Plain HTTP (no HTTPS); use only on a network you trust."
+  say ""
+  say "  ${BOLD}3) A shareable internet link — Cloudflare${RST}  (no router setup, no account)"
+  say "     Downloads Cloudflare's free 'cloudflared' (~35 MB, official) and gives you a public"
+  say "     https://…trycloudflare.com link when you start. Simplest way to send someone a link."
+  say "     The link is a new one each time you start the app."
+  say ""
+  say "  ${BOLD}4) A shareable internet link — Tailscale${RST}  (stable link, needs a free account)"
+  say "     A permanent https://…ts.net link. You install Tailscale, sign in, and turn on Funnel"
+  say "     once; the link then stays the same. Whoever you send it to needs nothing installed."
+  say ""
+  case "$(ask_val 'Choose 1-4' '1')" in
+    2) share_val="lan"; host_val="0.0.0.0"
+       warn "Local-network mode has no HTTPS — only use it on a network you trust." ;;
+    3) share_val="cloudflare" ;;
+    4) share_val="tailscale" ;;
+    *) share_val="local" ;;
+  esac
+}
+
 # ── platform ─────────────────────────────────────────────────
 case "$(uname -s)" in
   Linux)  PLATFORM=linux ;;
@@ -147,26 +190,47 @@ if [ -f "$ENV_FILE" ]; then
   ok ".env already exists — leaving it untouched"
 else
   info "Generating .env…"
-  port_val="$(ask_val 'Port to listen on' '3458')"
-  case "$port_val" in
-    ''|*[!0-9]*) die "Port must be a whole number 1–65535 (got '$port_val')." ;;
-  esac
-  { [ "$port_val" -ge 1 ] && [ "$port_val" -le 65535 ]; } || die "Port out of range 1–65535 (got '$port_val')."
+  say "I'll ask three quick things. After the last one you'll get a summary and can redo them all."
   # Default the owner-admin to the account running the install (SUDO_USER if run via sudo), not a
   # hardcoded name — this is a tool other people install for themselves.
   default_admin="${SUDO_USER:-$(id -un)}"; [ -n "$default_admin" ] || default_admin="admin"
-  admin_val="$(ask_val 'Admin username (its FIRST login sets the password)' "$default_admin")"
-  host_val="127.0.0.1"
-  if ask_yn "Make the app reachable from other devices on your network (LAN)?" N; then
-    host_val="0.0.0.0"
-    warn "Binding to 0.0.0.0 — only do this on a network you trust (the bare port has no HTTPS)."
-  fi
+  # Loop so a typo is fixable: answer "no" at the summary to go back and re-enter everything.
+  while :; do
+    # ── Port ──
+    say ""
+    say "${BOLD}Port${RST} — the number in the web address, e.g. http://localhost:${BOLD}3458${RST}."
+    say "Keep the default unless 3458 is already used by another program."
+    port_val="$(ask_val 'Port' '3458')"
+    case "$port_val" in ''|*[!0-9]*) warn "That's not a whole number — let's try again."; continue ;; esac
+    { [ "$port_val" -ge 1 ] && [ "$port_val" -le 65535 ]; } || { warn "Port must be 1–65535 — let's try again."; continue; }
+
+    # ── Admin username ──
+    say ""
+    say "${BOLD}Admin username${RST} — a NAME for the owner account (e.g. '$default_admin'). ${BOLD}This is NOT a password.${RST}"
+    say "You'll choose the password later, the first time you log in. Lowercase, no spaces."
+    admin_val="$(ask_val 'Admin username' "$default_admin")"
+
+    # ── How people reach it ──
+    ask_reach    # sets host_val + share_val
+
+    # ── Review & confirm (answer "no" to go back and redo all three) ──
+    say ""
+    say "${BOLD}Please check these:${RST}"
+    say "  Port:           ${BOLD}$port_val${RST}"
+    say "  Admin username: ${BOLD}$admin_val${RST}  (you'll set its password on first login)"
+    say "  Reachable via:  ${BOLD}$(reach_label "$share_val" "$port_val")${RST}"
+    say ""
+    if ask_yn "Is this correct?" Y; then break; fi
+    say ""
+    info "No problem — let's go through them again."
+  done
   secret="$(node -e 'process.stdout.write(require("crypto").randomBytes(48).toString("hex"))')"
   ( umask 077; cat > "$ENV_FILE" <<EOF
 PORT=$port_val
 HOST=$host_val
 SESSION_SECRET=$secret
 ADMIN_USER=$admin_val
+SHARE=$share_val
 EOF
   )
   # Persist DATA_DIR/UPLOADS_DIR only when overridden, so the booted service (which reads them via
@@ -174,7 +238,7 @@ EOF
   if [ "$DATA_DIR_RESOLVED" != "$REPO_DIR/data" ]; then printf 'DATA_DIR=%s\n' "$DATA_DIR_RESOLVED" >> "$ENV_FILE"; fi
   if [ "$UPLOADS_DIR_RESOLVED" != "$REPO_DIR/uploads" ]; then printf 'UPLOADS_DIR=%s\n' "$UPLOADS_DIR_RESOLVED" >> "$ENV_FILE"; fi
   chmod 600 "$ENV_FILE" 2>/dev/null || true
-  ok ".env written (random SESSION_SECRET; admin=$admin_val; HOST=$host_val; PORT=$port_val)"
+  ok ".env written (random SESSION_SECRET; admin=$admin_val; reach=$share_val; PORT=$port_val)"
 fi
 
 # read effective values back for the service + final message (simple KEY=VALUE lines)
@@ -182,6 +246,7 @@ get_env() { grep -E "^$1=" "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2- || t
 PORT_VAL="$(get_env PORT)";       PORT_VAL="${PORT_VAL:-3458}"
 HOST_VAL="$(get_env HOST)";       HOST_VAL="${HOST_VAL:-127.0.0.1}"
 ADMIN_VAL="$(get_env ADMIN_USER)"; ADMIN_VAL="${ADMIN_VAL:-james}"
+SHARE_VAL="$(get_env SHARE)";     SHARE_VAL="${SHARE_VAL:-local}"
 NODE_BIN="$(command -v node)"
 
 # ── 6. background service (boot start) ───────────────────────
@@ -277,6 +342,11 @@ elif port_in_use "$HOST_VAL" "$PORT_VAL"; then
   warn "Stop the existing instance first if you want this installer to manage it."
 elif have pm2 && pm2 describe "$SERVICE_NAME" >/dev/null 2>&1; then
   warn "pm2 already manages '$SERVICE_NAME' — leaving it as-is (use 'pm2 restart $SERVICE_NAME' to apply changes)."
+elif [ "$SHARE_VAL" = cloudflare ] || [ "$SHARE_VAL" = tailscale ]; then
+  # A boot service runs only `node server.js` — it never recreates the tunnel/link. Offering
+  # "start on boot" here would mislead a share-mode user into thinking their link stays live.
+  info "You chose a shareable link, which runs from this launcher window — skipping the boot-service step."
+  say "  (A boot service would start alsegno locally on boot, but would NOT recreate your public link.)"
 elif ask_yn "Install a background service so the app starts on boot?" Y; then
   if [ "$PLATFORM" = linux ]; then
     if have systemctl && [ -d /run/systemd/system ]; then install_systemd
@@ -307,8 +377,133 @@ open_url() {
   fi
 }
 
+# ── shareable-link helpers (SHARE=cloudflare / tailscale) ────
+CF_BIN=""; APP_BG_PID=""; CF_BG_PID=""; CF_LOG=""
+# Stop whatever WE started (empty PIDs are harmless) and remove the tunnel log. Every command is
+# `|| true` so the trap can't end on a failing `kill` (which under set -e would skip the rm + leak it).
+share_cleanup() { kill $CF_BG_PID 2>/dev/null || true; kill $APP_BG_PID 2>/dev/null || true; { [ -n "$CF_LOG" ] && rm -f "$CF_LOG" 2>/dev/null; } || true; }
+# Tear down a FAILED share attempt and drop the trap, so the caller can cleanly start the app locally.
+fail_share_to_local() { trap - EXIT INT TERM HUP; share_cleanup; CF_BG_PID=""; APP_BG_PID=""; CF_LOG=""; }
+# Start the app in the background if nothing already serves the port (so a tunnel can run in the
+# foreground). Sets APP_BG_PID when we start it. The caller installs the cleanup trap BEFORE this, so a
+# Ctrl+C during the startup wait can't orphan node.
+ensure_app_running() {
+  port_in_use "$HOST_VAL" "$PORT_VAL" && return 0
+  ok "Starting alsegno…"
+  "$NODE_BIN" "$REPO_DIR/server.js" >"$DATA_DIR_RESOLVED/alsegno.log" 2>&1 &
+  APP_BG_PID=$!
+  for _ in $(seq 1 150); do port_in_use "$HOST_VAL" "$PORT_VAL" && return 0; sleep 0.2; done
+  warn "alsegno didn't start (see $DATA_DIR_RESOLVED/alsegno.log)."; return 1
+}
+# Download Cloudflare's cloudflared into ./bin if needed; sets CF_BIN. Validates with --version so a
+# truncated download is never cached and re-run forever (the next launch re-fetches instead).
+ensure_cloudflared() {
+  if have cloudflared; then CF_BIN="cloudflared"; return 0; fi
+  local bindir="$REPO_DIR/bin"; CF_BIN="$bindir/cloudflared"
+  if [ -x "$CF_BIN" ] && "$CF_BIN" --version >/dev/null 2>&1; then return 0; fi
+  rm -f "$CF_BIN" 2>/dev/null || true
+  mkdir -p "$bindir"
+  local arch
+  case "$(uname -m)" in
+    x86_64|amd64)  arch=amd64 ;;
+    aarch64|arm64) arch=arm64 ;;
+    armv7l|armv6l) arch=arm ;;
+    *) warn "No automatic cloudflared build for CPU '$(uname -m)' — install cloudflared yourself."; return 1 ;;
+  esac
+  local base="https://github.com/cloudflare/cloudflared/releases/latest/download"
+  info "Downloading Cloudflare cloudflared (~35 MB, official)…"
+  if [ "$PLATFORM" = macos ]; then
+    have curl || { warn "curl not found."; return 1; }
+    curl -fsSL -o "$bindir/cf.tgz" "$base/cloudflared-darwin-$arch.tgz" || { warn "Download failed."; return 1; }
+    tar xzf "$bindir/cf.tgz" -C "$bindir" 2>/dev/null; rm -f "$bindir/cf.tgz"
+  elif have curl; then
+    curl -fsSL -o "$CF_BIN" "$base/cloudflared-linux-$arch" || { warn "Download failed."; return 1; }
+  elif have wget; then
+    wget -qO "$CF_BIN" "$base/cloudflared-linux-$arch" || { warn "Download failed."; return 1; }
+  else
+    warn "Need curl or wget to download cloudflared."; return 1
+  fi
+  chmod +x "$CF_BIN" 2>/dev/null || true
+  "$CF_BIN" --version >/dev/null 2>&1 && return 0
+  warn "The downloaded cloudflared isn't runnable (incomplete download?). Removing it — try again."
+  rm -f "$CF_BIN" 2>/dev/null || true; return 1
+}
+# Run the app + a Cloudflare quick tunnel and print the public link. On any failure it tears down what
+# it started and returns non-zero so the caller falls back to a local run.
+launch_with_cloudflare() {
+  trap 'share_cleanup' EXIT INT TERM HUP     # installed BEFORE starting node so Ctrl+C can't orphan it
+  ensure_cloudflared || { fail_share_to_local; return 1; }
+  ensure_app_running || { fail_share_to_local; return 1; }
+  say ""
+  ok "Creating your public link…"
+  CF_LOG="$(mktemp)"
+  "$CF_BIN" tunnel --url "http://127.0.0.1:$PORT_VAL" --no-autoupdate >"$CF_LOG" 2>&1 &
+  CF_BG_PID=$!
+  local url=""
+  for _ in $(seq 1 150); do
+    url="$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$CF_LOG" | head -1)"
+    [ -n "$url" ] && break
+    kill -0 "$CF_BG_PID" 2>/dev/null || break
+    sleep 0.3
+  done
+  if [ -z "$url" ]; then            # tunnel never produced a link — fall back to a local run
+    warn "Couldn't get a Cloudflare link. cloudflared said:"; tail -6 "$CF_LOG" >&2
+    fail_share_to_local; return 1
+  fi
+  say ""
+  say "${GRN}${BOLD}========================================================${RST}"
+  say "  ${BOLD}Send this link to anyone you want to review:${RST}"
+  say ""
+  say "      ${BOLD}${GRN}$url${RST}"
+  say ""
+  say "  (On this computer: http://localhost:$PORT_VAL)"
+  say "${GRN}${BOLD}========================================================${RST}"
+  open_url "$url"
+  say ""
+  say "Keep this window open while you share. Close it (or press Ctrl+C) to stop alsegno and the link."
+  wait "$CF_BG_PID" 2>/dev/null || true
+  return 0   # the tunnel session ran; don't fall back to a local relaunch
+}
+# Publish over Tailscale Funnel (stable link). Returns non-zero to fall back to local.
+launch_with_tailscale() {
+  if ! have tailscale; then
+    warn "Tailscale isn't installed, so there's no stable link yet. To set it up:"
+    say "  1) Install Tailscale:   https://tailscale.com/download"
+    say "  2) Sign in:             tailscale up"
+    say "  3) Run this again — it will publish alsegno with:  tailscale funnel $PORT_VAL"
+    return 1
+  fi
+  if ! tailscale status >/dev/null 2>&1; then
+    warn "Tailscale is installed but you're not signed in yet. Run:  tailscale up"
+    say "  Then run this again to publish alsegno over Funnel."
+    return 1
+  fi
+  trap 'share_cleanup' EXIT INT TERM HUP     # before ensure_app_running so Ctrl+C can't orphan node
+  ensure_app_running || { fail_share_to_local; return 1; }
+  say ""
+  ok "Publishing alsegno over Tailscale Funnel…"
+  say "  If Tailscale asks you to turn on Funnel, follow the link it prints, then it'll show your URL."
+  say "  Keep this window open while you share; press Ctrl+C to stop."
+  tailscale funnel "$PORT_VAL" || true
+  return 0   # funnel session ran; don't fall back to a local relaunch
+}
+
 if [ "$LAUNCH" = 1 ]; then
-  if [ "$SERVICE_STARTED" = 1 ]; then
+  shared=0
+  case "$SHARE_VAL" in
+    cloudflare) if launch_with_cloudflare; then shared=1; fi ;;
+    tailscale)  if launch_with_tailscale;  then shared=1; fi ;;
+  esac
+  # If a share mode was chosen but couldn't be set up, say so before falling through to a local run —
+  # otherwise the user who wanted a link is silently left with a localhost-only app.
+  if [ "$shared" != 1 ] && { [ "$SHARE_VAL" = cloudflare ] || [ "$SHARE_VAL" = tailscale ]; }; then
+    say ""
+    warn "Couldn't set up the public link — starting alsegno locally instead (reachable only on this computer)."
+    say "  Re-run this when you're back online to try the link again, or change SHARE in .env."
+  fi
+  if [ "$shared" = 1 ]; then
+    :   # the share helper ran the app + tunnel and has now returned (user stopped it)
+  elif [ "$SERVICE_STARTED" = 1 ]; then
     # We started a boot service. Wait until it's actually listening, THEN open the browser — the
     # service manager returns before the server has bound the port, so opening immediately races it.
     say ""
