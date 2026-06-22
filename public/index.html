@@ -158,6 +158,12 @@
   .vstage.show{display:block}
   .vstage video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000;display:block;border-radius:8px;cursor:pointer}
   .vstage video.vhide{display:none}
+  /* Fixed bottom bar (a video project open in Studio): the stage's HEIGHT is what #pbResize drags
+     (or the 38vh default); its WIDTH follows from that height × the picture's aspect-ratio (set inline
+     by setVideoAspect), and margin-auto centres it in #pbActive. So the handle scales the whole picture
+     uniformly and it stays centred — instead of a full-width box that just grows the letterbox.
+     (Theater sizes itself below; audio projects have no #vstage.) */
+  #playerBar:not(.theater) #vstage{width:fit-content;max-width:100%;margin-left:auto;margin-right:auto;aspect-ratio:16/9}
   /* Translucent menu that slides up from the bottom of the video on hover (theater only). */
   .vmenu{position:absolute;left:0;right:0;bottom:0;z-index:6;display:none;align-items:center;gap:4px;
     height:22px;padding:0 6px;background:rgba(12,14,18,.6);backdrop-filter:blur(6px);
@@ -173,6 +179,18 @@
   .pb-resize.show{display:flex}
   .pb-resize::before{content:"";width:48px;height:4px;border-radius:3px;background:var(--line);transition:.12s}
   .pb-resize:hover::before{background:var(--accent);width:64px}
+  /* Close / reopen the player bar in Studio (free the screen while managing tracks). The ✕ lives in
+     the bar (shown only in the fixed Studio bar via .closable); the floating pill reopens it. */
+  .bar-close{display:none;position:absolute;top:6px;right:10px;z-index:32;width:26px;height:26px;
+    border-radius:50%;background:var(--panel2);border:1px solid var(--line);color:var(--muted);
+    font-size:13px;line-height:1;align-items:center;justify-content:center;cursor:pointer}
+  .bar-close:hover{border-color:var(--accent);color:#fff}
+  #playerBar.closable .bar-close{display:flex}
+  .bar-reopen{position:fixed;right:16px;bottom:calc(16px + env(safe-area-inset-bottom));z-index:31;
+    display:inline-flex;align-items:center;gap:7px;background:var(--panel2);border:1px solid var(--line);
+    color:var(--text);border-radius:20px;padding:8px 14px;font-size:13px;cursor:pointer;
+    box-shadow:0 8px 30px rgba(0,0,0,.5)}
+  .bar-reopen:hover{border-color:var(--accent)}
   #wave{width:100%;height:100%;display:block;border-radius:8px;background:var(--panel);cursor:pointer;touch-action:none}
   .pins{position:absolute;inset:0;pointer-events:none}
   .pin{position:absolute;top:-3px;transform:translateX(-50%);pointer-events:auto;cursor:pointer;color:var(--warn);line-height:0}
@@ -349,7 +367,8 @@
     <p class="inote hidden" id="inviteNote"></p>
     <input id="luser" name="username" placeholder="Username" autocomplete="username" autocapitalize="none" spellcheck="false">
     <input id="lpass" name="password" type="password" placeholder="Password" autocomplete="current-password">
-    <p class="login-hint">The password you enter on first sign-in becomes your account password.</p>
+    <!-- TOFU hint — only relevant for a new account's first sign-in (via invite link); shown by showLogin() when INVITE is set. -->
+    <p class="login-hint hidden" id="loginHint">The password you enter on first sign-in becomes your account password.</p>
     <button class="btn primary" type="submit">Sign in</button>
     <div class="login-err" id="loginErr"></div>
   </form>
@@ -486,6 +505,7 @@
 <!-- ───────── PLAYER BAR ───────── -->
 <div id="playerBar" class="hidden">
   <div class="pb-resize" id="pbResize" title="Drag to resize the video"></div>
+  <button id="barClose" class="bar-close" type="button" title="Hide player" aria-label="Hide player">✕</button>
   <div class="pb-inner">
     <div id="pbActive" class="hidden">
       <div class="vstage" id="vstage">
@@ -561,6 +581,8 @@
 
 <audio id="audioA" preload="auto"></audio>
 <audio id="audioB" preload="auto"></audio>
+<!-- Floating affordance to reopen the player bar after it's been closed in Studio. -->
+<button id="barReopen" class="bar-reopen hidden" type="button" title="Show the player">▤&nbsp;Player</button>
 <div class="toast" id="toast"></div>
 
 <!-- New-project modal — one form (name + kind + media type) replacing chained confirm()/prompt() -->
@@ -733,7 +755,8 @@ async function api(path, opts={}){
 function toast(msg,isErr){ const t=$('#toast'); t.textContent=msg; t.className='toast show'+(isErr?' err':''); clearTimeout(t._t); t._t=setTimeout(()=>t.className='toast',2600); }
 
 // ───────── auth / boot ─────────
-function showLogin(){ disconnectEvents(); $('#loginView').classList.remove('hidden'); $('#mainView').classList.add('hidden'); $('#playerBar').classList.add('hidden'); }
+function showLogin(){ disconnectEvents(); $('#loginView').classList.remove('hidden'); $('#mainView').classList.add('hidden'); $('#playerBar').classList.add('hidden'); $('#barReopen').classList.add('hidden');
+  $('#loginHint').classList.toggle('hidden', !INVITE); }   // TOFU hint only for a new account arriving via a valid invite link
 // One-time invite link. Build it from window.location (origin+pathname → relative + subpath-safe),
 // token in the URL hash — the browser never sends the fragment to the server, and we resolve it via
 // a POST body (below), so the token never lands in the URL path / nginx access logs.
@@ -1020,18 +1043,31 @@ function syncBottomPad(){
   // Theater mode: the bar is in-flow (not fixed). #playerView is emptied into the theater, so drop
   // #mainView's bottom padding too — otherwise it sits as dead space between the nav and the theater.
   if(bar.classList.contains('theater')){ mv.style.paddingBottom='0px'; return; }
-  mv.style.paddingBottom = bar.classList.contains('hidden') ? '' : (bar.offsetHeight + 16) + 'px';
+  if(!bar.classList.contains('hidden')){ mv.style.paddingBottom=(bar.offsetHeight + 16) + 'px'; return; }
+  // bar hidden: reserve a little clearance for the floating reopen pill so it can't cover Studio controls
+  mv.style.paddingBottom = $('#barReopen').classList.contains('hidden') ? '' : '72px';
 }
+// In Studio the (fixed, often tall video) bar can be dismissed to free up the screen. Session-only
+// and reset per project (openProject), so it never bleeds across projects or surprises after a reload.
+// Only ever applies in Studio — the player view / video theater always show the bar.
+let studioBarClosed = false;
 // Show the player bar only when it has something to show: in the player/studio view AND either a
 // track is loaded or we're in the video theater (which hosts the track list). No empty strip.
 function updateBarVis(){
   const bar=$('#playerBar');
-  const show = (VIEW==='player'||VIEW==='studio') && (bar.classList.contains('theater') || !!curRevId);
+  const inStudio = VIEW==='studio';
+  let show = (VIEW==='player'||VIEW==='studio') && (bar.classList.contains('theater') || !!curRevId);
+  if(inStudio && studioBarClosed) show=false;            // user dismissed the bar in Studio
   const wasHidden=bar.classList.contains('hidden');
   bar.classList.toggle('hidden', !show);
+  bar.classList.toggle('closable', inStudio);            // the in-bar ✕ only makes sense in Studio's fixed bar
+  // floating "show player" pill: only when there IS a bar to reopen but the user closed it
+  $('#barReopen').classList.toggle('hidden', !(inStudio && studioBarClosed && !!curRevId));
   syncBottomPad();
   if(show && wasHidden && curRevId) drawWave();   // the canvas had no width while the bar was hidden
 }
+$('#barClose').addEventListener('click',()=>{ studioBarClosed=true; updateBarVis(); });
+$('#barReopen').addEventListener('click',()=>{ studioBarClosed=false; updateBarVis(); });
 (function(){
   const h=$('#pbResize'); if(!h) return;
   let dragging=false, startY=0, startH=0;
@@ -1098,6 +1134,7 @@ function renderProjects(){
 async function openProject(id){
   const data=await api('projects/'+id);   // throws on 403/404 → caller drops to the list
   if(PROJECT && PROJECT.id!==data.project.id) stopAll();
+  studioBarClosed=false;   // each project opens with its Studio bar visible (the dismiss is per-session, per-project)
   PROJECT=data.project; TRACKS=data.tracks; ALBUM=PROJECT.title;
   applyMediaMode();   // audio vs video transport + stage/null visibility for this project
   setView('player'); render();
@@ -2475,7 +2512,8 @@ document.addEventListener('keydown',e=>{ if(e.key==='Escape' && !$('#exportModal
 // ───────── keyboard ─────────
 document.addEventListener('keydown',e=>{
   if(e.target.matches('input,textarea,select'))return;
-  if(e.code==='Space'){ e.preventDefault(); if(curTrackId && (VIEW==='player'||VIEW==='studio')) togglePlay(); }
+  if(e.code==='Space'){ if(e.target.closest('button')) return;   // let a focused button (e.g. Hide/▤ Player) activate natively
+    e.preventDefault(); if(curTrackId && (VIEW==='player'||VIEW==='studio')) togglePlay(); }
   else if(e.key==='ArrowRight' && e.shiftKey){ step(1); }
   else if(e.key==='ArrowLeft' && e.shiftKey){ step(-1); }
   else if(e.key==='ArrowRight'){ if(curFps() && (VIEW==='player'||VIEW==='studio')){ e.preventDefault(); frameStep(1); } }   // plain arrows = ±1 frame (video tracks, player/studio only)
