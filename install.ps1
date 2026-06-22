@@ -1,5 +1,5 @@
 <#
-  Album Tracker - installer for Windows (PowerShell 5.1+).
+  alsegno - installer for Windows (PowerShell 5.1+).
   Takes a fresh clone to a running app with a first admin login.
 
     powershell -ExecutionPolicy Bypass -File .\install.ps1            # interactive
@@ -21,7 +21,7 @@ Set-StrictMode -Version Latest
 
 $RepoDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $RepoDir
-$ServiceName    = 'AlbumTracker'
+$ServiceName    = 'alsegno'
 $ServiceStarted = $false
 
 function Info($m){ Write-Host "==> $m" -ForegroundColor Cyan }
@@ -51,7 +51,7 @@ function PortInUse($h,$p){
 }
 
 Write-Host ""
-Write-Host "Album Tracker - setup (Windows)" -ForegroundColor White
+Write-Host "alsegno - setup (Windows)" -ForegroundColor White
 Write-Host ""
 
 # ── 1. Node.js >= 18 ─────────────────────────────────────────
@@ -154,27 +154,27 @@ if($NoService){
     }
     if($installedOk){
       nssm set $ServiceName AppDirectory $RepoDir | Out-Null
-      nssm set $ServiceName AppStdout (Join-Path $RepoDir 'data\album-tracker.log') | Out-Null
-      nssm set $ServiceName AppStderr (Join-Path $RepoDir 'data\album-tracker.err.log') | Out-Null
+      nssm set $ServiceName AppStdout (Join-Path $RepoDir 'data\alsegno.log') | Out-Null
+      nssm set $ServiceName AppStderr (Join-Path $RepoDir 'data\alsegno.err.log') | Out-Null
       nssm start $ServiceName | Out-Null
       if($LASTEXITCODE -eq 0){
         $ServiceStarted = $true
         Ok "Service '$ServiceName' installed and started (NSSM)."
         Write-Host "  Manage:  nssm {stop|start|restart|remove} $ServiceName"
       } else {
-        Warn "Service '$ServiceName' is installed but did not start (exit $LASTEXITCODE). Check data\album-tracker.err.log, then run: nssm start $ServiceName"
+        Warn "Service '$ServiceName' is installed but did not start (exit $LASTEXITCODE). Check data\alsegno.err.log, then run: nssm start $ServiceName"
       }
     }
   } elseif(Have pm2){
     Info "NSSM not found; starting under pm2 instead..."
-    pm2 start $ServerJs --name 'album-tracker'
+    pm2 start $ServerJs --name 'alsegno'
     if($LASTEXITCODE -eq 0){
       pm2 save | Out-Null
       $ServiceStarted = $true
       Ok "Started under pm2."
       Write-Host "  Enable boot start with: pm2 startup (see pm2 docs on Windows)"
     } else {
-      Warn "pm2 failed to start the app (exit $LASTEXITCODE). Run 'pm2 logs album-tracker' to see why."
+      Warn "pm2 failed to start the app (exit $LASTEXITCODE). Run 'pm2 logs alsegno' to see why."
     }
   } else {
     Warn "NSSM not found. Install it for a boot service:  winget install NSSM.NSSM   (or choco install nssm)"

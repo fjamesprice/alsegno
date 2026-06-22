@@ -2029,8 +2029,8 @@ app.use((err, req, res, next) => {
 // ── Start ────────────────────────────────────────────────────
 app.listen(PORT, HOST, () => {
   if (HOST === '0.0.0.0') {
-    console.log(`Album Tracker running on http://localhost:${PORT} (and reachable on this machine's LAN IP)`);
+    console.log(`alsegno running on http://localhost:${PORT} (and reachable on this machine's LAN IP)`);
   } else {
-    console.log(`Album Tracker running on http://${HOST}:${PORT}`);
+    console.log(`alsegno running on http://${HOST}:${PORT}`);
   }
 });

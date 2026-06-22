@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 #
-# Album Tracker — container image.
+# alsegno — container image.
 #
 # Base: node:22-bookworm-slim (Debian / glibc), deliberately NOT Alpine / musl.
 # better-sqlite3 ships glibc prebuilt binaries; on musl `npm ci` would fall back to a

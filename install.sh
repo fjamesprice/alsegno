@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Album Tracker — installer for Linux & macOS.
+# alsegno — installer for Linux & macOS.
 # Takes a fresh clone to a running app with a first admin login.
 #
 #   ./install.sh              interactive: prompts for port / admin / LAN exposure / service
@@ -29,7 +29,7 @@ done
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_DIR"
-SERVICE_NAME="album-tracker"
+SERVICE_NAME="alsegno"
 SERVICE_STARTED=0
 
 # ── output helpers ───────────────────────────────────────────
@@ -99,7 +99,7 @@ buildtools_hint() {
 }
 
 say ""
-say "${BOLD}Album Tracker — setup ($PLATFORM)${RST}"
+say "${BOLD}alsegno — setup ($PLATFORM)${RST}"
 say ""
 
 # ── 1. Node.js >= 18 ─────────────────────────────────────────
@@ -199,7 +199,7 @@ install_systemd() {
   tmp="$(mktemp)"
   cat > "$tmp" <<EOF
 [Unit]
-Description=Album Tracker (mix/master revision tracker)
+Description=alsegno (mix/master revision tracker)
 After=network.target
 
 [Service]
@@ -225,7 +225,7 @@ EOF
 
 install_launchd() {
   local label plist
-  label="com.albumtracker.server"
+  label="com.alsegno.server"
   plist="$HOME/Library/LaunchAgents/${label}.plist"
   info "Installing a launchd agent '$label'…"
   mkdir -p "$HOME/Library/LaunchAgents"
@@ -243,8 +243,8 @@ install_launchd() {
   <key>WorkingDirectory</key><string>$REPO_DIR</string>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>$DATA_DIR_RESOLVED/album-tracker.log</string>
-  <key>StandardErrorPath</key><string>$DATA_DIR_RESOLVED/album-tracker.err.log</string>
+  <key>StandardOutPath</key><string>$DATA_DIR_RESOLVED/alsegno.log</string>
+  <key>StandardErrorPath</key><string>$DATA_DIR_RESOLVED/alsegno.err.log</string>
 </dict>
 </plist>
 EOF

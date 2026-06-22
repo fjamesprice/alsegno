@@ -1,6 +1,6 @@
-# Installing Album Tracker
+# Installing alsegno
 
-Album Tracker is a self-contained Node.js app — a single Express server plus a single
+alsegno is a self-contained Node.js app — a single Express server plus a single
 HTML/JS page, backed by SQLite. It has **no build step** and only one external runtime
 dependency: **ffmpeg**. You can run it on your own laptop, a home server, or a VPS.
 
@@ -38,16 +38,16 @@ Clone the repo, then run the installer for your OS.
 ### Linux / macOS
 
 ```bash
-git clone <your-repo-url> album-tracker
-cd album-tracker
+git clone <your-repo-url> alsegno
+cd alsegno
 ./install.sh
 ```
 
 ### Windows (PowerShell)
 
 ```powershell
-git clone <your-repo-url> album-tracker
-cd album-tracker
+git clone <your-repo-url> alsegno
+cd alsegno
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
@@ -81,13 +81,13 @@ service step backs off if the port is already in use.
 
 ## Option B: Run with Docker
 
-If you'd rather not install Node and ffmpeg on the host, run Album Tracker in a container. You
+If you'd rather not install Node and ffmpeg on the host, run alsegno in a container. You
 need **Docker** with the Compose plugin (check with `docker compose version`). The image bundles
 Node 22 and ffmpeg — nothing else is required on the host (you can skip the Prerequisites above).
 
 ```bash
-git clone <your-repo-url> album-tracker
-cd album-tracker
+git clone <your-repo-url> alsegno
+cd alsegno
 
 # A long random secret that signs session cookies (keep it stable — changing it logs everyone out):
 export SESSION_SECRET=$(openssl rand -hex 48)
@@ -113,7 +113,7 @@ PORT=3458
 `SESSION_SECRET` is **required**: `docker compose up` fails fast with a reminder if it is unset.
 
 **Data & persistence.** Two named Docker volumes hold your data across restarts and rebuilds:
-`at-data` (the SQLite database — including its WAL and the sessions table) and `at-uploads` (all
+`alsegno-data` (the SQLite database — including its WAL and the sessions table) and `alsegno-uploads` (all
 transcoded audio/video). They survive `docker compose down`. Remove them deliberately with
 `docker compose down -v`, which **permanently deletes all data**.
 
@@ -130,7 +130,7 @@ the container; your volumes (and data) are untouched. The schema migrates itself
 
 **Notes & caveats:**
 - **One writer only.** SQLite allows a single writer, so run exactly one replica — don't
-  `docker compose up --scale album-tracker=2` or set `deploy.replicas` > 1.
+  `docker compose up --scale alsegno=2` or set `deploy.replicas` > 1.
 - **Exposing on your network.** The compose file publishes the port on all host interfaces, so
   the app is reachable from other devices over **plain HTTP (no TLS)** — see the network warning
   below. Only do this on a trusted network. To bind to this machine only, change the port mapping
@@ -180,25 +180,25 @@ If you let the installer set up a service, it's already running and will start o
 
 **Linux (systemd):**
 ```bash
-sudo systemctl status album-tracker      # is it running?
-sudo systemctl restart album-tracker     # apply changes / after editing .env
-sudo systemctl stop album-tracker
-journalctl -u album-tracker -f           # live logs
+sudo systemctl status alsegno      # is it running?
+sudo systemctl restart alsegno     # apply changes / after editing .env
+sudo systemctl stop alsegno
+journalctl -u alsegno -f           # live logs
 ```
 
 **macOS (launchd):**
 ```bash
-launchctl unload ~/Library/LaunchAgents/com.albumtracker.server.plist   # stop
-launchctl load   ~/Library/LaunchAgents/com.albumtracker.server.plist   # start
-# logs: data/album-tracker.log and data/album-tracker.err.log
+launchctl unload ~/Library/LaunchAgents/com.alsegno.server.plist   # stop
+launchctl load   ~/Library/LaunchAgents/com.alsegno.server.plist   # start
+# logs: data/alsegno.log and data/alsegno.err.log
 ```
 
 **Windows (NSSM):**
 ```powershell
-nssm restart AlbumTracker
-nssm stop AlbumTracker
-nssm remove AlbumTracker confirm   # uninstall the service
-# logs: data\album-tracker.log and data\album-tracker.err.log
+nssm restart alsegno
+nssm stop alsegno
+nssm remove alsegno confirm   # uninstall the service
+# logs: data\alsegno.log and data\alsegno.err.log
 ```
 
 **No service (manual / development):**
@@ -207,7 +207,7 @@ npm start         # runs node server.js in the foreground; Ctrl-C to stop
 ```
 
 **pm2 (if you use it):** the installer falls back to pm2 when no native service manager is
-available. `pm2 restart album-tracker`, `pm2 logs album-tracker`, and `pm2 startup` to enable
+available. `pm2 restart alsegno`, `pm2 logs alsegno`, and `pm2 startup` to enable
 boot start.
 
 ---
@@ -218,7 +218,7 @@ boot start.
 git pull
 npm install          # in case dependencies changed
 # then restart the service, e.g.:
-sudo systemctl restart album-tracker
+sudo systemctl restart alsegno
 ```
 
 The database schema migrates itself on startup (additive only — no data loss).
@@ -227,9 +227,9 @@ The database schema migrates itself on startup (additive only — no data loss).
 
 ## Uninstalling the service
 
-- **systemd:** `sudo systemctl disable --now album-tracker && sudo rm /etc/systemd/system/album-tracker.service && sudo systemctl daemon-reload`
-- **launchd:** `launchctl unload ~/Library/LaunchAgents/com.albumtracker.server.plist && rm ~/Library/LaunchAgents/com.albumtracker.server.plist`
-- **NSSM:** `nssm remove AlbumTracker confirm`
+- **systemd:** `sudo systemctl disable --now alsegno && sudo rm /etc/systemd/system/alsegno.service && sudo systemctl daemon-reload`
+- **launchd:** `launchctl unload ~/Library/LaunchAgents/com.alsegno.server.plist && rm ~/Library/LaunchAgents/com.alsegno.server.plist`
+- **NSSM:** `nssm remove alsegno confirm`
 
 Your `data/` and `uploads/` are left untouched — delete them by hand if you want the data gone.
 

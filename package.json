@@ -1,7 +1,9 @@
 {
-  "name": "album-tracker",
+  "name": "alsegno",
   "version": "1.0.0",
-  "description": "Mix/master revision tracker for Noah Praise God's album",
+  "description": "alsegno — lightweight, self-hosted A/B review and timestamped notes for audio & video revisions",
+  "author": "F. James Price",
+  "license": "MIT",
   "main": "server.js",
   "engines": {
     "node": ">=18"

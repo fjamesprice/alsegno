@@ -1,0 +1,6 @@
+{
+  "_note": "Credits shown in the app's About panel. Until the repo is public this is edited by hand; afterward it can be regenerated from the GitHub contributors API (a GitHub Action can overwrite this file on each push). The app reads either this {contributors:[...]} shape or a raw GitHub contributors-API array.",
+  "contributors": [
+    { "name": "F. James Price", "url": "https://github.com/fjamesprice" }
+  ]
+}

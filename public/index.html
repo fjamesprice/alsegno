@@ -4,7 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0d0e12">
-<title>Album Tracker</title>
+<title>alsegno</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
 <style>
   :root{
     --bg:#0d0e12; --panel:#15171f; --panel2:#1b1e29; --line:#272b38;
@@ -41,6 +42,8 @@
   #loginView{min-height:100%;display:flex;align-items:center;justify-content:center;padding:24px}
   .login-card{width:100%;max-width:340px;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:30px 26px}
   .login-card h1{font-size:19px;margin:0 0 4px;font-weight:600}
+  .login-card .wordmark{display:flex;align-items:center;gap:8px;font-size:23px;font-weight:650;letter-spacing:.2px}
+  .login-card .wordmark .seg{width:26px;height:26px;color:var(--accent);flex:none}
   .login-card .sub{color:var(--faint);font-size:13px;margin:0 0 22px}
   .login-card input{width:100%;margin-bottom:12px}
   .login-card .btn{width:100%}
@@ -73,6 +76,19 @@
   .exrow .btn{flex:0 0 auto}
   #cTitle #exportBtn{margin-left:auto;font-weight:500}
   .modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:22px}
+  .about-head{display:flex;align-items:center;gap:14px;margin-bottom:16px}
+  .about-head .about-seg{width:46px;height:46px;color:var(--accent);flex:none}
+  .about-name{font-size:22px;font-weight:650;letter-spacing:.2px}
+  .about-name .pron{font-weight:400;font-style:italic;font-size:14px;color:var(--muted);letter-spacing:0}
+  .about-tag{margin-top:3px}
+  .about-body{font-size:13.5px;line-height:1.55;color:var(--muted);margin:0 0 12px}
+  .about-body b{color:var(--text)}
+  .about-body .seg-inline{width:1em;height:1em;vertical-align:-2px;color:var(--text)}
+  .about-foot{margin:16px 0 0}
+  .about-credits{font-size:13px;color:var(--muted);margin:16px 0 0}
+  .about-credits .lbl{display:block;font-size:10.5px;text-transform:uppercase;letter-spacing:.5px;color:var(--faint);margin-bottom:5px}
+  .about-credits a{color:var(--accent);text-decoration:none}
+  .about-credits a:hover{text-decoration:underline}
   .badge.media{background:rgba(122,162,255,.16);color:var(--accent);border:1px solid var(--accent);text-transform:uppercase}
 
   /* Layout */
@@ -86,6 +102,9 @@
   .who{font-size:13px;color:var(--muted);background:none;border:0;font:inherit;cursor:pointer;display:inline-flex;align-items:center;gap:5px;padding:5px 8px;border-radius:8px}
   .who:hover{color:var(--text);background:var(--panel2)}
   .who #whoName{max-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .topbar .brandbtn{flex:none;display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;padding:0;background:none;border:0;cursor:pointer;color:var(--accent);border-radius:8px}
+  .topbar .brandbtn:hover{background:var(--panel2)}
+  .topbar .brandbtn svg{width:21px;height:21px;display:block}
 
   /* Album progress */
   .album-prog{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:14px 16px;margin:10px 0 16px;display:flex;align-items:center;gap:14px}
@@ -113,6 +132,7 @@
   .badge{font-size:10.5px;font-weight:700;letter-spacing:.4px;padding:2px 6px;border-radius:5px;flex:none}
   .badge.new{background:var(--accent);color:#0b1020}
   .badge.done{background:rgba(58,210,159,.16);color:var(--done)}
+  .badge.done .bl{height:.92em;width:auto;vertical-align:-1.5px;margin-right:2px}
   .badge.rev{background:var(--panel2);color:var(--muted);border:1px solid var(--line)}
   .tmeta{font-size:12px;color:var(--faint);margin-top:2px;display:flex;gap:10px;flex-wrap:wrap}
   .tmeta .cc{cursor:pointer} .tmeta .cc:hover{color:var(--muted)}
@@ -155,7 +175,8 @@
   .pb-resize:hover::before{background:var(--accent);width:64px}
   #wave{width:100%;height:100%;display:block;border-radius:8px;background:var(--panel);cursor:pointer;touch-action:none}
   .pins{position:absolute;inset:0;pointer-events:none}
-  .pin{position:absolute;top:-2px;transform:translateX(-50%);pointer-events:auto;cursor:pointer;font-size:11px;color:var(--warn)}
+  .pin{position:absolute;top:-3px;transform:translateX(-50%);pointer-events:auto;cursor:pointer;color:var(--warn);line-height:0}
+  .pin svg{width:15px;height:15px;display:block}
   .pin:hover{color:#fff}
   .pb-controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
   .transport{display:flex;align-items:center;gap:6px}
@@ -323,7 +344,7 @@
 <!-- ───────── LOGIN ───────── -->
 <div id="loginView" class="hidden">
   <form class="login-card" id="loginForm">
-    <h1>Album Tracker</h1>
+    <h1 class="wordmark"><svg class="seg" viewBox="0 0 64 64" aria-hidden="true"><path d="M41 21C41 15 23 15 23 24C23 31 41 33 41 40C41 49 23 49 23 42" fill="none" stroke="currentColor" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M18 46L46 18" fill="none" stroke="currentColor" stroke-width="5.5" stroke-linecap="round"/><circle cx="18" cy="29" r="3" fill="currentColor"/><circle cx="46" cy="35" r="3" fill="currentColor"/></svg><span>alsegno</span></h1>
     <p class="sub">Sign in</p>
     <p class="inote hidden" id="inviteNote"></p>
     <input id="luser" name="username" placeholder="Username" autocomplete="username" autocapitalize="none" spellcheck="false">
@@ -337,6 +358,7 @@
 <!-- ───────── MAIN ───────── -->
 <div id="mainView" class="hidden">
   <div class="topbar">
+    <button type="button" class="brandbtn" id="aboutBtn" aria-haspopup="dialog" title="About alsegno" aria-label="About alsegno"><svg viewBox="0 0 64 64" aria-hidden="true"><path d="M41 21C41 15 23 15 23 24C23 31 41 33 41 40C41 49 23 49 23 42" fill="none" stroke="currentColor" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M18 46L46 18" fill="none" stroke="currentColor" stroke-width="5.5" stroke-linecap="round"/><circle cx="18" cy="29" r="3" fill="currentColor"/><circle cx="46" cy="35" r="3" fill="currentColor"/></svg></button>
     <div class="title" id="albumTitle">Projects</div>
     <div class="nav" id="nav"></div>
     <button type="button" class="who" id="who" aria-haspopup="dialog" title="Account settings">
@@ -620,6 +642,26 @@
     <div class="modal-actions" style="margin-top:4px">
       <button class="btn ghost" type="button" id="acPassClose">Close</button>
       <button class="btn primary" type="button" id="acPassSave">Change password</button>
+    </div>
+  </div>
+</div>
+
+<!-- About modal — app identity / what this is (opened from the top-bar logo). -->
+<div id="aboutModal" class="modal-bg hidden">
+  <div class="modal-card" role="dialog" aria-modal="true" aria-label="About alsegno">
+    <div class="about-head">
+      <svg class="about-seg" viewBox="0 0 64 64" aria-hidden="true"><path d="M41 21C41 15 23 15 23 24C23 31 41 33 41 40C41 49 23 49 23 42" fill="none" stroke="currentColor" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M18 46L46 18" fill="none" stroke="currentColor" stroke-width="5.5" stroke-linecap="round"/><circle cx="18" cy="29" r="3" fill="currentColor"/><circle cx="46" cy="35" r="3" fill="currentColor"/></svg>
+      <div>
+        <div class="about-name">alsegno <span class="pron">(al-SEHN-ya)</span></div>
+        <div class="about-tag faint small">Lightweight, self-hosted A/B review for audio &amp; video</div>
+      </div>
+    </div>
+    <p class="about-body">Share and compare revisions, and pin feedback to the exact moment — built for mixing, mastering, and post.</p>
+    <p class="about-body"><b>al&nbsp;segno</b> — <i>&ldquo;to the sign.&rdquo;</i><br>In a score it's the cue to jump to the <svg class="seg-inline" viewBox="0 0 64 64" aria-hidden="true"><path d="M41 21C41 15 23 15 23 24C23 31 41 33 41 40C41 49 23 49 23 42" fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/><path d="M18 46L46 18" fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round"/><circle cx="18" cy="29" r="3.2" fill="currentColor"/><circle cx="46" cy="35" r="3.2" fill="currentColor"/></svg> marker. Here, every note pins to its moment on the timeline.</p>
+    <div class="about-credits" id="aboutCredits"></div>
+    <p class="about-foot faint small">Free &amp; open source — MIT.</p>
+    <div class="modal-actions">
+      <button class="btn primary" type="button" id="aboutClose">Close</button>
     </div>
   </div>
 </div>
@@ -1081,7 +1123,7 @@ function setView(v){
   applyLayout();      // theater (video+player) vs fixed bottom bar (audio / video-in-studio)
   updateBarVis();     // show the bar only when there's a track / theater to display
   $('#albumTitle').textContent = v==='projects'?'Projects' : v==='admin'?'Admin' : v==='settings'?'Settings' : ALBUM;
-  document.title = (v==='player'||v==='studio') ? ALBUM : 'Album Tracker';
+  document.title = (v==='player'||v==='studio') ? ALBUM : 'alsegno';
   renderNav();
   if(v==='projects') loadProjects();
   if(v==='studio') renderStudio();
@@ -1126,7 +1168,7 @@ function trackRow(t,i){
   const latest=t.revisions[t.revisions.length-1];
   const isPlayingThis=t.id===curTrackId && !audio.paused;
   const doneBadge = t.doneness>=100
-    ? `<span class="badge done">✓ DONE${t.done_revision_id?` · r${(t.revisions.find(r=>r.id===t.done_revision_id)||{}).rev_number||''}`:''}</span>` : '';
+    ? `<span class="badge done"><svg class="bl" viewBox="0 0 12 16" aria-hidden="true"><rect x="2" y="1.5" width="1.6" height="13" fill="currentColor"/><rect x="6" y="1.5" width="3.4" height="13" rx=".4" fill="currentColor"/></svg> DONE${t.done_revision_id?` · r${(t.revisions.find(r=>r.id===t.done_revision_id)||{}).rev_number||''}`:''}</span>` : '';
   const newBadge = (ME.role==='client' && t.unseen && t.id!==curTrackId) ? '<span class="badge new">NEW</span>' : '';
   const nRev = mixRevCount(t);
   const revBadge = latest ? `<span class="badge rev">${nRev} rev${nRev!==1?'s':''}</span>`:'<span class="badge rev">no audio</span>';
@@ -1609,7 +1651,7 @@ function drawPins(){
   const wrap=$('#pins'); wrap.innerHTML='';
   const dur=(nullOn?nullDur():(audio.duration||peaksCache[curRevId]?.duration))||1;
   comments.filter(c=>c.ts!=null && c.parent_id==null && c.revision_id===curRevId && !c.deleted_at).forEach(c=>{
-    const el=document.createElement('div'); el.className='pin'; el.textContent='▾';
+    const el=document.createElement('div'); el.className='pin'; el.innerHTML='<svg viewBox="0 0 64 64" aria-hidden="true"><path d="M41 21C41 15 23 15 23 24C23 31 41 33 41 40C41 49 23 49 23 42" fill="none" stroke="currentColor" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M18 46L46 18" fill="none" stroke="currentColor" stroke-width="5.5" stroke-linecap="round"/><circle cx="18" cy="29" r="3" fill="currentColor"/><circle cx="46" cy="35" r="3" fill="currentColor"/></svg>';
     el.style.left=Math.max(0,Math.min(1,c.ts/dur))*100+'%';
     el.title=`${c.author} @ ${fmt(c.ts)}: ${c.body}`;
     el.addEventListener('click',()=>{ if(nullOn){ nullSeek(c.ts); return; }
@@ -1964,7 +2006,7 @@ function renderStudio(){
         <span class="num">${i+1}</span>
         <span class="stitle">${esc(t.title)}</span>
         <span class="badge rev">${mixRevCount(t)} rev${mixRevCount(t)!==1?'s':''}</span>
-        ${t.doneness>=100?'<span class="badge done">✓ DONE</span>':`<span class="faint small">${t.doneness}%</span>`}
+        ${t.doneness>=100?'<span class="badge done"><svg class="bl" viewBox="0 0 12 16" aria-hidden="true"><rect x="2" y="1.5" width="1.6" height="13" fill="currentColor"/><rect x="6" y="1.5" width="3.4" height="13" rx=".4" fill="currentColor"/></svg> DONE</span>':`<span class="faint small">${t.doneness}%</span>`}
       </div>
       <div class="strack-body ${open?'':'hidden'}"></div>`;
     const head=card.querySelector('.strack-h'), bodyEl=card.querySelector('.strack-body');
@@ -2127,7 +2169,7 @@ function fmtUpdate(u){
   }
   if(u.dirty) h += `<div class="faint">The server’s working tree has uncommitted local changes.</div>`;
   if(u.fetch_error) h += `<div class="faint">Last fetch from origin failed (showing the last known state): ${esc(u.fetch_error)}</div>`;
-  h += `<div class="faint" style="margin-top:6px">To update: <code>git pull &amp;&amp; npm install</code>, then restart the app (e.g. <code>pm2 restart album-tracker</code>, <code>sudo systemctl restart album-tracker</code>, or restart the container). This page never updates for you.</div>`;
+  h += `<div class="faint" style="margin-top:6px">To update: <code>git pull &amp;&amp; npm install</code>, then restart the app (e.g. <code>pm2 restart alsegno</code>, <code>sudo systemctl restart alsegno</code>, or restart the container). This page never updates for you.</div>`;
   if(when) h += `<div class="faint" style="margin-top:4px">Last checked ${esc(when)}.</div>`;
   return h;
 }
@@ -2312,6 +2354,29 @@ $('#acClose').addEventListener('click',closeAccount);
 $('#acPassClose').addEventListener('click',closeAccount);
 $('#accountModal').addEventListener('click',e=>{ if(e.target===$('#accountModal')) closeAccount(); });
 document.addEventListener('keydown',e=>{ if(e.key==='Escape' && !$('#accountModal').classList.contains('hidden')) closeAccount(); });
+
+// About modal — opened from the top-bar logo (left of the title).
+let CONTRIBS=null;   // cached credits (public/contributors.json; regenerable from the GitHub contributors API later)
+async function renderCredits(){
+  const box=$('#aboutCredits'); if(!box) return;
+  if(CONTRIBS===null){
+    try{ const r=await fetch('contributors.json',{cache:'no-cache'}); if(!r.ok) throw 0;
+         const j=await r.json(); CONTRIBS=(Array.isArray(j)?j:j.contributors)||[]; }
+    catch{ CONTRIBS=[]; }
+  }
+  const list = CONTRIBS.length ? CONTRIBS : [{name:'F. James Price',url:'https://github.com/fjamesprice'}];
+  const nm = c => esc(c.name||c.login||'contributor');
+  const href = c => c.url||c.html_url||(c.login?'https://github.com/'+c.login:null);
+  const link = c => { const h=href(c); return h?`<a href="${esc(h)}" target="_blank" rel="noopener noreferrer">${nm(c)}</a>`:nm(c); };
+  const names = list.length===1 ? link(list[0])
+    : list.length===2 ? link(list[0])+' and '+link(list[1])
+    : list.slice(0,-1).map(link).join(', ')+', and '+link(list[list.length-1]);
+  box.innerHTML=`<span class="lbl">Built by</span>${names}`;
+}
+$('#aboutBtn').addEventListener('click',()=>{ $('#aboutModal').classList.remove('hidden'); renderCredits(); });
+$('#aboutClose').addEventListener('click',()=>$('#aboutModal').classList.add('hidden'));
+$('#aboutModal').addEventListener('click',e=>{ if(e.target===$('#aboutModal')) $('#aboutModal').classList.add('hidden'); });
+document.addEventListener('keydown',e=>{ if(e.key==='Escape' && !$('#aboutModal').classList.contains('hidden')) $('#aboutModal').classList.add('hidden'); });
 
 async function saveDisplayName(){
   try{
