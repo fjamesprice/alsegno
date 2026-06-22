@@ -1436,7 +1436,7 @@ function requestRev(revId){
 }
 function drainPendingRev(){ const p=pendingRev; pendingRev=null; if(p && p!==curRevId) requestRev(p); }
 // Resolve once no A/B crossfade is in flight, so a forced reload (e.g. after replacing audio) doesn't
-// fight crossfadeTo over the active element. Bounded — the fade is ~40ms, hard-capped ~1.2s.
+// fight crossfadeTo over the active element. Bounded — the fade is ~80ms, hard-capped ~1.2s.
 function settleCrossfade(){ return new Promise(res=>{ if(!crossing) return res(); const t0=performance.now();
   const iv=setInterval(()=>{ if(!crossing || performance.now()-t0>1500){ clearInterval(iv); res(); } },40); }); }
 $('#cmpSel').addEventListener('change',()=>{
@@ -1507,17 +1507,13 @@ function elReadyAt(el, t){
 }
 function crossfadeVolumes(outEl, inEl, done){
   cancelAnimationFrame(xfRaf);
-  const D=40, t0=performance.now();   // 40ms equal-power A/B crossfade
+  const D=80, t0=performance.now();
   const setVol=(el,v)=>{ el.volume = v<0?0 : v>1?1 : v; };   // HTMLMediaElement.volume must stay in [0,1] or it throws
-  // Pin the exact k=0 state synchronously: the first rAF frame lands ~16ms in (≈k0.4 at D=40), so
-  // without this the fade would visibly jump from whatever the caller left. Now BOTH ends are pinned —
-  // start here, end in the k>=1 branch — and the curve is sampled by real elapsed time between them.
-  setVol(outEl, userVol); setVol(inEl, 0);
   const tick=now=>{
     // clamp BOTH ends: a rAF frame timestamp earlier than t0 makes (now-t0) negative,
     // which would drive sin()/cos() — and thus volume — below 0 and throw IndexSizeError.
     const k=Math.max(0, Math.min(1,(now-t0)/D));
-    setVol(inEl,  userVol*Math.sin(k*Math.PI/2));   // equal-power (cos²+sin²=1, constant power throughout)
+    setVol(inEl,  userVol*Math.sin(k*Math.PI/2));   // equal-power
     setVol(outEl, userVol*Math.cos(k*Math.PI/2));
     if(k<1){ xfRaf=requestAnimationFrame(tick); }
     else { setVol(inEl,userVol); setVol(outEl,0); done&&done(); }
@@ -1530,7 +1526,7 @@ function runFade(outgoing, incoming){
   return new Promise(resolve=>{
     let settled=false; const done=()=>{ if(settled)return; settled=true; resolve(); };
     crossfadeVolumes(outgoing, incoming, done);
-    setTimeout(done, 1200);   // hard ceiling; the fade itself is ~40ms
+    setTimeout(done, 1200);   // hard ceiling; the fade itself is ~80ms
   });
 }
 async function crossfadeTo(revId){
