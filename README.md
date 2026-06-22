@@ -18,6 +18,11 @@
 
 **alsegno** *(al-SEHN-ya)* is a small collaborative review tool for people who send in-production media files back and forth — mixing & mastering engineers, producers, and video/post editors, and their clients. Upload new revisions, and your reviewers compare it **A/B** against a previous one.  Pin **timestamped notes** to the exact frame, and track how *done* each piece feels. Self-hosted, no sign-ups, no SaaS.
 
+<p align="center">
+  <img src="docs/ab-demo.gif" alt="Switching between two revisions A/B" width="548">
+  <br><sub><em>A/B-ing two revisions — same playhead, instant compare.</em></sub>
+</p>
+
 ## Why did I make this?
 
 Emailing `whatever_v3_r09.mp3` around and getting back "the twangy part is too loud" can get complicated really fast. You can have a conversation about it, but then you have to either scroll back and find everything between chit chat, or write it all down separately and read off of that, I guess...  Or you could use this thing, which keeps the audio, the versions, and the feedback in one place, anchored to the timeline where everyone involved can see it.  It works really well and I wish I had it sooner.
