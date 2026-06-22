@@ -33,7 +33,7 @@ jobs:
           ver="${GITHUB_REF_NAME#v}"
           # Steer downloaders to the named assets — GitHub also auto-attaches "Source code"
           # archives, which work but unzip to a different folder name.
-          intro="$(printf '**To install:** download `alsegno-%s.zip` (Windows) or `alsegno-%s.tar.gz` (macOS/Linux) from **Assets** below, unzip, and run the installer — see the [README](https://github.com/%s#quick-start). The auto-generated *Source code* assets also work, but unzip to a different folder name.\n\n---\n' "$ver" "$ver" "$GITHUB_REPOSITORY")"
+          intro="$(printf '**To install:** download `alsegno-%s.zip` (Windows) or `alsegno-%s.tar.gz` (macOS/Linux) from **Assets** below, unzip, and run the installer — see the [README](https://github.com/%s#quick-start). The auto-generated *Source code* assets also work, but unzip to a different folder name.' "$ver" "$ver" "$GITHUB_REPOSITORY")"
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" dist/alsegno-*.zip dist/alsegno-*.tar.gz --clobber
           else
@@ -42,5 +42,7 @@ jobs:
               --title "alsegno $GITHUB_REF_NAME" \
               --generate-notes
             body="$(gh release view "$GITHUB_REF_NAME" --json body -q .body)"
-            gh release edit "$GITHUB_REF_NAME" --notes "${intro}${body}"
+            # Join with explicit separators — $(...) strips trailing newlines, so the spacing
+            # must live between the two values, not at the end of intro.
+            gh release edit "$GITHUB_REF_NAME" --notes "$(printf '%s\n\n---\n\n%s' "$intro" "$body")"
           fi
