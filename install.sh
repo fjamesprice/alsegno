@@ -441,13 +441,15 @@ launch_with_cloudflare() {
   CF_BG_PID=$!
   local url=""
   for _ in $(seq 1 150); do
-    url="$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$CF_LOG" | head -1)"
+    url="$(grep -oE 'https://[a-z0-9]+(-[a-z0-9]+)+\.trycloudflare\.com' "$CF_LOG" | head -1)"   # require a multi-word host so cloudflared's api.trycloudflare.com (logged on failure) is never matched
     [ -n "$url" ] && break
     kill -0 "$CF_BG_PID" 2>/dev/null || break
     sleep 0.3
   done
   if [ -z "$url" ]; then            # tunnel never produced a link — fall back to a local run
-    warn "Couldn't get a Cloudflare link. cloudflared said:"; tail -6 "$CF_LOG" >&2
+    warn "Couldn't create the public Cloudflare link. cloudflared reported:"
+    tail -8 "$CF_LOG" >&2
+    say "  (Usually a network/firewall blocking the tunnel, or Cloudflare being busy — try again later, or use Tailscale.)"
     fail_share_to_local; return 1
   fi
   say ""

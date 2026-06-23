@@ -319,7 +319,7 @@ function Launch-WithCloudflare {
   for($i=0; $i -lt 150; $i++){
     foreach($f in @($cflog, "$cflog.err")){
       if(Test-Path $f){
-        $m = Select-String -Path $f -Pattern 'https://[a-z0-9-]+\.trycloudflare\.com' -ErrorAction SilentlyContinue | Select-Object -First 1
+        $m = Select-String -Path $f -Pattern 'https://[a-z0-9]+(-[a-z0-9]+)+\.trycloudflare\.com' -ErrorAction SilentlyContinue | Select-Object -First 1   # multi-word host only: never match api.trycloudflare.com (logged on failure)
         if($m){ $link = $m.Matches[0].Value; break }
       }
     }
@@ -338,9 +338,10 @@ function Launch-WithCloudflare {
     Write-Host "========================================================" -ForegroundColor Green
     try { Start-Process $link } catch {}
   } else {
-    Warn "Couldn't get a Cloudflare link. cloudflared said:"
-    if(Test-Path "$cflog.err"){ Get-Content "$cflog.err" -Tail 6 }
-    elseif(Test-Path $cflog){ Get-Content $cflog -Tail 6 }
+    Warn "Couldn't create the public Cloudflare link. cloudflared reported:"
+    if(Test-Path "$cflog.err"){ Get-Content "$cflog.err" -Tail 8 }
+    elseif(Test-Path $cflog){ Get-Content $cflog -Tail 8 }
+    Write-Host "  (Usually a network/firewall blocking the tunnel, or Cloudflare being busy - try again later, or use Tailscale.)"
     return   # no link -> leave ShareOk false; the dispatch's finally stops app+cloudflared and falls back to a local run
   }
   Write-Host ""
