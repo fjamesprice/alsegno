@@ -342,7 +342,14 @@ function Launch-WithCloudflare {
     if(Test-Path "$cflog.err"){ Get-Content "$cflog.err" -Tail 8 }
     elseif(Test-Path $cflog){ Get-Content $cflog -Tail 8 }
     Write-Host "  (Usually a network/firewall blocking the tunnel, or Cloudflare being busy - try again later, or use Tailscale.)"
-    return   # no link -> leave ShareOk false; the dispatch's finally stops app+cloudflared and falls back to a local run
+    if($script:CfProc -and -not $script:CfProc.HasExited){ Stop-Process -Id $script:CfProc.Id -Force -ErrorAction SilentlyContinue }
+    Write-Host ""
+    Ok "Starting alsegno locally instead - reachable only on this computer at http://localhost:$PortVal."
+    try { Start-Process "http://localhost:$PortVal" } catch {}
+    Write-Host "Keep this window open while you use it; close it (or press Ctrl+C) to stop."
+    if($script:AppProc){ try { Wait-Process -Id $script:AppProc.Id -ErrorAction SilentlyContinue } catch {} }
+    $script:ShareOk = $true   # handled as a local run here — skip the dispatch's racy kill-then-recheck fallback
+    return
   }
   Write-Host ""
   Write-Host "Keep this window open while you share. Close it (or press Ctrl+C) to stop alsegno and the link."

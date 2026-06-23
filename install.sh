@@ -446,11 +446,17 @@ launch_with_cloudflare() {
     kill -0 "$CF_BG_PID" 2>/dev/null || break
     sleep 0.3
   done
-  if [ -z "$url" ]; then            # tunnel never produced a link — fall back to a local run
+  if [ -z "$url" ]; then            # tunnel never came up — run the app LOCALLY (it's already started), no dead end
     warn "Couldn't create the public Cloudflare link. cloudflared reported:"
     tail -8 "$CF_LOG" >&2
     say "  (Usually a network/firewall blocking the tunnel, or Cloudflare being busy — try again later, or use Tailscale.)"
-    fail_share_to_local; return 1
+    kill "$CF_BG_PID" 2>/dev/null || true; CF_BG_PID=""        # stop cloudflared; KEEP the app we already started
+    say ""
+    ok "Starting alsegno locally instead — reachable only on this computer at ${BOLD}$URL${RST}."
+    open_url "$URL"
+    say "Keep this window open while you use it; press Ctrl+C (or close it) to stop."
+    [ -n "$APP_BG_PID" ] && { wait "$APP_BG_PID" 2>/dev/null || true; }
+    return 0          # handled as a local run — avoids the dispatch's kill-then-recheck port race
   fi
   say ""
   say "${GRN}${BOLD}========================================================${RST}"
