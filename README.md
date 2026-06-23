@@ -52,7 +52,7 @@ Emailing `whatever_v3_r09.mp3` around and getting back "the twangy part is too l
 - **Self-hosted & private** — your files, your server. Mounts cleanly behind a reverse proxy at a subpath.  Lossy review copies for playback are the default to save space, while keeping lossless copies for download is always an option.
 - **No build step** — one Express server + one HTML/JS page, backed by SQLite. The only runtime dependency is `ffmpeg`.
 - **Live** — comments, new revisions, and doneness sync to everyone in real time over SSE. It's like a chat room for your projects.
-- **Simple access** — invite links + trust-on-first-use passwords (no public sign-up); per-project membership with **admin / engineer / client** roles. It's secure and really simple.
+- **Simple access** — invite links + trust-on-first-use passwords (no public sign-up); per-project membership with **admin / engineer / client** roles. Engineers add and edit tracks, revisions, and media; clients are review-only for media but can still comment, mark seen, reorder tracks, and set doneness (shared review state). It's secure and really simple.
 
 ## Quick start
 
