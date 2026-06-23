@@ -129,11 +129,11 @@ db.prepare('INSERT OR IGNORE INTO users (username, role) VALUES (?, ?)').run(ADM
 db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('album_title', ?)")
   .run('Noah Praise God — Album');
 
-// Instance settings (Phase 3b–3d). null_test_visible: player shows the null-test button.
+// Instance settings (Phase 3b–3d). null_test_visible: player shows the null-test button (default OFF).
 // keep_lossless: uploads keep the original file for lossless download. show_deleted_notes: admins
 // can see soft-deleted notes. video_enabled: gate video projects (Phase 6, not built yet). media_root
 // is intentionally NOT a runtime setting — it stays env-driven (UPLOADS_DIR), a Phase-5 install concern.
-db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('null_test_visible', '1')").run();
+db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('null_test_visible', '0')").run();
 db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('keep_lossless', '0')").run();
 db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('show_deleted_notes', '0')").run();
 db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('video_enabled', '0')").run();
@@ -251,6 +251,10 @@ db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('auto_update_che
 }
 // Clear any processing flags left set by a crash/restart mid-job (the in-flight transcode was lost).
 db.exec('UPDATE tracks SET video_processing = 0, mix_processing = 0 WHERE video_processing <> 0 OR mix_processing <> 0');
+// Video projects are never albums: a video project just holds one or more videos as 'song'-type
+// tracks, with no album title/art/ordering. Demote any that an earlier build promoted to 'album'
+// (the song→album flip on a 2nd-track add used to fire for video too). Idempotent.
+db.exec("UPDATE projects SET type = 'song' WHERE media_type = 'video' AND type = 'album'");
 // Sweep transient decode temp files orphaned by a crash/kill mid-analysis. computeWaveAndPeaks writes
 // uploads/.wavtmp-<uuid>.f32 (a full-rate PCM decode — can be hundreds of MB) and unlinks it inline;
 // if the process dies in between, nothing else references or reclaims it. No DB row points at these,
@@ -328,6 +332,14 @@ const sessionUser = u => ({ username: u.username, role: u.role, display_name: u.
 // Instance setting as a boolean (missing key ⇒ default). Used by bootstrap so every role learns
 // instance toggles (e.g. null_test_visible) even though GET /api/settings is admin-only.
 const settingOn = (key, dflt = true) => { const v = db.prepare('SELECT value FROM settings WHERE key = ?').get(key)?.value; return v == null ? dflt : v === '1'; };
+// Per-upload "keep the original" decision. The global keep_lossless setting forces it on for every
+// upload; when that setting is OFF, an individual upload can still opt in via a keep_lossless form
+// field (the Studio checkbox). So the per-request flag only ever ADDS keeping, never removes it.
+function wantKeepLossless(req) {
+  if (settingOn('keep_lossless', false)) return true;
+  const v = String((req.body && req.body.keep_lossless) || '').toLowerCase();
+  return v === '1' || v === 'true' || v === 'on' || v === 'yes';
+}
 
 // ── Multer ───────────────────────────────────────────────────
 const storage = multer.diskStorage({
@@ -991,7 +1003,7 @@ app.get('/api/bootstrap', requireAuth, (req, res) => {
   // Only echo the hint if it's still in the accessible set — never auto-open a revoked/deleted project.
   const last_project_id = (last != null && projects.some(p => p.id === last)) ? last : null;
   res.json({ user, projects, last_project_id,
-    null_test_visible: settingOn('null_test_visible'),
+    null_test_visible: settingOn('null_test_visible', false),
     keep_lossless: settingOn('keep_lossless', false),
     video_enabled: settingOn('video_enabled', false),
     // Admin-only: the cached self-update status (cheap settings-row read — no git shell-out here;
@@ -1116,16 +1128,17 @@ app.delete('/api/projects/:id/users/:username', requireAdmin, (req, res) => {
 });
 
 // ── Track routes ─────────────────────────────────────────────
-// Create a track in a project. Song→album promotion: adding a 2nd track to a 'song' flips it to
-// 'album' and (re)titles it from album_title — so albums get a heading + ordering they lacked.
+// Create a track in a project. Song→album promotion: adding a 2nd track to an AUDIO 'song' flips it
+// to 'album' and (re)titles it from album_title — so albums get a heading + ordering they lacked.
+// Video projects are exempt: they hold multiple videos as 'song'-type tracks and never become albums.
 app.post('/api/projects/:id/tracks', requireProjectEngineer(pParam), (req, res) => {
   const pid = req.projectId;
   const title = String(req.body.title || '').trim();
   if (!title) return res.status(400).json({ error: 'Track title required' });
-  const proj = db.prepare('SELECT type FROM projects WHERE id = ?').get(pid);
+  const proj = db.prepare('SELECT type, media_type FROM projects WHERE id = ?').get(pid);
   const existing = db.prepare('SELECT COUNT(*) v FROM tracks WHERE project_id = ?').get(pid).v;
   let promoted = false;
-  if (proj.type === 'song' && existing >= 1) {
+  if (proj.type === 'song' && existing >= 1 && proj.media_type !== 'video') {
     const albumTitle = String(req.body.album_title || '').trim();
     if (!albumTitle) return res.status(400).json({ error: 'Album title required to add a second track' });
     db.prepare("UPDATE projects SET type = 'album', title = ?, updated_at = datetime('now') WHERE id = ?").run(albumTitle, pid);
@@ -1223,7 +1236,7 @@ app.post('/api/tracks/:id/video', requireProjectEngineer(pTrack), upload.single(
   // Respond immediately; the (multi-minute) transcode runs in the background queue, and the picture
   // appears via the SSE 'change' when it's done. Studio shows "processing…" via video_processing.
   const file = req.file, projectId = req.projectId, username = req.session.user.username, trackId = track.id;
-  const keepLossless = settingOn('keep_lossless', false);
+  const keepLossless = wantKeepLossless(req);
   db.prepare('UPDATE tracks SET video_processing = 1 WHERE id = ?').run(trackId);
   broadcastChange(projectId);
   res.json({ ok: true, processing: true });
@@ -1296,7 +1309,7 @@ app.post('/api/tracks/:id/revisions', requireProjectEngineer(pTrack), upload.sin
   // track's video. Respond immediately and transcode/analyze in the background queue (long files
   // can't be held in one HTTP request); Studio shows "processing…" via mix_processing.
   const file = req.file, projectId = req.projectId, username = req.session.user.username, trackId = track.id;
-  const notes = String(req.body.notes || ''), keepLossless = settingOn('keep_lossless', false);
+  const notes = String(req.body.notes || ''), keepLossless = wantKeepLossless(req);
   db.prepare('UPDATE tracks SET mix_processing = mix_processing + 1 WHERE id = ?').run(trackId);
   broadcastChange(projectId);
   res.json({ ok: true, processing: true });
@@ -1342,7 +1355,7 @@ app.post('/api/revisions/:id/replace', requireProjectEngineer(pRev), upload.sing
   // that actually succeeded), and never run a second ffmpeg + big f32le decode in parallel with a
   // queued job. Studio shows "processing…" via mix_processing; the new audio lands via SSE 'change'.
   const file = req.file, projectId = req.projectId, revId = rev.id, trackId = rev.track_id;
-  const keepLossless = settingOn('keep_lossless', false);
+  const keepLossless = wantKeepLossless(req);
   db.prepare('UPDATE tracks SET mix_processing = mix_processing + 1 WHERE id = ?').run(trackId);
   broadcastChange(projectId);
   res.json({ ok: true, processing: true });

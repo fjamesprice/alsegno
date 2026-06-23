@@ -492,7 +492,7 @@
     <div class="card">
       <h2>Settings</h2>
       <div class="setrow"><label class="toggle"><input type="checkbox" id="set_null_test_visible"> <b>Null-test button</b></label><div class="faint small">Show the null-test (A − B) button in the player.</div></div>
-      <div class="setrow"><label class="toggle"><input type="checkbox" id="set_keep_lossless"> <b>Keep lossless originals</b></label><div class="faint small">Keep each uploaded file for lossless download. Playback still uses a 320k MP3 preview. Off = the original is discarded after conversion (saves space). Applies to new uploads.</div></div>
+      <div class="setrow"><label class="toggle"><input type="checkbox" id="set_keep_lossless"> <b>Keep lossless originals</b></label><div class="faint small">Keep each uploaded file for lossless download. Playback still uses a 320k MP3 preview. Off = the original is discarded after conversion (saves space), but you can still keep an individual upload via the checkbox on its uploader. Applies to new uploads.</div></div>
       <div class="setrow"><label class="toggle"><input type="checkbox" id="set_show_deleted_notes"> <b>Show deleted notes</b></label><div class="faint small">Admins see soft-deleted notes (greyed, with who &amp; when) so deletions can be reviewed.</div></div>
       <div class="setrow"><label class="toggle"><input type="checkbox" id="set_video_enabled"> <b>Video projects</b></label><div class="faint small">Allow creating video projects (video playback with the audio waveform, comments &amp; doneness). When off, all new projects are audio.</div></div>
       <div class="setrow"><label class="toggle"><input type="checkbox" id="set_auto_update_check"> <b>Check for updates</b></label><div class="faint small">Periodically check whether this install is behind its Git origin and notify admins. It only <b>checks</b> — it never downloads, installs, or restarts; updating stays a manual step.</div>
@@ -592,7 +592,7 @@
     <div class="mfield">
       <label for="npName">Project name</label>
       <input type="text" id="npName" placeholder="e.g. a song or video title" autocomplete="off">
-      <div class="faint small" style="margin-top:6px">Starts as a single track — add more tracks later to make it an album.</div>
+      <div id="npHint" class="faint small" style="margin-top:6px">Starts as a single track — add more tracks later to make it an album.</div>
     </div>
     <div class="mfield hidden" id="npKindField">
       <label>Kind</label>
@@ -708,7 +708,7 @@ const fmtDate = s => { if(!s) return ''; const d=new Date(String(s).replace(' ',
 let ME=null, TRACKS=[], ALBUM='Album', VIEW='projects';
 let PROJECTS=[];                                // project summaries for the landing list
 let PROJECT=null;                              // the currently-open project ({id,type,title,...}) or null
-let NULL_VIS=true;                             // instance setting: null-test button visible in player
+let NULL_VIS=false;                            // instance setting: null-test button visible in player (default OFF)
 let KEEP_LOSSLESS=false;                        // instance setting: uploads keep the lossless original
 let VIDEO_ENABLED=false;                        // instance setting: video projects may be created (Phase 6)
 let UPDATE_INFO=null;                            // admin-only cached self-update status (bootstrap / SSE 'update')
@@ -1087,7 +1087,7 @@ window.addEventListener('resize',()=>{ applyVideoH(); syncBottomPad(); if(curRev
 
 async function boot(){
   const data=await api('bootstrap');
-  ME=data.user; PROJECTS=data.projects||[]; NULL_VIS=data.null_test_visible!==false; KEEP_LOSSLESS=data.keep_lossless===true; VIDEO_ENABLED=data.video_enabled===true; UPDATE_INFO=data.update||null;
+  ME=data.user; PROJECTS=data.projects||[]; NULL_VIS=data.null_test_visible===true; KEEP_LOSSLESS=data.keep_lossless===true; VIDEO_ENABLED=data.video_enabled===true; UPDATE_INFO=data.update||null;
   $('#loginView').classList.add('hidden'); $('#mainView').classList.remove('hidden');
   refreshWho();
   $('#newProjectBtn').classList.toggle('hidden', ME.role!=='admin');
@@ -1105,7 +1105,7 @@ async function boot(){
 // ───────── projects list ─────────
 async function loadProjects(){
   const data=await api('bootstrap');
-  ME=data.user; PROJECTS=data.projects||[]; NULL_VIS=data.null_test_visible!==false; KEEP_LOSSLESS=data.keep_lossless===true; VIDEO_ENABLED=data.video_enabled===true; UPDATE_INFO=data.update||null;
+  ME=data.user; PROJECTS=data.projects||[]; NULL_VIS=data.null_test_visible===true; KEEP_LOSSLESS=data.keep_lossless===true; VIDEO_ENABLED=data.video_enabled===true; UPDATE_INFO=data.update||null;
   applyNullVis(); renderProjects();
 }
 function renderProjects(){
@@ -1119,7 +1119,7 @@ function renderProjects(){
     card.innerHTML=`
       ${thumb}
       <div class="pt">
-        <div class="pname"><span class="nm">${esc(p.title)}</span>${unseen}<span class="badge type">${p.type==='album'?'album':'single'}</span>${p.media_type==='video'?'<span class="badge media">video</span>':''}</div>
+        <div class="pname"><span class="nm">${esc(p.title)}</span>${unseen}${p.media_type==='video'?'<span class="badge media">video</span>':`<span class="badge type">${p.type==='album'?'album':'single'}</span>`}</div>
         <div class="pmeta"><span>${p.track_count} track${p.track_count===1?'':'s'}</span>${open}</div>
       </div>
       <div class="pprog">
@@ -1179,7 +1179,7 @@ function render(fromEvent){
   const isSong = PROJECT.type==='song';
   $('.album-prog').classList.toggle('hidden', isSong);   // a single song has no album-level progress bar
   const art=$('#albArt');                                // album art (albums only) in the header
-  if(!isSong && PROJECT.art_stored_name){ art.src='api/art/'+PROJECT.art_stored_name; art.classList.remove('hidden'); }
+  if(!isSong && !isVideoProject() && PROJECT.art_stored_name){ art.src='api/art/'+PROJECT.art_stored_name; art.classList.remove('hidden'); }
   else { art.classList.add('hidden'); art.removeAttribute('src'); }
   const total=TRACKS.length;
   const done=TRACKS.filter(t=>t.doneness>=100).length;
@@ -1187,7 +1187,9 @@ function render(fromEvent){
   $('#apDone').textContent=`${done} / ${total} done`;
   $('#apAvg').textContent=avg+'%';
   $('#apBar').style.width=avg+'%';
-  $('#emptyHint').classList.toggle('hidden', total>0);
+  const eh=$('#emptyHint');
+  eh.textContent = isVideoProject() ? 'No videos in this project yet.' : 'No tracks in this project yet.';
+  eh.classList.toggle('hidden', total>0);
 
   const list=$('#trackList'); list.innerHTML='';
   TRACKS.forEach((t,i)=>list.appendChild(trackRow(t,i)));
@@ -1214,7 +1216,7 @@ function trackRow(t,i){
   const doneTip = ME.role==='client'?'How done you feel this is':'How done the client feels this is';
   li.innerHTML=`
     ${isSong?'':'<span class="handle" title="Drag to reorder">⋮⋮</span><span class="ord"><button class="up" title="Move up">▲</button><button class="dn" title="Move down">▼</button></span>'}
-    <span class="num">${isSong?'♪':i+1}</span>
+    <span class="num">${isSong && !isVideoProject() ? '♪' : i+1}</span>
     <button class="play-btn ${isPlayingThis?'on':''}" ${latest?'':'disabled'}>${isPlayingThis?'⏸':'▶'}</button>
     <div class="tmid">
       <div class="tname"><span class="nm">${esc(t.title)}</span>${newBadge}${doneBadge}${revBadge}</div>
@@ -1997,8 +1999,9 @@ $('#newTrack').addEventListener('keydown',e=>{ if(e.key==='Enter') addTrackFn();
 async function addTrackFn(){
   const v=$('#newTrack').value.trim(); if(!v||!PROJECT)return;
   const body={title:v};
-  // Adding a 2nd track to a song promotes it to an album — collect the album title here.
-  if(PROJECT.type==='song' && TRACKS.length>=1){
+  // Adding a 2nd track to an AUDIO song promotes it to an album — collect the album title here.
+  // Video projects never promote: they just hold multiple videos, so skip the prompt entirely.
+  if(PROJECT.type==='song' && TRACKS.length>=1 && !isVideoProject()){
     const at=prompt('Adding a second track turns this song into an album.\nAlbum title:', PROJECT.title);
     if(at===null) return;
     if(!at.trim()){ toast('Album title required',true); return; }
@@ -2021,19 +2024,25 @@ const openStudio=new Set();
 function renderStudio(){
   if(!PROJECT) return;
   const isSong=PROJECT.type==='song';
-  $('#stTitleH').textContent = isSong?'Song title':'Album title';
-  $('#stAddHint').classList.toggle('hidden', !isSong);
+  const isVid=isVideoProject();
+  // A video project is never an album: it just holds one or more videos. So no "Album title", no
+  // album art, no song→album promotion hint — and the add card adds videos, not tracks.
+  $('#stTitleH').textContent = isVid ? 'Project title' : (isSong?'Song title':'Album title');
+  $('#stAddHint').classList.toggle('hidden', !isSong || isVid);
   $('#albInput').value=PROJECT.title;
-  // Album art controls — albums only.
-  $('#stArtBlock').classList.toggle('hidden', isSong);
-  if(!isSong){
+  $('#stAddH').textContent   = isVid ? 'Add a video' : 'Add a track';
+  $('#addTrack').textContent = isVid ? 'Add video'   : 'Add track';
+  $('#newTrack').placeholder = isVid ? 'Video title' : 'Track title';
+  // Album art controls — audio albums only.
+  $('#stArtBlock').classList.toggle('hidden', isSong || isVid);
+  if(!isSong && !isVid){
     const has=!!PROJECT.art_stored_name, thumb=$('#stArtThumb');
     thumb.classList.toggle('hidden', !has); if(has) thumb.src='api/art/'+PROJECT.art_stored_name;
     $('#stArtDel').classList.toggle('hidden', !has);
     $('#stArtUp').textContent = has?'Replace':'Upload';
   }
   const box=$('#studioTracks'); box.innerHTML='';
-  if(!TRACKS.length){ box.innerHTML='<div class="card faint">No tracks yet — add one above.</div>'; return; }
+  if(!TRACKS.length){ box.innerHTML='<div class="card faint">'+(isVid?'No videos yet — add one above.':'No tracks yet — add one above.')+'</div>'; return; }
   TRACKS.forEach((t,i)=>{
     const card=document.createElement('div'); card.className='strack';
     const open=openStudio.has(t.id);
@@ -2058,16 +2067,21 @@ function buildStudioBody(el,t){
   const tools=document.createElement('div'); tools.className='row'; tools.style.flexWrap='wrap';
   tools.innerHTML=`<input class="rn" value="${esc(t.title)}" style="flex:1;min-width:160px">
     <button class="btn sm rnsave">Rename</button>
-    <button class="btn sm danger tdel" style="margin-left:auto">Delete track</button>`;
+    <button class="btn sm danger tdel" style="margin-left:auto">Delete ${isVideoProject()?'video':'track'}</button>`;
   tools.querySelector('.rnsave').addEventListener('click',async()=>{ const v=tools.querySelector('.rn').value.trim(); if(!v)return;
     try{ await api('tracks/'+t.id,{method:'PUT',body:{title:v}}); await reload(); toast('Renamed'); }catch(e){ toast(e.message,true); } });
   tools.querySelector('.tdel').addEventListener('click',async()=>{ if(!confirm('Delete "'+t.title+'" and all its revisions?'))return;
-    try{ await api('tracks/'+t.id,{method:'DELETE'}); openStudio.delete(t.id); await reload(); toast('Track deleted'); }catch(e){ toast(e.message,true); } });
+    try{ await api('tracks/'+t.id,{method:'DELETE'}); openStudio.delete(t.id); await reload(); toast(isVideoProject()?'Video deleted':'Track deleted'); }catch(e){ toast(e.message,true); } });
   el.appendChild(tools);
 
   const isVid=isVideoProject();
   const audioAccept='audio/*,.wav,.aif,.aiff,.flac,.mp3';
   const videoAccept='video/*,.mp4,.mov,.mkv,.webm,.m4v';
+  // Per-upload override of the global "Keep lossless originals" setting. Only shown when that setting
+  // is OFF — it lets you keep THIS upload's original for lossless download even though the default is
+  // to discard it. When the setting is ON every upload is already kept, so no checkbox is needed.
+  const keepBox = KEEP_LOSSLESS ? '' :
+    '<label class="toggle ukeep-row" style="margin-top:1px"><input type="checkbox" class="ukeep"> Keep this upload\'s original for lossless download <span class="faint">(otherwise discarded after conversion)</span></label>';
 
   // VIDEO (the picture) — a video track's locked video asset, replaceable independently of its audio.
   if(isVid){
@@ -2084,11 +2098,13 @@ function buildStudioBody(el,t){
         : `<div class="small faint" style="margin-bottom:6px">No video yet — upload the picture. Its own audio becomes the “Original audio” revision; then upload mixes below.</div>`;
       vsec.innerHTML=`<div class="field"><label>${t.has_video?'Replace video (the picture)':'Upload video (the picture)'} — ${KEEP_LOSSLESS?'original kept for download; ':''}an H.264 MP4 preview + 480p proxy are generated${t.has_video?'. Your audio mixes are kept.':''}</label>
           ${cur}<input type="file" class="vfile" accept="${videoAccept}"></div>
+        ${keepBox}
         <div class="row"><button class="btn primary vup">${t.has_video?'Replace video':'Upload video'}</button><span class="vstat faint small"></span></div>`;
       const vfile=vsec.querySelector('.vfile'), vstat=vsec.querySelector('.vstat'), vbtn=vsec.querySelector('.vup');
       vbtn.addEventListener('click',async()=>{
         if(!vfile.files[0]){ toast('Choose a video file',true); return; }
         const fd=new FormData(); fd.append('file',vfile.files[0]);
+        if(vsec.querySelector('.ukeep')?.checked) fd.append('keep_lossless','1');
         vbtn.disabled=true; vstat.innerHTML='<span class="spin"></span> uploading…'; uploadsInFlight++;
         try{ await api('tracks/'+t.id+'/video',{method:'POST',body:fd}); await reload(); toast('Uploaded — processing in the background'); }
         catch(e){ toast(e.message,true); vstat.textContent=''; vbtn.disabled=false; }
@@ -2106,16 +2122,22 @@ function buildStudioBody(el,t){
         : 'Upload an audio mix (new revision, synced to the video; converted to a 320k MP3 preview)')
     : (KEEP_LOSSLESS
         ? 'Upload new revision (original kept for lossless download; a 320k MP3 preview is generated for playback)'
-        : 'Upload new revision (WAV → converted to 320k MP3 preview; original is discarded)');
+        : 'Upload new revision (a 320k MP3 preview is generated for playback)');
   const procNote = t.mix_processing ? `<div class="small" style="margin-bottom:7px"><span class="spin"></span> Processing ${t.mix_processing} upload${t.mix_processing>1?'s':''} in the background…</div>` : '';
   up.innerHTML=`${procNote}<div class="field"><label>${upLabel}</label>
       <input type="file" class="ufile" accept="${audioAccept}"></div>
     <div class="field"><label>Change notes (optional)</label><textarea class="unotes" rows="2" placeholder="What changed in this revision?"></textarea></div>
+    ${keepBox}
     <div class="row"><button class="btn primary uup">Upload ${isVid?'mix':'revision'}</button><span class="ustat faint small"></span></div>`;
   const fileEl=up.querySelector('.ufile'), stat=up.querySelector('.ustat'), btn=up.querySelector('.uup');
+  // Keeping an original is a no-op for an mp3 upload (it IS its own original), so hide the keep checkbox
+  // once an .mp3 is chosen — it only does something for a lossless source (WAV/AIFF/FLAC).
+  const upKeep=up.querySelector('.ukeep-row');
+  if(upKeep) fileEl.addEventListener('change',()=>{ const f=fileEl.files[0]; upKeep.classList.toggle('hidden', !!f && /\.mp3$/i.test(f.name)); });
   btn.addEventListener('click',async()=>{
     if(!fileEl.files[0]){ toast('Choose a file',true); return; }
     const fd=new FormData(); fd.append('file',fileEl.files[0]); fd.append('notes',up.querySelector('.unotes').value);
+    if(up.querySelector('.ukeep')?.checked) fd.append('keep_lossless','1');
     btn.disabled=true; stat.innerHTML='<span class="spin"></span> uploading…'; uploadsInFlight++;
     try{ await api('tracks/'+t.id+'/revisions',{method:'POST',body:fd}); await reload(); toast('Uploaded — processing in the background'); }
     catch(e){ toast(e.message,true); stat.textContent=''; btn.disabled=false; }
@@ -2138,8 +2160,9 @@ function buildStudioBody(el,t){
          <button class="btn sm rrepl">↻ Replace audio</button>
          <a class="btn sm" href="api/audio/${r.stored_name}?dl=1">⬇ Download${r.has_lossless?' (original)':''}</a>`;
     const replBox = orig ? '' : `<div class="uploader rrepl-box hidden" style="margin-top:9px">
-        <div class="field"><label>Replace this revision's audio — keeps ${lbl}, its notes &amp; comments (${KEEP_LOSSLESS?'original kept for download; 320k MP3 preview generated':'WAV → 320k MP3 preview; original is discarded'})</label>
+        <div class="field"><label>Replace this revision's audio — keeps ${lbl}, its notes &amp; comments (${KEEP_LOSSLESS?'original kept for download; 320k MP3 preview generated':'a 320k MP3 preview is generated for playback'})</label>
           <input type="file" class="rfile" accept="${audioAccept}"></div>
+        ${keepBox}
         <div class="row"><button class="btn primary sm rupload">Upload replacement</button>
           <button class="btn sm ghost rcancel">Cancel</button>
           <span class="rstat faint small"></span></div>
@@ -2155,11 +2178,14 @@ function buildStudioBody(el,t){
     d.querySelector('.nsave').addEventListener('click',async()=>{ const nv=d.querySelector('.rnotes').value;
       try{ await api('revisions/'+r.id,{method:'PUT',body:{notes:nv}}); r.notes=nv; if(curRevId===r.id)updateRevNote(r); toast('Notes saved'); }catch(e){ toast(e.message,true); } });
     const box=d.querySelector('.rrepl-box'), rfile=d.querySelector('.rfile'), rstat=d.querySelector('.rstat'), rup=d.querySelector('.rupload'), rreplBtn=d.querySelector('.rrepl'), rcancelBtn=d.querySelector('.rcancel'), rdelBtn=d.querySelector('.rdel');
+    const rKeep=box?box.querySelector('.ukeep-row'):null;   // hide the keep checkbox for mp3 (no original to keep)
+    if(rKeep&&rfile) rfile.addEventListener('change',()=>{ const f=rfile.files[0]; rKeep.classList.toggle('hidden', !!f && /\.mp3$/i.test(f.name)); });
     if(rreplBtn) rreplBtn.addEventListener('click',()=>{ box.classList.toggle('hidden'); });
     if(rcancelBtn) rcancelBtn.addEventListener('click',()=>{ box.classList.add('hidden'); rfile.value=''; rstat.textContent=''; });
     if(rup) rup.addEventListener('click',async()=>{
       if(!rfile.files[0]){ toast('Choose a file',true); return; }
       const fd=new FormData(); fd.append('file',rfile.files[0]);
+      if(box.querySelector('.ukeep')?.checked) fd.append('keep_lossless','1');
       rup.disabled=true; rstat.innerHTML='<span class="spin"></span> uploading…'; uploadsInFlight++;
       try{
         // Like create/video, replace now transcodes in the background queue and lands via SSE — the
@@ -2346,11 +2372,15 @@ $('#newProjectBtn').addEventListener('click',newProjectFlow);
 // New-project modal — a single form (name + kind + media type) instead of chained native dialogs.
 function segValue(id){ const b=$('#'+id+' button.on'); return b?b.dataset.v:null; }
 function setSeg(id,val){ $$('#'+id+' button').forEach(b=>b.classList.toggle('on', b.dataset.v===val)); }
-$('#npKind').addEventListener('click',e=>{ const b=e.target.closest('button'); if(b) setSeg('npKind',b.dataset.v); });
+// A video project never becomes an album — keep the new-project hint honest per kind.
+function setNpHint(kind){ $('#npHint').textContent = kind==='video'
+  ? 'Starts as a single video — add more videos later.'
+  : 'Starts as a single track — add more tracks later to make it an album.'; }
+$('#npKind').addEventListener('click',e=>{ const b=e.target.closest('button'); if(b){ setSeg('npKind',b.dataset.v); setNpHint(b.dataset.v); } });
 let npAfter='projects';   // where to refresh after creating (the projects list vs the admin page)
 function newProjectFlow(){
   npAfter = VIEW==='admin' ? 'admin' : 'projects';
-  $('#npName').value=''; setSeg('npKind','audio');                // 'audio' = Music (the default)
+  $('#npName').value=''; setSeg('npKind','audio'); setNpHint('audio');   // 'audio' = Music (the default)
   $('#npKindField').classList.toggle('hidden', !VIDEO_ENABLED);   // Music/Video choice only when video is enabled
   $('#newProjModal').classList.remove('hidden');
   setTimeout(()=>$('#npName').focus(),0);
@@ -2580,7 +2610,11 @@ async function resyncOpenProject(){
 // True when the studio has a file staged in any uploader (chosen but not yet uploaded) — used to defer
 // an SSE re-render that would clear the picker out from under the user.
 function studioHasPendingFile(){
-  return VIEW==='studio' && [...document.querySelectorAll('#studioView input[type=file]')].some(i=>i.files && i.files.length);
+  if(VIEW!=='studio') return false;
+  // A chosen file OR a ticked "keep lossless" checkbox counts as in-progress — don't let an SSE
+  // re-render wipe either out from under the user before they click upload.
+  return [...document.querySelectorAll('#studioView input[type=file]')].some(i=>i.files && i.files.length)
+      || [...document.querySelectorAll('#studioView .ukeep')].some(c=>c.checked);
 }
 // The set of projects / who can see them / a user's role changed → refresh whatever's on screen and
 // re-validate the open project (a revoked member is dropped to the list by resyncOpenProject).
