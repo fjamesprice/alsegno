@@ -15,7 +15,10 @@
 # both on startup, but we mkdir + chown them here so a fresh *named* volume inherits the
 # non-root uid's ownership.
 
-FROM node:22-bookworm-slim
+# Pinned by digest for supply-chain integrity. To refresh (do this periodically so base-image security
+# updates land): docker pull node:22-bookworm-slim && docker buildx imagetools inspect \
+# node:22-bookworm-slim — then paste the new sha256 below.
+FROM node:22-bookworm-slim@sha256:d9f850096136edbc402debdd8729579a288aac64574ada0ff4db26b6ae58b0b2
 
 # ffmpeg/ffprobe for the audio+video pipeline; ca-certificates so the prebuild download (and
 # any other HTTPS) validates. Strip apt lists to keep the layer lean.

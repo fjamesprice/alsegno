@@ -18,12 +18,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out the tagged commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.0 (pinned by SHA)
         with:
           fetch-depth: 0   # full history so auto-generated notes can diff against prior tags
 
       - name: Build release archives
         run: bash scripts/package-release.sh "$GITHUB_REF_NAME"
+
+      - name: Generate checksums
+        run: cd dist && sha256sum alsegno-*.zip alsegno-*.tar.gz > SHA256SUMS.txt
 
       - name: Publish GitHub Release
         env:
@@ -35,10 +38,10 @@ jobs:
           # archives, which work but unzip to a different folder name.
           intro="$(printf '**To install:** download `alsegno-%s.zip` (Windows) or `alsegno-%s.tar.gz` (macOS/Linux) from **Assets** below, unzip, and run the installer — see the [README](https://github.com/%s#quick-start). The auto-generated *Source code* assets also work, but unzip to a different folder name.' "$ver" "$ver" "$GITHUB_REPOSITORY")"
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" dist/alsegno-*.zip dist/alsegno-*.tar.gz --clobber
+            gh release upload "$GITHUB_REF_NAME" dist/alsegno-*.zip dist/alsegno-*.tar.gz dist/SHA256SUMS.txt --clobber
           else
             gh release create "$GITHUB_REF_NAME" \
-              dist/alsegno-*.zip dist/alsegno-*.tar.gz \
+              dist/alsegno-*.zip dist/alsegno-*.tar.gz dist/SHA256SUMS.txt \
               --title "alsegno $GITHUB_REF_NAME" \
               --generate-notes
             body="$(gh release view "$GITHUB_REF_NAME" --json body -q .body)"

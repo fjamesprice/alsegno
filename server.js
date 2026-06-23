@@ -234,6 +234,7 @@ db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('auto_update_che
   // pre-migration pending user isn't locked out. Additive + idempotent; independent of the 3a
   // backfill (guarded separately below), so it never re-fires it.
   if (!ucols.includes('first_login_token')) db.exec('ALTER TABLE users ADD COLUMN first_login_token TEXT');
+  if (!ucols.includes('pw_changed_at')) db.exec('ALTER TABLE users ADD COLUMN pw_changed_at INTEGER');
 }
 
 // Migration (Phase 6): video revisions. For a video revision, `stored_name` holds the HQ
@@ -803,6 +804,22 @@ app.use(session({
   cookie: { maxAge: 30 * 24 * 60 * 60 * 1000, secure: 'auto', sameSite: 'lax' }
 }));
 
+// ── CSRF defense-in-depth ────────────────────────────────────
+// sameSite=lax already blocks the classic cross-site cookie ride; this is a second layer. A state-
+// changing request must EITHER carry the SPA's custom header (a cross-site page can't set it — the
+// browser forces a CORS preflight we never approve) OR come from a same-host Origin/Referer. Requests
+// with no Origin/Referer at all (non-browser API clients) are allowed so we don't break them.
+function csrfOk(req) {
+  if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') return true;
+  if (req.get('x-alsegno-csrf')) return true;
+  const src = req.get('origin') || req.get('referer');
+  if (!src) return true;
+  let host; try { host = new URL(src).hostname; } catch { return true; }
+  const xfh = String(req.headers['x-forwarded-host'] || '').split(',')[0].trim().split(':')[0];
+  return host === req.hostname || (xfh && host === xfh) || host === String(req.headers.host || '').split(':')[0];
+}
+app.use((req, res, next) => { if (!csrfOk(req)) return res.status(403).json({ error: 'Cross-site request blocked' }); next(); });
+
 // Re-read the user from the DB on every authenticated request. The session cookie is only a
 // login-time snapshot; without this, deactivation and role changes wouldn't take effect until the
 // user happened to log out (a deactivated admin could keep minting admins). Returns the fresh row
@@ -811,8 +828,11 @@ app.use(session({
 // mirrors how project membership (isMember) is already enforced live on each request.
 function liveUser(req) {
   if (!req.session.user) return null;
-  const u = db.prepare('SELECT username, role, active, display_name FROM users WHERE username = ?').get(req.session.user.username);
+  const u = db.prepare('SELECT username, role, active, display_name, pw_changed_at FROM users WHERE username = ?').get(req.session.user.username);
   if (!u || u.active === 0) return null;
+  // Sessions minted before the password last changed stop authenticating — a password change or admin
+  // reset thus invalidates every OTHER live session for the account at once.
+  if (u.pw_changed_at && (req.session.authAt || 0) < u.pw_changed_at) return null;
   req.session.user = sessionUser(u);
   return u;
 }
@@ -941,6 +961,28 @@ function rateLimited(req, res) {
   return false;
 }
 
+// Per-ACCOUNT lockout — complements the per-IP limiter, which a distributed/IP-rotating attacker can
+// sidestep. After MAX_USER_FAILS bad attempts for one username inside the window, that account is told
+// to wait. Generous by default so real users never trip it; MAX_USER_FAILS=0 disables it. Only existing
+// usernames are tracked (set at the call sites), and it's best-effort in-memory (cleared if it grows).
+const failByUser = new Map();
+const USER_FAIL_MAX = Math.max(0, Number(process.env.MAX_USER_FAILS) || 20); // 0 = disabled
+function userLockoutHit(username) {
+  if (!USER_FAIL_MAX) return false;
+  const e = failByUser.get(username);
+  if (!e) return false;
+  if (Date.now() - e.first > RL_WINDOW_MS) { failByUser.delete(username); return false; }
+  return e.count >= USER_FAIL_MAX;
+}
+function recordUserFail(username) {
+  if (!USER_FAIL_MAX) return;
+  if (failByUser.size > 5000) failByUser.clear();
+  let e = failByUser.get(username);
+  if (!e || Date.now() - e.first > RL_WINDOW_MS) { e = { count: 0, first: Date.now() }; failByUser.set(username, e); }
+  e.count++;
+}
+function clearUserFail(username) { failByUser.delete(username); }
+
 app.post('/api/login', async (req, res) => {
   if (rateLimited(req, res)) return;
   const username = String(req.body.username || '').trim().toLowerCase();
@@ -950,6 +992,7 @@ app.post('/api/login', async (req, res) => {
   const user = db.prepare('SELECT * FROM users WHERE username = ?').get(username);
   if (!user) return res.status(401).json({ error: 'Invalid credentials' });
   if (user.active === 0) return res.status(403).json({ error: 'Account deactivated' });
+  if (userLockoutHit(username)) return res.status(429).json({ error: 'Too many attempts for this account — please wait a few minutes.' });
 
   if (!user.pw_hash) {
     // First login for this account (new user OR admin password reset). Deactivated accounts are
@@ -960,17 +1003,19 @@ app.post('/api/login', async (req, res) => {
       // standard URL can't be hammered into claiming the account). Setting pw_hash and clearing
       // the token happen in ONE atomic UPDATE ⇒ single-use.
       if (!tokenEquals(req.body.token, user.first_login_token)) {
+        recordUserFail(username);
         return res.status(401).json({ error: 'Invalid credentials' });
       }
       { const pe = passwordPolicyError(password); if (pe) return res.status(400).json({ error: pe }); }
-      db.prepare('UPDATE users SET pw_hash = ?, first_login_token = NULL WHERE username = ?').run(await hashPassword(password), username);
+      db.prepare('UPDATE users SET pw_hash = ?, first_login_token = NULL, pw_changed_at = ? WHERE username = ?').run(await hashPassword(password), Date.now(), username);
     } else {
       // Grandfathered: NULL pw_hash AND NULL token — no invite was ever minted (the bootstrap
       // admin, or a pre-migration pending user). Token not required; plain TOFU as before.
       { const pe = passwordPolicyError(password); if (pe) return res.status(400).json({ error: pe }); }
-      db.prepare('UPDATE users SET pw_hash = ? WHERE username = ?').run(await hashPassword(password), username);
+      db.prepare('UPDATE users SET pw_hash = ?, pw_changed_at = ? WHERE username = ?').run(await hashPassword(password), Date.now(), username);
     }
   } else if (!(await verifyPassword(password, user.pw_hash))) {
+    recordUserFail(username);
     return res.status(401).json({ error: 'Invalid credentials' });
   }
 
@@ -979,6 +1024,8 @@ app.post('/api/login', async (req, res) => {
   req.session.regenerate(err => {
     if (err) { console.error('[login] session regenerate failed:', err.message); return res.status(500).json({ error: 'Login failed' }); }
     req.session.user = sessionUser(user);
+    req.session.authAt = Date.now();
+    clearUserFail(username);
     req.session.save(err2 => {
       if (err2) { console.error('[login] session save failed:', err2.message); return res.status(500).json({ error: 'Login failed' }); }
       res.json(req.session.user);
@@ -1014,6 +1061,7 @@ app.get('/api/me', (req, res) => {
 // per-broadcast access check above re-proves it live thereafter. X-Accel-Buffering:no makes nginx
 // stream this response unbuffered (no nginx config change needed); a :heartbeat comment every ~25s
 // keeps the proxy/browser from idling the connection shut. EventSource auto-reconnects on drop.
+const SSE_MAX_PER_USER = Math.max(1, Number(process.env.SSE_MAX_PER_USER) || 12);
 app.get('/api/events', requireAuth, (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -1021,7 +1069,11 @@ app.get('/api/events', requireAuth, (req, res) => {
   res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders();
   res.write('retry: 5000\n\n'); // client waits 5s before reconnecting after a drop
-  const client = { res, username: req.session.user.username };
+  const username = req.session.user.username;
+  // Cap concurrent SSE streams per user (many tabs or a reconnect storm) — evict the oldest over cap.
+  const mine = [...sseClients].filter(c => c.username === username);
+  for (let i = 0; i <= mine.length - SSE_MAX_PER_USER; i++) { try { mine[i].res.end(); } catch {} sseClients.delete(mine[i]); }
+  const client = { res, username };
   sseClients.add(client);
   const hb = setInterval(() => { try { res.write(':hb\n\n'); } catch { clearInterval(hb); sseClients.delete(client); } }, 25000);
   req.on('close', () => { clearInterval(hb); sseClients.delete(client); });
@@ -1127,7 +1179,7 @@ app.get('/api/admin/projects', requireAdmin, (req, res) => {
 
 app.post('/api/projects', requireAdmin, (req, res) => {
   const type = req.body.type === 'song' ? 'song' : 'album';
-  const title = String(req.body.title || '').trim();
+  const title = String(req.body.title || '').trim().slice(0, 200);
   if (!title) return res.status(400).json({ error: 'Title required' });
   // Video projects only when the instance has video enabled; otherwise silently fall back to audio.
   const mediaType = (req.body.media_type === 'video' && settingOn('video_enabled', false)) ? 'video' : 'audio';
@@ -1148,7 +1200,7 @@ app.post('/api/projects', requireAdmin, (req, res) => {
 
 app.put('/api/projects/:id', requireAdmin, (req, res) => {
   if (!projectExists(Number(req.params.id))) return res.status(404).json({ error: 'Not found' });
-  const title = String(req.body.title || '').trim();
+  const title = String(req.body.title || '').trim().slice(0, 200);
   if (!title) return res.status(400).json({ error: 'Title required' });
   db.prepare("UPDATE projects SET title = ?, updated_at = datetime('now') WHERE id = ?").run(title, req.params.id);
   broadcastChange(Number(req.params.id)); // members viewing it get the new title
@@ -1229,13 +1281,13 @@ app.delete('/api/projects/:id/users/:username', requireAdmin, (req, res) => {
 // Video projects are exempt: they hold multiple videos as 'song'-type tracks and never become albums.
 app.post('/api/projects/:id/tracks', requireProjectEngineer(pParam), (req, res) => {
   const pid = req.projectId;
-  const title = String(req.body.title || '').trim();
+  const title = String(req.body.title || '').trim().slice(0, 200);
   if (!title) return res.status(400).json({ error: 'Track title required' });
   const proj = db.prepare('SELECT type, media_type FROM projects WHERE id = ?').get(pid);
   const existing = db.prepare('SELECT COUNT(*) v FROM tracks WHERE project_id = ?').get(pid).v;
   let promoted = false;
   if (proj.type === 'song' && existing >= 1 && proj.media_type !== 'video') {
-    const albumTitle = String(req.body.album_title || '').trim();
+    const albumTitle = String(req.body.album_title || '').trim().slice(0, 200);
     if (!albumTitle) return res.status(400).json({ error: 'Album title required to add a second track' });
     db.prepare("UPDATE projects SET type = 'album', title = ?, updated_at = datetime('now') WHERE id = ?").run(albumTitle, pid);
     promoted = true;
@@ -1248,7 +1300,7 @@ app.post('/api/projects/:id/tracks', requireProjectEngineer(pParam), (req, res) 
 });
 
 app.put('/api/tracks/:id', requireProjectEngineer(pTrack), (req, res) => {
-  const title = String(req.body.title || '').trim();
+  const title = String(req.body.title || '').trim().slice(0, 200);
   if (!title) return res.status(400).json({ error: 'Title required' });
   db.prepare("UPDATE tracks SET title = ?, updated_at = datetime('now') WHERE id = ?").run(title, req.params.id);
   broadcastChange(req.projectId);
@@ -1272,6 +1324,9 @@ app.delete('/api/tracks/:id', requireProjectEngineer(pTrack), (req, res) => {
 
 // Reorder tracks within a project — shared state, any project member may do it. The UPDATE is
 // constrained to this project so a forged id list can't move another project's tracks.
+// Reorder uses requireProjectAccess (any member, INCLUDING clients) by design — like doneness below,
+// track order is shared review state, not a structural engineer-only edit. Documented, not locked
+// down (product decision; see the role note in README).
 app.put('/api/projects/:id/reorder', requireProjectAccess(pParam), (req, res) => {
   const order = Array.isArray(req.body.order) ? req.body.order : [];
   const stmt = db.prepare('UPDATE tracks SET sort_order = ? WHERE id = ? AND project_id = ?');
@@ -1405,7 +1460,7 @@ app.post('/api/tracks/:id/revisions', requireProjectEngineer(pTrack), uploadGuar
   // track's video. Respond immediately and transcode/analyze in the background queue (long files
   // can't be held in one HTTP request); Studio shows "processing…" via mix_processing.
   const file = req.file, projectId = req.projectId, username = req.session.user.username, trackId = track.id;
-  const notes = String(req.body.notes || ''), keepLossless = wantKeepLossless(req);
+  const notes = String(req.body.notes || '').slice(0, 10000), keepLossless = wantKeepLossless(req);
   db.prepare('UPDATE tracks SET mix_processing = mix_processing + 1 WHERE id = ?').run(trackId);
   broadcastChange(projectId);
   res.json({ ok: true, processing: true });
@@ -1492,7 +1547,7 @@ app.post('/api/revisions/:id/replace', requireProjectEngineer(pRev), uploadGuard
 });
 
 app.put('/api/revisions/:id', requireProjectEngineer(pRev), (req, res) => {
-  db.prepare('UPDATE revisions SET notes = ? WHERE id = ?').run(String(req.body.notes || ''), req.params.id);
+  db.prepare('UPDATE revisions SET notes = ? WHERE id = ?').run(String(req.body.notes || '').slice(0, 10000), req.params.id);
   broadcastChange(req.projectId);
   res.json({ ok: true });
 });
@@ -1574,7 +1629,7 @@ app.get('/api/tracks/:id/comments', requireProjectAccess(pTrack), (req, res) => 
 });
 
 app.post('/api/tracks/:id/comments', requireProjectAccess(pTrack), (req, res) => {
-  const body = String(req.body.body || '').trim();
+  const body = String(req.body.body || '').trim().slice(0, 10000);
   if (!body) return res.status(400).json({ error: 'Comment body required' });
   let ts = (req.body.ts === null || req.body.ts === undefined || req.body.ts === '') ? null : Number(req.body.ts);
   let revisionId = req.body.revision_id ? Number(req.body.revision_id) : null;
@@ -1619,7 +1674,7 @@ app.put('/api/comments/:id', requireProjectAccess(pComment), (req, res) => {
     if (c.author !== req.session.user.username && req.session.user.role !== 'admin') {
       return res.status(403).json({ error: 'Not your note' });
     }
-    newBody = String(req.body.body).trim();
+    newBody = String(req.body.body).trim().slice(0, 10000);
     if (!newBody) return res.status(400).json({ error: 'Comment body required' });
   }
   let mutated = false;
@@ -1943,7 +1998,7 @@ app.get('/api/admin/users', requireAdmin, (req, res) => {
 app.post('/api/users', requireAdmin, (req, res) => {
   const username = String(req.body.username || '').trim().toLowerCase();
   const role = String(req.body.role || '');
-  const display_name = String(req.body.display_name || '').trim() || null;
+  const display_name = String(req.body.display_name || '').trim().slice(0, 64) || null;
   if (!/^[a-z0-9_.-]{2,32}$/.test(username)) return res.status(400).json({ error: 'Username must be 2–32 chars: a–z 0–9 . _ -' });
   if (!ROLES.has(role)) return res.status(400).json({ error: 'Invalid role' });
   if (db.prepare('SELECT 1 FROM users WHERE username = ?').get(username)) return res.status(400).json({ error: 'Username already exists' });
@@ -1967,7 +2022,7 @@ app.post('/api/users/:u/reset', requireAdmin, (req, res) => {
   // Back to TOFU — and RE-MINT the invite token. A reset account would otherwise be hammerable
   // again (the whole point of the token), so a reset must produce a fresh single-use link.
   const token = mintInviteToken();
-  db.prepare('UPDATE users SET pw_hash = NULL, first_login_token = ? WHERE username = ?').run(token, username);
+  db.prepare('UPDATE users SET pw_hash = NULL, first_login_token = ?, pw_changed_at = ? WHERE username = ?').run(token, Date.now(), username);
   broadcastProjects(); // refresh the "password pending" pill on other admins' user tables
   res.json({ ok: true, username, first_login_token: token });
 });
@@ -1979,7 +2034,7 @@ app.put('/api/users/:u', requireAdmin, (req, res) => {
   let role = u.role, active = u.active, display_name = u.display_name;
   if (req.body.role !== undefined) { if (!ROLES.has(String(req.body.role))) return res.status(400).json({ error: 'Invalid role' }); role = String(req.body.role); }
   if (req.body.active !== undefined) active = req.body.active ? 1 : 0;
-  if (req.body.display_name !== undefined) display_name = String(req.body.display_name || '').trim() || null;
+  if (req.body.display_name !== undefined) display_name = String(req.body.display_name || '').trim().slice(0, 64) || null;
   // Never strand the instance: block demoting/deactivating the last active admin.
   const wasActiveAdmin = u.role === 'admin' && u.active === 1;
   const staysActiveAdmin = role === 'admin' && active === 1;
@@ -2026,7 +2081,9 @@ app.post('/api/me/password', requireAuth, async (req, res) => {
   if (!(await verifyPassword(current, u.pw_hash))) return res.status(403).json({ error: 'Current password is incorrect' });
   if (!next) return res.status(400).json({ error: 'New password required' });
   { const pe = passwordPolicyError(next); if (pe) return res.status(400).json({ error: pe }); }
-  db.prepare('UPDATE users SET pw_hash = ? WHERE username = ?').run(await hashPassword(next), username);
+  const now = Date.now();
+  db.prepare('UPDATE users SET pw_hash = ?, pw_changed_at = ? WHERE username = ?').run(await hashPassword(next), now, username);
+  req.session.authAt = now; // keep THIS session valid; every other session (older authAt) is now invalidated
   res.json({ ok: true });
 });
 

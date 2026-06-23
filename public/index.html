@@ -745,6 +745,7 @@ let resyncRetry=null;        // pending retry of a deferred SSE resync
 // ───────── API ─────────
 async function api(path, opts={}){
   const o={headers:{},...opts};
+  o.headers={'X-Alsegno-CSRF':'1', ...o.headers}; // CSRF marker: cross-site pages can't set a custom header
   if(o.body && !(o.body instanceof FormData)){ o.headers['Content-Type']='application/json'; o.body=JSON.stringify(o.body); }
   const res=await fetch('api/'+path,o);
   if(res.status===401){ showLogin(); throw new Error('unauth'); }
@@ -792,7 +793,7 @@ $('#loginForm').addEventListener('submit',async e=>{
   // swallows the message, but here a 401 is the result the user needs to see (wrong creds / stale
   // invite). Handle the response directly so they get feedback.
   let r;
-  try{ r=await fetch('api/login',{method:'POST',headers:{'Content-Type':'application/json'},
+  try{ r=await fetch('api/login',{method:'POST',headers:{'Content-Type':'application/json','X-Alsegno-CSRF':'1'},
         body:JSON.stringify({username:$('#luser').value,password:$('#lpass').value, token: INVITE?INVITE.token:undefined})}); }
   catch{ $('#loginErr').textContent='Could not reach the server. Please try again.'; return; }
   if(!r.ok){

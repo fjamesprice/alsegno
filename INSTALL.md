@@ -37,7 +37,9 @@ This is the **native install** (Node + ffmpeg on the host). For Docker, skip to
 
 **Download a release (recommended — no git needed).** Grab the latest `alsegno-x.y.z.zip`
 (or `.tar.gz`) from the [Releases page](https://github.com/fjamesprice/alsegno/releases/latest)
-and unzip it. You get a single `alsegno` folder with everything in it.
+and unzip it. You get a single `alsegno` folder with everything in it. *(Optional integrity check: each
+release also ships `SHA256SUMS.txt` — verify with `sha256sum -c SHA256SUMS.txt` on Linux or
+`shasum -a 256 -c SHA256SUMS.txt` on macOS.)*
 
 **Or clone the repo** — tracks the latest code and lets you update with `git pull`:
 
@@ -186,7 +188,9 @@ Binding to `0.0.0.0` lets other devices on the same network reach the app — ha
 a client reviewing a mix from their phone. But the bare port speaks **plain HTTP with no
 TLS**, so only do this on a network you trust. For internet-facing deployments, keep
 `HOST=127.0.0.1` and put a reverse proxy (nginx, Caddy) with HTTPS in front of it — the app
-uses relative URLs throughout, so it works unchanged behind a sub-path proxy.
+uses relative URLs throughout, so it works unchanged behind a sub-path proxy. **When you put a reverse
+proxy in front, set `TRUST_PROXY=1` in `.env`** so the app uses the real client IP for the login rate
+limiter and marks its session cookie `Secure`. Leave it unset for direct LAN / share-tunnel exposure.
 
 ### Sharing a link over the internet (no router setup)
 
