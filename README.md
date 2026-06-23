@@ -25,7 +25,7 @@
 
 ## Why did I make this?
 
-Emailing `whatever_v3_r09.mp3` around and getting back "the twangy part is too loud" can get complicated really fast. You can have a conversation about it, but then you have to either scroll back and find everything between chit chat, or write it all down separately and read off of that, I guess...  Or you could use this thing, which keeps the audio, the versions, and the feedback in one place, anchored to the timeline where everyone involved can see it.  It works really well and I wish I had it sooner.
+Emailing `whatever_v3_r09.mp3` around and getting back "the twangy part is too loud" can get complicated (annoying). You can have a conversation about it, but then you have to either scroll back and find everything between chit chat, or write it all down separately and read off of that, I guess...  Or you could use this thing, which keeps the audio, the versions, and the feedback in one place, anchored to the timeline where everyone involved can see it.  It works really well and I wish I had it sooner.
 
 ## Features
 
@@ -44,14 +44,15 @@ Emailing `whatever_v3_r09.mp3` around and getting back "the twangy part is too l
 
 **Audio *and* video**
 
-- Video projects get a video stage with **frame-stepping** (`m:ss:ff`) and an instant-scrub proxy. Editors can review cuts and audio-for-picture with the same timestamped-notes workflow. It's really fast, too.
+- Video projects get a video stage with frame-stepping (`m:ss:ff`) and an instant-scrub proxy. Editors can review cuts and audio-for-picture with the same timestamped-notes workflow. It's really fast, too.
+- Primarily made with pic-locked edits in mind, but videos can be replaced or added to a project if edits change.
 
 **Running it**
 
-- **Self-hosted & private** — your files, your server. Mounts cleanly behind a reverse proxy at a subpath.
+- **Self-hosted & private** — your files, your server. Mounts cleanly behind a reverse proxy at a subpath.  Lossy review copies for playback are the default to save space, while keeping lossless copies for download is always an option.
 - **No build step** — one Express server + one HTML/JS page, backed by SQLite. The only runtime dependency is `ffmpeg`.
 - **Live** — comments, new revisions, and doneness sync to everyone in real time over SSE. It's like a chat room for your projects.
-- **Simple access** — invite links + trust-on-first-use passwords (no public sign-up); per-project membership with **admin / engineer / client** roles. Engineers add and edit tracks, revisions, and media; clients are review-only for media but *can* comment, mark seen, set a track's doneness, and reorder tracks (shared review state). It's secure and really simple.
+- **Simple access** — invite links + trust-on-first-use passwords (no public sign-up); per-project membership with **admin / engineer / client** roles. It's secure and really simple.
 
 ## Quick start
 
@@ -86,6 +87,7 @@ cd alsegno
 SESSION_SECRET=$(openssl rand -hex 48) docker compose up -d --build
 # then open http://localhost:3458
 ```
+
 </details>
 
 The **first login** for the admin account sets its password (trust-on-first-use). Services, reverse-proxy/HTTPS, and all configuration are covered in **[INSTALL.md](INSTALL.md)**.
@@ -103,6 +105,14 @@ There's not a whole lot to it, so it should be fairly intuitive. A project holds
 ## Configuration
 
 Settings live in `.env` — `PORT`, `SESSION_SECRET`, and optional `HOST`, `DATA_DIR`, `UPLOADS_DIR`. See **[INSTALL.md](INSTALL.md)**.
+
+## Planned Features
+
+- **Multitrack support** — Add just a sound effects track to a video, or whatever
+
+- **Fine-grained permissions** — Give specific clients and engineers control over specific actions for specific projects (we're half-way there)
+
+- Other stuff...
 
 ## Contributing
 
