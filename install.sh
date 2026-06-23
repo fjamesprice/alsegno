@@ -168,11 +168,16 @@ else
 fi
 
 # ── 3. dependencies ──────────────────────────────────────────
-info "Installing dependencies (npm install)…"
-if ! npm install --no-audit --no-fund; then
-  warn "npm install failed — better-sqlite3 compiles a native module and may need build tools:"
-  buildtools_hint
-  die "Install the build prerequisites above, then re-run."
+info "Installing dependencies (npm ci)…"
+# Prefer npm ci — an exact, reproducible install from the committed lockfile. Fall back to npm install
+# if there's no/older lockfile (e.g. a downloaded zip) so a fresh install never dead-ends.
+if ! npm ci --no-audit --no-fund; then
+  warn "npm ci unavailable (no/old lockfile?) — falling back to npm install…"
+  if ! npm install --no-audit --no-fund; then
+    warn "Dependency install failed — better-sqlite3 compiles a native module and may need build tools:"
+    buildtools_hint
+    die "Install the build prerequisites above, then re-run."
+  fi
 fi
 ok "Dependencies installed"
 
@@ -231,6 +236,14 @@ HOST=$host_val
 SESSION_SECRET=$secret
 ADMIN_USER=$admin_val
 SHARE=$share_val
+
+# HTTPS lock-in (optional). Leave this OFF unless you know you want it.
+# If ON (ENABLE_HSTS=1) AND you open the site over a secure https link, browsers will
+# remember to only ever use the secure (https) version of your site. Good for security,
+# but browsers remember it for a long time — so if you later open the site over plain
+# http (no padlock) it may refuse to load until that memory fades. Behind nginx/Caddy
+# with https, leave this OFF and let the proxy handle it.
+# ENABLE_HSTS=0
 EOF
   )
   # Persist DATA_DIR/UPLOADS_DIR only when overridden, so the booted service (which reads them via

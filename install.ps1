@@ -127,10 +127,15 @@ if((Have ffmpeg) -and (Have ffprobe)){
 }
 
 # ── 3. dependencies ──────────────────────────────────────────
-Info "Installing dependencies (npm install)..."
-npm install --no-audit --no-fund
+Info "Installing dependencies (npm ci)..."
+# Prefer npm ci (exact, reproducible from the lockfile); fall back to npm install if it's unavailable.
+npm ci --no-audit --no-fund
 if($LASTEXITCODE -ne 0){
-  Warn "npm install failed - better-sqlite3 compiles a native module and may need build tools:"
+  Warn "npm ci unavailable (no/old lockfile?) - falling back to npm install..."
+  npm install --no-audit --no-fund
+}
+if($LASTEXITCODE -ne 0){
+  Warn "Dependency install failed - better-sqlite3 compiles a native module and may need build tools:"
   Write-Host "  Install 'Desktop development with C++' (Visual Studio Build Tools) and Python 3,"
   Write-Host "  or:  npm install --global node-gyp"
   Die "Install the build prerequisites above, then re-run."
@@ -183,8 +188,17 @@ if(Test-Path $EnvFile){
     Info "No problem - let's go through them again."
   }
   $secret = node -e "process.stdout.write(require('crypto').randomBytes(48).toString('hex'))"
-  @("PORT=$portVal","HOST=$hostVal","SESSION_SECRET=$secret","ADMIN_USER=$adminVal","SHARE=$shareVal") `
-    -join "`r`n" | Set-Content -Path $EnvFile -Encoding ascii
+  @(
+    "PORT=$portVal","HOST=$hostVal","SESSION_SECRET=$secret","ADMIN_USER=$adminVal","SHARE=$shareVal",
+    "",
+    "# HTTPS lock-in (optional). Leave this OFF unless you know you want it.",
+    "# If ON (ENABLE_HSTS=1) AND you open the site over a secure https link, browsers will",
+    "# remember to only ever use the secure (https) version of your site. Good for security,",
+    "# but browsers remember it for a long time - so if you later open the site over plain",
+    "# http (no padlock) it may refuse to load until that memory fades. Behind nginx/Caddy",
+    "# with https, leave this OFF and let the proxy handle it.",
+    "# ENABLE_HSTS=0"
+  ) -join "`r`n" | Set-Content -Path $EnvFile -Encoding ascii
   # Mirror the chmod 600 the sh installer applies: the file holds SESSION_SECRET, so strip inherited
   # ACEs and grant only the current user — otherwise a repo cloned outside the user profile (e.g. C:\)
   # inherits a readable-by-all-users ACL and the cookie-signing secret leaks to other local accounts.

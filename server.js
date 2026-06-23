@@ -29,14 +29,26 @@ const TRUST_PROXY = (() => {
   return v; // 'loopback', a subnet, etc. — passed straight through to Express
 })();
 
+// HSTS is OFF unless an operator opts in (ENABLE_HSTS=1), and even then only sent over a real HTTPS
+// request. It's a browser-cached "https-only" commitment; behind a TLS-terminating proxy, prefer
+// configuring it there. See .env.example for the plain-English rationale.
+const ENABLE_HSTS = /^(1|true|yes|on)$/i.test((process.env.ENABLE_HSTS || '').trim());
+
 // ── Directories ──────────────────────────────────────────────
 // Env-overridable so a throwaway test instance can point at a temp DB/uploads dir
 // (DATA_DIR=/tmp/at-test/data UPLOADS_DIR=/tmp/at-test/uploads PORT=3999 node server.js)
 // without touching the live store. Unset in prod ⇒ the original __dirname paths.
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const UPLOADS_DIR = process.env.UPLOADS_DIR || path.join(__dirname, 'uploads');
+// Owner-only by default: the SQLite DB and uploaded media must not be world-readable on a shared host.
+// umask covers every file the process creates (DB, WAL/SHM, uploads, temp scratch); the chmods tighten
+// the two dirs in case they pre-existed with looser permissions. Opt out with STRICT_FILE_PERMS=0 for
+// unusual deployments (e.g. a Docker bind-mount a non-root host user must read directly).
+const STRICT_FILE_PERMS = !/^(0|false|no|off)$/i.test((process.env.STRICT_FILE_PERMS || '').trim());
+if (STRICT_FILE_PERMS) process.umask(0o077);
 fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+if (STRICT_FILE_PERMS) { try { fs.chmodSync(DATA_DIR, 0o700); } catch {} try { fs.chmodSync(UPLOADS_DIR, 0o700); } catch {} }
 
 // Upload safety caps (disk-fill DoS). The free-space margin always applies; the global byte quota and
 // per-track revision cap are operator-tunable. UPLOAD_FREE_SPACE_MARGIN_MB = headroom to always keep
@@ -48,6 +60,8 @@ const MAX_REVISIONS_PER_TRACK = Math.max(1, Number(process.env.MAX_REVISIONS_PER
 // ── Database ─────────────────────────────────────────────────
 const db = new Database(path.join(DATA_DIR, 'tracker.db'));
 db.pragma('journal_mode = WAL');
+// DB + its WAL/SHM sidecars owner-only (they hold session rows and all app content).
+if (STRICT_FILE_PERMS) for (const f of ['tracker.db', 'tracker.db-wal', 'tracker.db-shm']) { try { fs.chmodSync(path.join(DATA_DIR, f), 0o600); } catch {} }
 db.pragma('foreign_keys = ON');
 
 db.exec(`
@@ -749,6 +763,10 @@ app.use((req, res, next) => {
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'no-referrer');
+  // Disable powerful browser features the app never uses (fullscreen/autoplay keep their defaults, so
+  // the video stage still works). Opt-in HSTS only when actually served over HTTPS.
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), usb=(), payment=(), magnetometer=(), gyroscope=(), accelerometer=(), midi=()');
+  if (ENABLE_HSTS && req.secure) res.setHeader('Strict-Transport-Security', 'max-age=15552000');
   next();
 });
 app.use(express.static(path.join(__dirname, 'public')));
