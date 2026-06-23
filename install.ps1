@@ -307,9 +307,63 @@ function Ensure-Cloudflared {
   Remove-Item $script:CfBin -Force -ErrorAction SilentlyContinue
   return $false
 }
+# ── LAN / port-forward sharing (used when a tunnel can't be created) ──
+function Get-ExtIp { try { (Invoke-RestMethod -Uri 'https://api.ipify.org' -TimeoutSec 5 -ErrorAction Stop).ToString().Trim() } catch { '' } }
+function Get-LanIp {
+  try {
+    $a = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+         Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } | Select-Object -First 1
+    if($a){ return $a.IPAddress }
+  } catch {}
+  return ''
+}
+function Set-EnvKv($k,$v){
+  if(-not (Test-Path $EnvFile)){ return }
+  $lines = @(Get-Content $EnvFile)
+  if($lines -match "^$k="){ $lines = $lines | ForEach-Object { if($_ -match "^$k="){ "$k=$v" } else { $_ } } }
+  else { $lines += "$k=$v" }
+  ($lines -join "`r`n") | Set-Content -Path $EnvFile -Encoding ascii
+}
+function Show-ShareLan($persisted){
+  $lan = Get-LanIp; $ext = Get-ExtIp
+  Write-Host ""
+  Write-Host "To share alsegno without a tunnel:" -ForegroundColor White
+  if($lan){ Write-Host "  - Same Wi-Fi / network:  http://${lan}:$PortVal  (no setup needed)" }
+  if($ext){ Write-Host "  - Over the internet:     http://${ext}:$PortVal" } else { Write-Host "  - Over the internet:     http://<your-public-IP>:$PortVal" }
+  Write-Host "       -> first forward port $PortVal on your router to this computer, then send that link."
+  Warn "  Internet sharing this way is plain HTTP (no HTTPS) and needs router port-forwarding"
+  Warn "  (it won't work behind carrier-grade NAT). alsegno's login still gates access - share only with people you trust."
+  if($persisted){ Write-Host "  Future launches use this local-network mode - set SHARE=cloudflare or SHARE=tailscale in .env to try a tunnel again." }
+}
+# Rebind to the LAN (0.0.0.0) and run the app HERE with port-forward info. $true persists SHARE=lan.
+function Run-LanShare($persist){
+  if($script:AppProc -and -not $script:AppProc.HasExited){
+    Stop-Process -Id $script:AppProc.Id -Force -ErrorAction SilentlyContinue
+    for($i=0; $i -lt 50 -and (PortInUse '127.0.0.1' $PortVal); $i++){ Start-Sleep -Milliseconds 100 }   # wait for the loopback bind to release
+  }
+  $script:AppProc = $null
+  if($persist){ Set-EnvKv 'HOST' '0.0.0.0'; Set-EnvKv 'SHARE' 'lan' }
+  Show-ShareLan $persist
+  if(PortInUse '0.0.0.0' $PortVal){
+    Write-Host ""; Ok "alsegno is already running. Opening http://localhost:$PortVal ..."; try { Start-Process "http://localhost:$PortVal" } catch {}
+    $script:ShareOk = $true; return
+  }
+  Write-Host ""
+  Ok "Starting alsegno. Keep this window open while you use it; close it (or press Ctrl+C) to stop."
+  Start-Job -ScriptBlock { param($p) for($i=0; $i -lt 150; $i++){ try { $c=New-Object Net.Sockets.TcpClient; $c.Connect('127.0.0.1',[int]$p); $c.Close(); break } catch { Start-Sleep -Milliseconds 200 } }; try { Start-Process "http://localhost:$p" } catch {} } -ArgumentList $PortVal | Out-Null
+  Write-Host ""
+  $env:HOST = '0.0.0.0'        # bind to the LAN for this run (dotenv won't override an existing env var)
+  & $NodePath $ServerJs
+  Remove-Item Env:\HOST -ErrorAction SilentlyContinue
+  if($LASTEXITCODE -ne 0){
+    Write-Host ""; Warn "alsegno stopped unexpectedly (exit $LASTEXITCODE). The error is shown above."
+    Read-Host "Press Enter to close" | Out-Null
+  }
+  $script:ShareOk = $true
+}
 # Run app + a Cloudflare quick tunnel and print the public link. Sets $script:ShareOk on success.
 function Launch-WithCloudflare {
-  if(-not (Ensure-Cloudflared)){ return }
+  if(-not (Ensure-Cloudflared)){ Warn "Couldn't download/run cloudflared - using local-network sharing instead."; Run-LanShare $true; return }
   if(-not (Ensure-AppRunning)){ return }
   Write-Host ""
   Ok "Creating your public link..."
@@ -341,14 +395,9 @@ function Launch-WithCloudflare {
     Warn "Couldn't create the public Cloudflare link. cloudflared reported:"
     if(Test-Path "$cflog.err"){ Get-Content "$cflog.err" -Tail 8 }
     elseif(Test-Path $cflog){ Get-Content $cflog -Tail 8 }
-    Write-Host "  (Usually a network/firewall blocking the tunnel, or Cloudflare being busy - try again later, or use Tailscale.)"
+    Write-Host "  (Usually a network/firewall blocking the tunnel, or Cloudflare being busy.)"
     if($script:CfProc -and -not $script:CfProc.HasExited){ Stop-Process -Id $script:CfProc.Id -Force -ErrorAction SilentlyContinue }
-    Write-Host ""
-    Ok "Starting alsegno locally instead - reachable only on this computer at http://localhost:$PortVal."
-    try { Start-Process "http://localhost:$PortVal" } catch {}
-    Write-Host "Keep this window open while you use it; close it (or press Ctrl+C) to stop."
-    if($script:AppProc){ try { Wait-Process -Id $script:AppProc.Id -ErrorAction SilentlyContinue } catch {} }
-    $script:ShareOk = $true   # handled as a local run here — skip the dispatch's racy kill-then-recheck fallback
+    Run-LanShare $true   # rebind to the LAN, remember it (don't retry the failing tunnel next time)
     return
   }
   Write-Host ""
@@ -359,17 +408,14 @@ function Launch-WithCloudflare {
 # Publish over Tailscale Funnel (stable link). Sets $script:ShareOk on success.
 function Launch-WithTailscale {
   if(-not (Get-Command tailscale -ErrorAction SilentlyContinue)){
-    Warn "Tailscale isn't installed, so there's no stable link yet. To set it up:"
-    Write-Host "  1) Install Tailscale:   https://tailscale.com/download"
-    Write-Host "  2) Sign in:             tailscale up"
-    Write-Host "  3) Run this again - it will publish alsegno with:  tailscale funnel $PortVal"
-    return
+    Warn "Tailscale isn't installed. For a stable Tailscale link later: install it"
+    Write-Host "  (https://tailscale.com/download), run 'tailscale up', then re-run this. For now, sharing locally:"
+    Run-LanShare $false; return
   }
   & tailscale status *> $null
   if($LASTEXITCODE -ne 0){
-    Warn "Tailscale is installed but you're not signed in yet. Run:  tailscale up"
-    Write-Host "  Then run this again to publish alsegno over Funnel."
-    return
+    Warn "Tailscale is installed but you're not signed in. Run 'tailscale up', then re-run this. For now, sharing locally:"
+    Run-LanShare $false; return
   }
   if(-not (Ensure-AppRunning)){ return }
   Write-Host ""
@@ -394,6 +440,8 @@ if($Launch){
       Warn "Couldn't set up the public link - starting alsegno locally instead (reachable only on this computer)."
       Write-Host "  Re-run this when you're back online to try the link again, or change SHARE in .env."
     }
+  } elseif($ShareVal -eq 'lan'){
+    Run-LanShare $false
   }
   if($script:ShareOk){
     # the share helper already ran alsegno + the tunnel; nothing more to do

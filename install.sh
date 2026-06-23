@@ -384,6 +384,51 @@ CF_BIN=""; APP_BG_PID=""; CF_BG_PID=""; CF_LOG=""
 share_cleanup() { kill $CF_BG_PID 2>/dev/null || true; kill $APP_BG_PID 2>/dev/null || true; { [ -n "$CF_LOG" ] && rm -f "$CF_LOG" 2>/dev/null; } || true; }
 # Tear down a FAILED share attempt and drop the trap, so the caller can cleanly start the app locally.
 fail_share_to_local() { trap - EXIT INT TERM HUP; share_cleanup; CF_BG_PID=""; APP_BG_PID=""; CF_LOG=""; }
+
+# ── LAN / port-forward sharing (used when a tunnel can't be created) ──
+ext_ip() { curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true; }   # this machine's public IP (empty if offline / no curl)
+lan_ip() {
+  if [ "$PLATFORM" = macos ]; then ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || true
+  else hostname -I 2>/dev/null | awk '{print $1; exit}'; fi
+}
+set_env_kv() {   # persist KEY=VALUE in .env (replace the existing line or append)
+  local k="$1" v="$2" tmp; [ -f "$ENV_FILE" ] || return 0
+  if grep -qE "^$k=" "$ENV_FILE" 2>/dev/null; then
+    tmp="$(mktemp)"; sed "s|^$k=.*|$k=$v|" "$ENV_FILE" > "$tmp" && cat "$tmp" > "$ENV_FILE"; rm -f "$tmp"
+  else printf '%s=%s\n' "$k" "$v" >> "$ENV_FILE"; fi
+}
+print_share_lan() {   # $1=1 → we've switched to LAN mode for good (mention how to retry a tunnel)
+  local lan ext; lan="$(lan_ip)"; ext="$(ext_ip)"
+  say ""
+  say "${BOLD}To share alsegno without a tunnel:${RST}"
+  [ -n "$lan" ] && say "  • Same Wi-Fi / network:  ${BOLD}http://$lan:$PORT_VAL${RST}  (no setup needed)"
+  if [ -n "$ext" ]; then say "  • Over the internet:     ${BOLD}http://$ext:$PORT_VAL${RST}"
+  else                   say "  • Over the internet:     http://<your-public-IP>:$PORT_VAL"; fi
+  say "       → first forward port ${BOLD}$PORT_VAL${RST} on your router to this computer, then send that link."
+  warn "  Internet sharing this way is plain HTTP (no HTTPS) and needs router port-forwarding"
+  warn "  (it won't work behind carrier-grade NAT). alsegno's login still gates access — share only with people you trust."
+  [ "${1:-0}" = 1 ] && say "  Future launches use this local-network mode — set SHARE=cloudflare or SHARE=tailscale in .env to try a tunnel again."
+  return 0
+}
+# Rebind to the LAN (0.0.0.0) and run the app HERE with port-forward sharing info. $1=1 persists SHARE=lan
+# so the (failing) tunnel isn't retried on the next launch.
+run_lan_share() {
+  if [ -n "$APP_BG_PID" ]; then
+    kill "$APP_BG_PID" 2>/dev/null || true; APP_BG_PID=""
+    for _ in $(seq 1 50); do port_in_use 127.0.0.1 "$PORT_VAL" || break; sleep 0.1; done   # wait for the loopback bind to release before rebinding to 0.0.0.0
+  fi
+  HOST_VAL=0.0.0.0
+  [ "${1:-0}" = 1 ] && { set_env_kv HOST 0.0.0.0; set_env_kv SHARE lan; }
+  print_share_lan "${1:-0}"
+  if port_in_use "$HOST_VAL" "$PORT_VAL"; then
+    say ""; ok "alsegno is already running. Opening http://localhost:$PORT_VAL …"; open_url "http://localhost:$PORT_VAL"; return 0
+  fi
+  say ""
+  ok "${BOLD}Starting alsegno.${RST} Keep this window open while you use it; press Ctrl+C (or close it) to stop."
+  ( for _ in $(seq 1 150); do (exec 3<>"/dev/tcp/127.0.0.1/$PORT_VAL") 2>/dev/null && { exec 3>&- 3<&-; open_url "http://localhost:$PORT_VAL"; break; }; sleep 0.2; done ) &
+  say ""
+  HOST=0.0.0.0 npm start
+}
 # Start the app in the background if nothing already serves the port (so a tunnel can run in the
 # foreground). Sets APP_BG_PID when we start it. The caller installs the cleanup trap BEFORE this, so a
 # Ctrl+C during the startup wait can't orphan node.
@@ -432,7 +477,10 @@ ensure_cloudflared() {
 # it started and returns non-zero so the caller falls back to a local run.
 launch_with_cloudflare() {
   trap 'share_cleanup' EXIT INT TERM HUP     # installed BEFORE starting node so Ctrl+C can't orphan it
-  ensure_cloudflared || { fail_share_to_local; return 1; }
+  if ! ensure_cloudflared; then
+    warn "Couldn't download/run cloudflared — using local-network sharing instead."
+    trap - EXIT INT TERM HUP; run_lan_share 1; return 0
+  fi
   ensure_app_running || { fail_share_to_local; return 1; }
   say ""
   ok "Creating your public link…"
@@ -446,17 +494,14 @@ launch_with_cloudflare() {
     kill -0 "$CF_BG_PID" 2>/dev/null || break
     sleep 0.3
   done
-  if [ -z "$url" ]; then            # tunnel never came up — run the app LOCALLY (it's already started), no dead end
+  if [ -z "$url" ]; then            # tunnel never came up — fall back to LAN + port-forward sharing
     warn "Couldn't create the public Cloudflare link. cloudflared reported:"
     tail -8 "$CF_LOG" >&2
-    say "  (Usually a network/firewall blocking the tunnel, or Cloudflare being busy — try again later, or use Tailscale.)"
-    kill "$CF_BG_PID" 2>/dev/null || true; CF_BG_PID=""        # stop cloudflared; KEEP the app we already started
-    say ""
-    ok "Starting alsegno locally instead — reachable only on this computer at ${BOLD}$URL${RST}."
-    open_url "$URL"
-    say "Keep this window open while you use it; press Ctrl+C (or close it) to stop."
-    [ -n "$APP_BG_PID" ] && { wait "$APP_BG_PID" 2>/dev/null || true; }
-    return 0          # handled as a local run — avoids the dispatch's kill-then-recheck port race
+    say "  (Usually a network/firewall blocking the tunnel, or Cloudflare being busy.)"
+    kill "$CF_BG_PID" 2>/dev/null || true; { [ -n "$CF_LOG" ] && rm -f "$CF_LOG"; } 2>/dev/null || true; CF_BG_PID=""
+    trap - EXIT INT TERM HUP        # cloudflared handled; run_lan_share owns the app from here
+    run_lan_share 1                 # rebind to the LAN, remember it (don't retry the failing tunnel next time)
+    return 0
   fi
   say ""
   say "${GRN}${BOLD}========================================================${RST}"
@@ -475,16 +520,13 @@ launch_with_cloudflare() {
 # Publish over Tailscale Funnel (stable link). Returns non-zero to fall back to local.
 launch_with_tailscale() {
   if ! have tailscale; then
-    warn "Tailscale isn't installed, so there's no stable link yet. To set it up:"
-    say "  1) Install Tailscale:   https://tailscale.com/download"
-    say "  2) Sign in:             tailscale up"
-    say "  3) Run this again — it will publish alsegno with:  tailscale funnel $PORT_VAL"
-    return 1
+    warn "Tailscale isn't installed. For a stable Tailscale link later: install it"
+    say "  (https://tailscale.com/download), run 'tailscale up', then re-run this. For now, sharing locally:"
+    run_lan_share 0; return 0
   fi
   if ! tailscale status >/dev/null 2>&1; then
-    warn "Tailscale is installed but you're not signed in yet. Run:  tailscale up"
-    say "  Then run this again to publish alsegno over Funnel."
-    return 1
+    warn "Tailscale is installed but you're not signed in. Run 'tailscale up', then re-run this. For now, sharing locally:"
+    run_lan_share 0; return 0
   fi
   trap 'share_cleanup' EXIT INT TERM HUP     # before ensure_app_running so Ctrl+C can't orphan node
   ensure_app_running || { fail_share_to_local; return 1; }
@@ -501,6 +543,7 @@ if [ "$LAUNCH" = 1 ]; then
   case "$SHARE_VAL" in
     cloudflare) if launch_with_cloudflare; then shared=1; fi ;;
     tailscale)  if launch_with_tailscale;  then shared=1; fi ;;
+    lan)        run_lan_share 0 || true; shared=1 ;;   # || true: keep set -e off inside the helper
   esac
   # If a share mode was chosen but couldn't be set up, say so before falling through to a local run —
   # otherwise the user who wanted a link is silently left with a localhost-only app.
