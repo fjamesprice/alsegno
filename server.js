@@ -18,6 +18,17 @@ const PORT = process.env.PORT || 3458;
 // prompts for that and writes it to .env. Loopback stays the safe default for anyone who doesn't.
 const HOST = process.env.HOST || '127.0.0.1';
 
+// Trust proxy: OFF by default so a directly-exposed instance (HOST=0.0.0.0 or a share tunnel) can't
+// be fooled by a spoofed X-Forwarded-For — which would otherwise defeat the login rate limiter and
+// mis-mark the Secure cookie. Operators who actually front the app with nginx/Caddy set TRUST_PROXY=1
+// (the hop count). This single value drives BOTH app.set('trust proxy') and the rate-limiter IP key.
+const TRUST_PROXY = (() => {
+  const v = (process.env.TRUST_PROXY || '').trim();
+  if (!v || v === '0' || v.toLowerCase() === 'false') return false;
+  if (/^\d+$/.test(v)) return Number(v);
+  return v; // 'loopback', a subnet, etc. — passed straight through to Express
+})();
+
 // ── Directories ──────────────────────────────────────────────
 // Env-overridable so a throwaway test instance can point at a temp DB/uploads dir
 // (DATA_DIR=/tmp/at-test/data UPLOADS_DIR=/tmp/at-test/uploads PORT=3999 node server.js)
@@ -26,6 +37,13 @@ const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const UPLOADS_DIR = process.env.UPLOADS_DIR || path.join(__dirname, 'uploads');
 fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+
+// Upload safety caps (disk-fill DoS). The free-space margin always applies; the global byte quota and
+// per-track revision cap are operator-tunable. UPLOAD_FREE_SPACE_MARGIN_MB = headroom to always keep
+// free; MAX_UPLOAD_BYTES_GB = 0 ⇒ unlimited; MAX_REVISIONS_PER_TRACK caps revisions per track.
+const UPLOAD_MARGIN_BYTES = Math.max(0, Number(process.env.UPLOAD_FREE_SPACE_MARGIN_MB) || 500) * 1024 * 1024;
+const MAX_UPLOAD_BYTES = Math.max(0, Number(process.env.MAX_UPLOAD_BYTES_GB) || 0) * 1024 * 1024 * 1024; // 0 = unlimited
+const MAX_REVISIONS_PER_TRACK = Math.max(1, Number(process.env.MAX_REVISIONS_PER_TRACK) || 100);
 
 // ── Database ─────────────────────────────────────────────────
 const db = new Database(path.join(DATA_DIR, 'tracker.db'));
@@ -327,6 +345,14 @@ function tokenEquals(a, b) {
   const ab = Buffer.from(String(a || '')), bb = Buffer.from(String(b || ''));
   return ab.length > 0 && ab.length === bb.length && crypto.timingSafeEqual(ab, bb);
 }
+// Minimum password strength, enforced whenever a password is SET (first-login or self-service change).
+// Length-only by design for a small self-hosted tool; operators can raise the floor via MIN_PASSWORD_LEN.
+const MIN_PASSWORD_LEN = Math.max(1, Number(process.env.MIN_PASSWORD_LEN) || 8);
+function passwordPolicyError(pw) {
+  if (typeof pw !== 'string' || pw.length < MIN_PASSWORD_LEN) return `Password must be at least ${MIN_PASSWORD_LEN} characters.`;
+  if (pw.length > 1024) return 'Password is too long (max 1024 characters).';
+  return null;
+}
 // What we keep in the session cookie (and hand to the client) — never the pw_hash.
 const sessionUser = u => ({ username: u.username, role: u.role, display_name: u.display_name || null });
 // Instance setting as a boolean (missing key ⇒ default). Used by bootstrap so every role learns
@@ -360,10 +386,42 @@ function artUpload(req, res, next) {
   });
 }
 
+// ── Upload disk-fill guard ───────────────────────────────────
+// Runs BEFORE multer writes the temp file (keyed on Content-Length) so an oversized upload is rejected
+// before it can touch the disk. Always enforces a free-space margin; optionally a global byte quota
+// and a per-track revision cap. statfs/readdir are best-effort — if unavailable we fail open, since
+// multer's own 1 GB fileSize limit still bounds any single write.
+function freeSpaceFor(bytes) {
+  try { const st = fs.statfsSync(UPLOADS_DIR); return (st.bavail * st.bsize) - UPLOAD_MARGIN_BYTES >= bytes; }
+  catch { return true; }
+}
+function uploadsDirBytes() {
+  let total = 0;
+  try { for (const f of fs.readdirSync(UPLOADS_DIR)) { try { total += fs.statSync(path.join(UPLOADS_DIR, f)).size; } catch {} } } catch {}
+  return total;
+}
+function uploadGuard(opts = {}) {
+  return (req, res, next) => {
+    const incoming = Number(req.headers['content-length']) || 0;
+    if (!freeSpaceFor(incoming)) return res.status(507).json({ error: 'Not enough free disk space on the server for this upload.' });
+    if (MAX_UPLOAD_BYTES > 0 && uploadsDirBytes() + incoming > MAX_UPLOAD_BYTES)
+      return res.status(413).json({ error: 'Server storage quota reached — free space or raise MAX_UPLOAD_BYTES_GB.' });
+    if (opts.maxPerTrack) {
+      const row = db.prepare('SELECT COUNT(*) c FROM revisions WHERE track_id = ? AND is_orig_audio = 0').get(req.params.id);
+      if (row && row.c >= opts.maxPerTrack) return res.status(409).json({ error: `This track already has the maximum of ${opts.maxPerTrack} revisions.` });
+    }
+    next();
+  };
+}
+
 // ── ffmpeg helpers ───────────────────────────────────────────
+// Hard wall-clock ceiling on every ffmpeg/ffprobe child: a malformed or maliciously-crafted media
+// input can't hang a job and wedge the serialized media queue for everyone. On timeout execFile
+// SIGKILLs the child and errors out, so the existing per-job try/catch + orphan cleanup still fires.
+const FFMPEG_TIMEOUT = Math.max(60, Number(process.env.FFMPEG_TIMEOUT_SEC) || 15 * 60) * 1000;
 function run(cmd, args) {
   return new Promise((resolve, reject) => {
-    execFile(cmd, args, { maxBuffer: 1024 * 1024 * 512, encoding: 'buffer' }, (err, stdout, stderr) => {
+    execFile(cmd, args, { maxBuffer: 1024 * 1024 * 512, encoding: 'buffer', timeout: FFMPEG_TIMEOUT, killSignal: 'SIGKILL' }, (err, stdout, stderr) => {
       if (err) return reject(new Error(`${cmd} failed: ${err.message} :: ${stderr}`));
       resolve(stdout);
     });
@@ -451,7 +509,7 @@ function analyzeLoudness(file) {
     execFile('ffmpeg',
       ['-hide_banner', '-nostats', '-i', file, '-af',
        `ebur128=peak=true:metadata=1,ametadata=mode=print:file=${metaFile}`, '-f', 'null', '-'],
-      { maxBuffer: 1024 * 1024 * 64, encoding: 'buffer' },
+      { maxBuffer: 1024 * 1024 * 64, encoding: 'buffer', timeout: FFMPEG_TIMEOUT, killSignal: 'SIGKILL' },
       (err, _so, se) => {
         const stderr = se ? se.toString() : '';
         let txt = ''; try { txt = fs.readFileSync(metaFile, 'utf8'); } catch {}
@@ -675,9 +733,24 @@ let mediaChain = Promise.resolve();
 function enqueueMedia(job) { mediaChain = mediaChain.then(() => job().catch(e => console.error('[media-queue] job failed:', e && e.message))); }
 
 // ── Express setup ────────────────────────────────────────────
-app.set('trust proxy', 1);
+app.set('trust proxy', TRUST_PROXY);
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// ── Security headers (defense-in-depth) ──────────────────────
+// The frontend is a single inline <script>+<style> with no build step, so a nonce/strict CSP isn't
+// feasible; 'unsafe-inline' stays for script/style (XSS is held off by the audited output-escaping),
+// while CSP still kills framing, plugins, <base> hijacking and any cross-origin resource loads.
+app.use((req, res, next) => {
+  res.setHeader('Content-Security-Policy',
+    "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; " +
+    "img-src 'self' data:; media-src 'self' blob:; script-src 'self' 'unsafe-inline'; " +
+    "style-src 'self' 'unsafe-inline'; connect-src 'self'; form-action 'self'");
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  next();
+});
 app.use(express.static(path.join(__dirname, 'public')));
 // Sessions persist in SQLite (the existing tracker.db, via the same better-sqlite3 handle) rather
 // than the default in-memory store, so a server restart/reboot no longer logs everyone out — it
@@ -837,7 +910,10 @@ function broadcastUpdate(status) {
 const loginHits = new Map(); // ip → { count, first }
 const RL_WINDOW_MS = 15 * 60 * 1000, RL_MAX = 40;
 function rateLimited(req, res) {
-  const ip = req.ip || 'unknown';
+  // When we DON'T trust a proxy, key on the unspoofable socket peer — otherwise a directly-exposed
+  // instance lets a client set X-Forwarded-For and rotate the key to slip the throttle. Behind a
+  // trusted proxy, req.ip is the real client IP the proxy reports.
+  const ip = (TRUST_PROXY ? req.ip : req.socket.remoteAddress) || 'unknown';
   const now = Date.now();
   if (loginHits.size > 5000) loginHits.clear();           // crude cap against IP-rotation memory growth
   let e = loginHits.get(ip);
@@ -868,10 +944,12 @@ app.post('/api/login', async (req, res) => {
       if (!tokenEquals(req.body.token, user.first_login_token)) {
         return res.status(401).json({ error: 'Invalid credentials' });
       }
+      { const pe = passwordPolicyError(password); if (pe) return res.status(400).json({ error: pe }); }
       db.prepare('UPDATE users SET pw_hash = ?, first_login_token = NULL WHERE username = ?').run(await hashPassword(password), username);
     } else {
       // Grandfathered: NULL pw_hash AND NULL token — no invite was ever minted (the bootstrap
       // admin, or a pre-migration pending user). Token not required; plain TOFU as before.
+      { const pe = passwordPolicyError(password); if (pe) return res.status(400).json({ error: pe }); }
       db.prepare('UPDATE users SET pw_hash = ? WHERE username = ?').run(await hashPassword(password), username);
     }
   } else if (!(await verifyPassword(password, user.pw_hash))) {
@@ -1226,7 +1304,7 @@ app.post('/api/tracks/:id/seen', requireProjectAccess(pTrack), (req, res) => {
 // Stores the HQ preview + 480p proxy + fps/dims/duration on the track and, when the video carries
 // audio, seeds/refreshes the "Original audio" revision (is_orig_audio=1, rev_number 0) IN PLACE so its
 // id (and any comments) survive a re-upload. The track's audio-mix revisions are untouched.
-app.post('/api/tracks/:id/video', requireProjectEngineer(pTrack), upload.single('file'), (req, res) => {
+app.post('/api/tracks/:id/video', requireProjectEngineer(pTrack), uploadGuard(), upload.single('file'), (req, res) => {
   const track = db.prepare('SELECT id FROM tracks WHERE id = ?').get(req.params.id);
   if (!track) { if (req.file) { try { fs.unlinkSync(req.file.path); } catch {} } return res.status(404).json({ error: 'Track not found' }); }
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
@@ -1300,7 +1378,7 @@ app.post('/api/tracks/:id/video', requireProjectEngineer(pTrack), upload.single(
 });
 
 // ── Revision routes ──────────────────────────────────────────
-app.post('/api/tracks/:id/revisions', requireProjectEngineer(pTrack), upload.single('file'), (req, res) => {
+app.post('/api/tracks/:id/revisions', requireProjectEngineer(pTrack), uploadGuard({ maxPerTrack: MAX_REVISIONS_PER_TRACK }), upload.single('file'), (req, res) => {
   const track = db.prepare('SELECT id FROM tracks WHERE id = ?').get(req.params.id);
   if (!track) { if (req.file) { try { fs.unlinkSync(req.file.path); } catch {} } return res.status(404).json({ error: 'Track not found' }); }
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
@@ -1342,7 +1420,7 @@ app.post('/api/tracks/:id/revisions', requireProjectEngineer(pTrack), upload.sin
 
 // Replace the audio of an EXISTING revision in place — keeps id/rev_number/notes and the whole
 // comment thread; only the audio + its analysis change. Same pipeline as create (ROADMAP 2.1).
-app.post('/api/revisions/:id/replace', requireProjectEngineer(pRev), upload.single('file'), (req, res) => {
+app.post('/api/revisions/:id/replace', requireProjectEngineer(pRev), uploadGuard(), upload.single('file'), (req, res) => {
   const rev = db.prepare('SELECT * FROM revisions WHERE id = ?').get(req.params.id);
   if (!rev) { if (req.file) { try { fs.unlinkSync(req.file.path); } catch {} } return res.status(404).json({ error: 'Revision not found' }); }
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
@@ -1706,7 +1784,14 @@ function makeMidi(markers) {
 function makeAudacity(markers) { // start<TAB>end<TAB>label, decimal seconds; point label start==end
   return markers.length ? markers.map(k => `${fmtSeconds(k.ts)}\t${fmtSeconds(k.ts)}\t${markerText(k)}`).join('\n') + '\n' : '';
 }
-const csvField = s => { s = asciiLine(s); return /[",]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+// Neutralize spreadsheet formula injection: a field starting with = + - @ (or a tab/CR) is treated as
+// a live formula by Excel/Sheets/Numbers when the CSV is opened. Reviewer-authored note text is
+// untrusted, so prefix those with a single quote before the normal CSV quoting.
+const csvField = s => {
+  s = asciiLine(s);
+  if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
+  return /[",]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+};
 function makeReaper(markers) { // Region/Marker Manager CSV — decimal seconds (set ruler to Seconds)
   const rows = ['#,Name,Start,End,Length,Color'];
   markers.forEach((k, i) => rows.push(`M${i + 1},${csvField(markerText(k))},${fmtSeconds(k.ts)},${fmtSeconds(k.ts)},0,`));
@@ -1922,6 +2007,7 @@ app.post('/api/me/password', requireAuth, async (req, res) => {
   if (!u.pw_hash) return res.status(409).json({ error: 'Your password was reset by an admin — sign out and use your invite link to set a new one.' });
   if (!(await verifyPassword(current, u.pw_hash))) return res.status(403).json({ error: 'Current password is incorrect' });
   if (!next) return res.status(400).json({ error: 'New password required' });
+  { const pe = passwordPolicyError(next); if (pe) return res.status(400).json({ error: pe }); }
   db.prepare('UPDATE users SET pw_hash = ? WHERE username = ?').run(await hashPassword(next), username);
   res.json({ ok: true });
 });
