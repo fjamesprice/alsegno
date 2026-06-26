@@ -29,6 +29,12 @@ Set-Location $RepoDir
 $ServiceName    = 'alsegno'
 $ServiceStarted = $false
 $ServiceInstalledButStopped = $false   # a boot service was installed but failed to start
+# Pinned portable Node — the no-admin fallback when the system has no usable Node. v22 'Jod' (ABI
+# 127): better-sqlite3 ships a prebuilt binary for this ABI, so npm needs NO Visual Studio build
+# tools. (Node 24 / ABI 137 is also prebuild-safe, but has no 32-bit build — set $NodePin to a v24.x
+# to switch to Active LTS.)
+$NodePin = 'v22.23.1'
+$BinDir  = Join-Path $RepoDir 'bin'
 
 function Info($m){ Write-Host "==> $m" -ForegroundColor Cyan }
 function Ok($m)  { Write-Host "  ok  $m" -ForegroundColor Green }
@@ -100,19 +106,106 @@ function PortInUse($h,$p){
   catch { return $false }
 }
 
+# ── Node bootstrap (auto-install when missing) ───────────────
+function NodeMajor {
+  try { return [int](& node -p "process.versions.node.split('.')[0]" 2>$null) } catch { return 0 }
+}
+function NodeOk { return ((Have node) -and ((NodeMajor) -ge 18)) }
+function Refresh-Path {
+  # This process started before any install, so it holds a stale PATH. Re-read Machine + User PATH
+  # (prepended) so a freshly-installed 'node' resolves now, while KEEPING session-only entries (e.g.
+  # a hand-added ffmpeg the later check relies on) instead of clobbering them.
+  $m = [Environment]::GetEnvironmentVariable('Path','Machine')
+  $u = [Environment]::GetEnvironmentVariable('Path','User')
+  $env:Path = (@($m,$u,$env:Path) | Where-Object { $_ }) -join ';'
+}
+# Path of the bundled portable Node for this machine (the win .zip extracts to one flat folder).
+function Portable-NodeRoot {
+  $arch = if($env:PROCESSOR_ARCHITECTURE -eq 'ARM64'){ 'arm64' } elseif([Environment]::Is64BitOperatingSystem){ 'x64' } else { 'x86' }
+  return (Join-Path $BinDir "node-$NodePin-win-$arch")
+}
+# Reuse an already-extracted portable Node from a previous run (no network) if it runs and is >= 18.
+function Reuse-PortableNode {
+  $root = Portable-NodeRoot; $exe = Join-Path $root 'node.exe'
+  if(Test-Path $exe){
+    $okRun = $false; try { & $exe -v *> $null; $okRun = ($LASTEXITCODE -eq 0) } catch { $okRun = $false }
+    if($okRun){ $env:Path = "$root;$env:Path"; return (NodeOk) }
+  }
+  return $false
+}
+# Try winget (honors "system first"). Returns $true only if Node >= 18 is present afterwards.
+function Try-SystemNode {
+  if(-not (Have winget)){ return $false }
+  Info "Installing Node.js via winget (you may get a Windows permission prompt)..."
+  # Pipe winget's stdout to Out-Null: a PowerShell function returns its WHOLE success stream, so
+  # unpiped native output would pollute the boolean return and make a FAILED install look truthy.
+  # A native non-zero exit doesn't throw under ErrorActionPreference='Stop'; NodeOk is the real test,
+  # so a declined UAC / failed install correctly falls through to the portable download.
+  try { winget install --id OpenJS.NodeJS.LTS --exact --source winget --silent --accept-package-agreements --accept-source-agreements | Out-Null }
+  catch { Warn "winget couldn't install Node: $_" }
+  Refresh-Path
+  if(-not (Have node)){
+    foreach($p in @("$env:ProgramFiles\nodejs","${env:ProgramFiles(x86)}\nodejs")){
+      if($p -and (Test-Path (Join-Path $p 'node.exe'))){ $env:Path = "$p;$env:Path"; break }
+    }
+  }
+  return (NodeOk)
+}
+# Download the pinned portable Node into .\bin, verify its SHA-256 against the official
+# SHASUMS256.txt, extract, and put it on PATH for the rest of setup + the boot service. Cached and
+# re-fetched if a prior copy is broken, so a truncated download is never trusted.
+function Install-PortableNode {
+  if(Reuse-PortableNode){ return $true }
+  $nodeRoot = Portable-NodeRoot            # the win .zip extracts to one flat folder (node.exe at its root)
+  $name = Split-Path $nodeRoot -Leaf
+  $nodeExe = Join-Path $nodeRoot 'node.exe'
+  New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
+  $base = "https://nodejs.org/dist/$NodePin"
+  $zip  = Join-Path $BinDir "$name.zip"
+  Info "Downloading portable Node $NodePin ($name, ~30 MB, official nodejs.org)..."
+  try {
+    $op = $ProgressPreference; $ProgressPreference = 'SilentlyContinue'
+    Invoke-WebRequest -Uri "$base/$name.zip" -OutFile $zip -UseBasicParsing
+    $ProgressPreference = $op
+  } catch { Warn "Node download failed: $_"; return $false }
+  # Match the EXACT basename — SHASUMS256.txt also lists path-prefixed bare-binary lines.
+  try { $sums = (Invoke-WebRequest -Uri "$base/SHASUMS256.txt" -UseBasicParsing).Content }
+  catch { Warn "Couldn't fetch Node checksums - refusing to use an unverified download."; Remove-Item $zip -Force -ErrorAction SilentlyContinue; return $false }
+  $line = $sums -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -match "\s$([regex]::Escape("$name.zip"))$" } | Select-Object -First 1
+  $want = if($line){ ($line -split '\s+')[0] } else { '' }
+  $got  = (Get-FileHash -Algorithm SHA256 -Path $zip).Hash
+  if((-not $want) -or ($want.ToLower() -ne $got.ToLower())){
+    Warn "Node download checksum mismatch - discarding."
+    Remove-Item $zip -Force -ErrorAction SilentlyContinue; return $false
+  }
+  Ok "Verified Node $NodePin download (sha256)."
+  if(Test-Path $nodeRoot){ Remove-Item $nodeRoot -Recurse -Force -ErrorAction SilentlyContinue }
+  try { Expand-Archive -Path $zip -DestinationPath $BinDir -Force } catch { Warn "Extracting Node failed: $_"; Remove-Item $zip -Force -ErrorAction SilentlyContinue; return $false }
+  Remove-Item $zip -Force -ErrorAction SilentlyContinue
+  if(-not (Test-Path $nodeExe)){ Warn "Extracted Node looks wrong (no node.exe)."; return $false }
+  $env:Path = "$nodeRoot;$env:Path"
+  return (NodeOk)
+}
+# Ensure a usable Node >= 18 is on PATH, installing one if needed. Dies only if every path fails.
+function Ensure-Node {
+  Info "Checking Node.js..."
+  if(NodeOk){ Ok "Node $(node -v) - already installed"; return }
+  if(Have node){ Warn "Found Node $(node -v), but alsegno needs >= 18 - fetching a newer one..." }
+  else { Info "Node.js isn't installed - setting it up for you..." }
+  # Reuse a portable copy from a previous run before touching the system package manager again.
+  if(Reuse-PortableNode){ Ok "Node $(node -v) - self-contained copy in .\bin (reused)"; return }
+  if(Try-SystemNode){ Ok "Node $(node -v) - installed via winget"; return }
+  if(Install-PortableNode){ Ok "Node $(node -v) - self-contained copy in .\bin (no system change)"; return }
+  Die "Couldn't install Node.js automatically. Install Node >= 18 and re-run:`n  winget install OpenJS.NodeJS.LTS`n  or download from https://nodejs.org/"
+}
+
 Write-Host ""
 Write-Host "alsegno - setup (Windows)" -ForegroundColor White
 Write-Host ""
 
-# ── 1. Node.js >= 18 ─────────────────────────────────────────
-Info "Checking Node.js..."
-if(-not (Have node)){
-  Die "Node.js not found. Install Node >= 18:`n  winget install OpenJS.NodeJS.LTS`n  or download from https://nodejs.org/"
-}
-$nodeMajor = [int](node -p "process.versions.node.split('.')[0]")
-if($nodeMajor -lt 18){ Die "Node.js >= 18 required (found $(node -v)). Upgrade and re-run." }
+# ── 1. Node.js >= 18 (auto-installed if missing) ─────────────
+Ensure-Node
 if(-not (Have npm)){ Die "npm not found (it ships with Node.js). Reinstall Node." }
-Ok "Node $(node -v)"
 
 # ── 2. ffmpeg + ffprobe ──────────────────────────────────────
 Info "Checking ffmpeg & ffprobe..."
@@ -215,6 +308,8 @@ $PortVal  = GetEnv 'PORT';       if(-not $PortVal){ $PortVal = '3458' }
 $HostVal  = GetEnv 'HOST';       if(-not $HostVal){ $HostVal = '127.0.0.1' }
 $AdminVal = GetEnv 'ADMIN_USER'; if(-not $AdminVal){ $AdminVal = 'james' }
 $ShareVal = GetEnv 'SHARE';      if(-not $ShareVal){ $ShareVal = 'local' }
+# After a portable install this resolves into .\bin; an NSSM service will reference that path, so
+# keep .\bin if you installed a service (it's the app's own Node, not a throwaway download).
 $NodePath = (Get-Command node).Source
 $ServerJs = Join-Path $RepoDir 'server.js'
 

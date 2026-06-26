@@ -13,10 +13,14 @@ and uploaded audio in `uploads/`, both created on first run.
 
 | Requirement                    | Why                                                                                          | Check             |
 | ------------------------------ | -------------------------------------------------------------------------------------------- | ----------------- |
-| **Node.js ≥ 18**               | Runs the server.                                                                             | `node -v`         |
+| **Node.js ≥ 18**               | Runs the server. **The installer sets this up for you if it's missing** — see below.         | `node -v`         |
 | **ffmpeg + ffprobe** on `PATH` | Every upload is transcoded/analysed (waveform, LUFS, true-peak). Without them, uploads fail. | `ffmpeg -version` |
 
-The installer checks both and prints OS-specific install hints if either is missing.
+If Node is missing or too old, the installer **installs it automatically**: it first tries your
+system package manager (winget on Windows, Homebrew on macOS, apt/dnf/pacman/zypper on Linux), and
+if that's unavailable it downloads a small, self-contained copy of Node into the app's own `bin/`
+folder (no admin rights, nothing added to your system `PATH`). ffmpeg is **not** auto-installed —
+the installer checks for it and prints an OS-specific install hint if it's missing.
 
 Installing ffmpeg manually, if you prefer:
 
@@ -62,7 +66,8 @@ From inside the `alsegno` folder:
 
 The installer will:
 
-1. Verify Node ≥ 18 and ffmpeg/ffprobe (with install hints if missing).
+1. Ensure Node ≥ 18 — **installing it for you if missing** (system package manager, else a
+   self-contained copy in `bin/`) — and check ffmpeg/ffprobe (with an install hint if missing).
 2. `npm install` the dependencies.
 3. Create `data/` and `uploads/`.
 4. Generate a `.env` with a **random `SESSION_SECRET`**, asking you for the port, the admin

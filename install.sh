@@ -144,17 +144,124 @@ buildtools_hint() {
   fi
 }
 
+# ── Node bootstrap (auto-install when missing) ───────────────
+# When the machine has no usable Node, get one automatically — first via the OS package manager
+# (the "system first" preference), then by downloading a self-contained copy into ./bin (no root,
+# no system change). The pin below is an LTS whose ABI (127) has a prebuilt better-sqlite3 binary,
+# so npm needs NO C++ compiler. (Node 24 / ABI 137 is also prebuild-safe — set NODE_PIN to a v24.x
+# to track Active LTS; note v24 dropped 32-bit builds.)
+NODE_PIN="v22.23.1"
+BIN_DIR="$REPO_DIR/bin"
+
+node_major() { node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0; }
+node_ok()    { have node && [ "$(node_major)" -ge 18 ] 2>/dev/null; }
+
+# Path of the bundled portable Node for this machine (prints nothing + returns 1 on an unknown CPU).
+portable_node_root() {
+  local arch os
+  case "$(uname -m)" in
+    x86_64|amd64)  arch=x64 ;;
+    aarch64|arm64) arch=arm64 ;;
+    *) return 1 ;;
+  esac
+  os=linux; [ "$PLATFORM" = macos ] && os=darwin
+  printf '%s/node-%s-%s-%s' "$BIN_DIR" "$NODE_PIN" "$os" "$arch"
+}
+# Reuse an already-extracted portable Node from a previous run (no network) if it runs and is >= 18.
+reuse_portable_node() {
+  local root; root="$(portable_node_root)" || return 1
+  [ -x "$root/bin/node" ] && [ "$("$root/bin/node" -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)" -ge 18 ] || return 1
+  PATH="$root/bin:$PATH"; hash -r 2>/dev/null || true
+}
+
+# Try the OS package manager. Honors "system first"; returns 0 only if Node >= 18 is present after.
+try_system_node() {
+  case "$PLATFORM" in
+    macos)
+      have brew || return 1
+      info "Installing Node via Homebrew…"
+      brew install node || true
+      # Put ONLY brew's just-installed node on PATH (its prefix is arch-specific: /opt/homebrew on
+      # Apple Silicon, /usr/local on Intel) so an unrelated old node elsewhere can't shadow it.
+      local brew_bin; brew_bin="$(brew --prefix 2>/dev/null)/bin"
+      [ -x "$brew_bin/node" ] && PATH="$brew_bin:$PATH"
+      ;;
+    linux)
+      # Non-root needs sudo. Under --yes / no-tty, use `sudo -n` so a password requirement fails fast
+      # (then we fall back to the portable download) instead of blocking on a hidden password prompt.
+      local SUDO=""
+      if [ "$(id -u)" -ne 0 ]; then
+        if [ "$ASSUME_YES" = 1 ] || [ ! -t 0 ]; then SUDO="sudo -n"; else SUDO="sudo"; fi
+      fi
+      if   have apt-get; then info "Installing Node via apt-get…"; $SUDO apt-get update -y >/dev/null 2>&1 || true; $SUDO DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs npm || true
+      elif have dnf;     then info "Installing Node via dnf…";     $SUDO dnf install -y nodejs npm || true
+      elif have pacman;  then info "Installing Node via pacman…";  $SUDO pacman -Sy --noconfirm nodejs npm || true
+      elif have zypper;  then info "Installing Node via zypper…";  $SUDO zypper --non-interactive install nodejs npm || true
+      else return 1; fi
+      hash -r 2>/dev/null || true   # forget the shell's stale command cache so a new `node` is found
+      ;;
+    *) return 1 ;;
+  esac
+  node_ok
+}
+
+# Download the pinned portable Node into ./bin, verify its SHA-256 against the official
+# SHASUMS256.txt, extract (tar -xzf keeps npm's relative symlinks into ../lib intact), and put it on
+# PATH for the rest of setup + the boot service. Mirrors the cached/validate/re-fetch guard used for
+# cloudflared so a truncated download is never trusted or cached-and-rerun forever.
+install_portable_node() {
+  local node_root name base tmp sums want got
+  node_root="$(portable_node_root)" || { warn "No portable Node build for CPU '$(uname -m)' — install Node >= 18 yourself."; return 1; }
+  reuse_portable_node && return 0
+  name="$(basename "$node_root")"
+  have curl || have wget || { warn "Need curl or wget to download Node automatically."; return 1; }
+  mkdir -p "$BIN_DIR"
+  base="https://nodejs.org/dist/$NODE_PIN"; tmp="$BIN_DIR/$name.tar.gz"
+  info "Downloading portable Node $NODE_PIN ($name, ~30 MB, official nodejs.org)…"
+  if have curl; then curl -fsSL -o "$tmp" "$base/$name.tar.gz" || { warn "Node download failed."; return 1; }
+  else                wget -qO  "$tmp" "$base/$name.tar.gz" || { warn "Node download failed."; return 1; }; fi
+  # Integrity check against the official checksums (fetched from the same release dir, matched on the
+  # exact basename — SHASUMS256.txt also lists path-prefixed bare-binary entries we must not match).
+  sums="$(curl -fsSL "$base/SHASUMS256.txt" 2>/dev/null || wget -qO- "$base/SHASUMS256.txt" 2>/dev/null || true)"
+  want="$(printf '%s\n' "$sums" | awk -v f="$name.tar.gz" '$2==f{print $1}')"
+  [ -n "$want" ] || { warn "Couldn't fetch Node checksums — refusing to use an unverified download."; rm -f "$tmp"; return 1; }
+  if   have sha256sum; then got="$(sha256sum "$tmp" | awk '{print $1}')"
+  elif have shasum;    then got="$(shasum -a 256 "$tmp" | awk '{print $1}')"
+  else warn "No sha256sum/shasum available to verify the download."; rm -f "$tmp"; return 1; fi
+  [ "$want" = "$got" ] || { warn "Node download checksum mismatch — discarding."; rm -f "$tmp"; return 1; }
+  ok "Verified Node $NODE_PIN download (sha256)."
+  rm -rf "$node_root"
+  tar -xzf "$tmp" -C "$BIN_DIR" || { warn "Extracting Node failed."; rm -f "$tmp"; return 1; }
+  rm -f "$tmp"
+  # curl/wget don't set the macOS quarantine xattr, but strip it defensively in case anything did.
+  [ "$PLATFORM" = macos ] && xattr -dr com.apple.quarantine "$node_root" >/dev/null 2>&1 || true
+  [ -x "$node_root/bin/node" ] || { warn "Extracted Node looks wrong (no bin/node)."; return 1; }
+  PATH="$node_root/bin:$PATH"; hash -r 2>/dev/null || true
+  node_ok
+}
+
+# Ensure a usable Node >= 18 is on PATH, installing one if needed. Dies only if every path fails.
+ensure_node() {
+  info "Checking Node.js…"
+  if node_ok; then ok "Node $(node -v) — already installed"; return; fi
+  if have node; then warn "Found Node $(node -v), but alsegno needs >= 18 — fetching a newer one…"
+  else info "Node.js isn't installed — setting it up for you…"; fi
+  # Reuse a portable copy from a previous run before touching the system package manager again.
+  if reuse_portable_node; then ok "Node $(node -v) — self-contained copy in ./bin (reused)"; return; fi
+  if try_system_node; then ok "Node $(node -v) — installed via your system package manager"; return; fi
+  if [ "$PLATFORM" = linux ]; then warn "System Node was missing or too old — using a self-contained copy instead."; fi
+  if install_portable_node; then ok "Node $(node -v) — self-contained copy in ./bin (no system change)"; return; fi
+  node_hint
+  die "Couldn't install Node.js automatically. Install Node >= 18 with one of the above and re-run."
+}
+
 say ""
 say "${BOLD}alsegno — setup ($PLATFORM)${RST}"
 say ""
 
-# ── 1. Node.js >= 18 ─────────────────────────────────────────
-info "Checking Node.js…"
-have node || { node_hint; die "Node.js not found. Install Node >= 18 and re-run."; }
-NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
-[ "${NODE_MAJOR:-0}" -ge 18 ] || { node_hint; die "Node.js >= 18 required (found $(node -v)). Upgrade and re-run."; }
+# ── 1. Node.js >= 18 (auto-installed if missing) ─────────────
+ensure_node
 have npm || die "npm not found (it ships with Node.js). Reinstall Node."
-ok "Node $(node -v)"
 
 # ── 2. ffmpeg + ffprobe (hard runtime dep, but don't block setup) ────
 info "Checking ffmpeg & ffprobe…"
@@ -260,6 +367,8 @@ PORT_VAL="$(get_env PORT)";       PORT_VAL="${PORT_VAL:-3458}"
 HOST_VAL="$(get_env HOST)";       HOST_VAL="${HOST_VAL:-127.0.0.1}"
 ADMIN_VAL="$(get_env ADMIN_USER)"; ADMIN_VAL="${ADMIN_VAL:-james}"
 SHARE_VAL="$(get_env SHARE)";     SHARE_VAL="${SHARE_VAL:-local}"
+# After a portable install this resolves into ./bin; a boot-service ExecStart will reference that
+# path, so keep ./bin if you installed a service (it's the app's own Node, not a throwaway download).
 NODE_BIN="$(command -v node)"
 
 # ── 6. background service (boot start) ───────────────────────

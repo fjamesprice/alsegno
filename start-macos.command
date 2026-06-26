@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # alsegno - double-click launcher for macOS. Finder runs .command files in Terminal.
-# Runs the installer (first run: checks Node + ffmpeg, writes .env, optionally installs a boot
+# Runs the installer (first run: installs Node if missing, checks ffmpeg, writes .env, optionally installs a boot
 # service), then starts alsegno and opens it in your browser. If you didn't install a boot
 # service, the app runs in THIS window - keep it open while you use alsegno, and press Ctrl+C
 # (or close the window) to stop.

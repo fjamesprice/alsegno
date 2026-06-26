@@ -64,7 +64,7 @@ Emailing `whatever_v3_r09.mp3` around and getting back "the twangy part is too l
    - **Windows** — double-click `start-windows.cmd`
    - **Linux** — `./install.sh`
 
-It checks for **Node ≥ 18** and `ffmpeg`/`ffprobe` (with a one-line install hint if either is missing) and writes a `.env` with a random secret. The double-click launchers then **start alsegno and open it in your browser**; unless you opt into a boot service, alsegno runs in that window — keep it open while you use it, and close it (or press Ctrl+C) to stop. (Default URL: http://localhost:3458.)
+If **Node ≥ 18** is missing it **installs it for you** (your system package manager, or else a self-contained copy in `bin/` — no admin needed); it checks `ffmpeg`/`ffprobe` and prints a one-line install hint if they're missing, then writes a `.env` with a random secret. The double-click launchers then **start alsegno and open it in your browser**; unless you opt into a boot service, alsegno runs in that window — keep it open while you use it, and close it (or press Ctrl+C) to stop. (Default URL: http://localhost:3458.)
 
 During setup you also choose **how people reach it** — just this computer, your local network, or a **public share link** so you can send a reviewer a working URL *without touching your router*. The share link uses a free [Cloudflare](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/trycloudflare/) quick tunnel (no account) or [Tailscale Funnel](https://tailscale.com/kb/1223/funnel) (stable link). See **[INSTALL.md](INSTALL.md#sharing-a-link-over-the-internet-no-router-setup)**.
 
