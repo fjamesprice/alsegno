@@ -209,6 +209,16 @@ db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('auto_update_che
   if (!cols.includes('parent_id')) db.exec('ALTER TABLE comments ADD COLUMN parent_id INTEGER');
 }
 
+// Migration: picture attachments on comments (notes + replies).
+//   attachments — JSON array of on-disk image names (each a server-generated <uuid>.jpg in UPLOADS_DIR),
+//   matching the JSON-encoded-TEXT pattern used for the revisions metering series. Files are hard-removed
+//   only when their owning track/project is deleted (see the cascade-delete routes); soft-deleting a note
+//   keeps its images (recoverable), consistent with deleted_at.
+{
+  const cols = db.prepare('PRAGMA table_info(comments)').all().map(c => c.name);
+  if (!cols.includes('attachments')) db.exec("ALTER TABLE comments ADD COLUMN attachments TEXT DEFAULT '[]'");
+}
+
 // Migration (Phase 3a): projects model — new columns on existing tables.
 //   users.display_name — friendly name for the UI (NULL ⇒ fall back to username).
 //   users.active       — 0 deactivates login without hard-deleting (keeps authored comments).
@@ -398,6 +408,21 @@ function artUpload(req, res, next) {
     if (err) return res.status(err.code === 'LIMIT_FILE_SIZE' ? 413 : 400)
       .json({ error: err.code === 'LIMIT_FILE_SIZE' ? 'Image too large (max 25 MB)' : 'Upload failed' });
     next();
+  });
+}
+// Comment picture attachments: same disk storage + image-only filter as album art, but accepts up to
+// MAX_NOTE_IMAGES files under the field name `images`. Each is re-encoded to a downscaled jpg (which also
+// validates it) by processNoteImage. Wrapped like artUpload so multer's own errors surface as clean JSON.
+const MAX_NOTE_IMAGES = 8;
+const uploadImages = multer({ storage, limits: { fileSize: 25 * 1024 * 1024, files: MAX_NOTE_IMAGES },
+  fileFilter: (req, file, cb) => cb(null, /^image\//.test(file.mimetype)) });
+function noteImagesUpload(req, res, next) {
+  uploadImages.array('images', MAX_NOTE_IMAGES)(req, res, err => {
+    if (!err) return next();
+    const msg = err.code === 'LIMIT_FILE_SIZE' ? 'Image too large (max 25 MB)'
+              : err.code === 'LIMIT_FILE_COUNT' ? ('Too many images (max ' + MAX_NOTE_IMAGES + ')')
+              : 'Upload failed';
+    res.status(err.code === 'LIMIT_FILE_SIZE' || err.code === 'LIMIT_FILE_COUNT' ? 413 : 400).json({ error: msg });
   });
 }
 
@@ -627,6 +652,28 @@ async function processArtImage(file) {
   }
 }
 
+// Comment picture attachment: downscale to fit 2048×2048 (keep aspect) and re-encode to a quality jpg —
+// same model as processArtImage (the ffmpeg transcode also validates the upload is a real image), but a
+// larger bound so the click-to-zoom full view stays crisp. Returns the stored jpg name; cleans up and
+// rethrows (.status=400) on failure.
+async function processNoteImage(file) {
+  const inputPath = file.path;
+  const storedName = crypto.randomUUID() + '.jpg';
+  const outPath = path.join(UPLOADS_DIR, storedName);
+  try {
+    await run('ffmpeg', ['-y', '-i', inputPath,
+      '-vf', "scale='min(2048,iw)':'min(2048,ih)':force_original_aspect_ratio=decrease",
+      '-frames:v', '1', '-q:v', '3', outPath]);
+    if (!fs.existsSync(outPath) || fs.statSync(outPath).size === 0) { const e = new Error('Image could not be processed'); e.status = 400; throw e; }
+    try { fs.unlinkSync(inputPath); } catch {}
+    return storedName;
+  } catch (e) {
+    for (const p of [inputPath, outPath]) { if (p && fs.existsSync(p)) { try { fs.unlinkSync(p); } catch {} } }
+    if (!e.status) e.status = 400;
+    throw e;
+  }
+}
+
 // Does this media file have at least one audio stream?
 async function ffprobeHasAudio(file) {
   try {
@@ -759,7 +806,7 @@ app.use(express.urlencoded({ extended: true }));
 app.use((req, res, next) => {
   res.setHeader('Content-Security-Policy',
     "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; " +
-    "img-src 'self' data:; media-src 'self' blob:; script-src 'self' 'unsafe-inline'; " +
+    "img-src 'self' data: blob:; media-src 'self' blob:; script-src 'self' 'unsafe-inline'; " +
     "style-src 'self' 'unsafe-inline'; connect-src 'self'; form-action 'self'");
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -862,6 +909,15 @@ const projectIdForAudio    = name => {
   return t ? (t.p ?? null) : null;
 };
 const projectIdForArt = name => db.prepare('SELECT id AS p FROM projects WHERE art_stored_name = ?').get(name)?.p ?? null;
+// A comment-image name is the access key (like art): narrow candidates with a LIKE on the JSON array,
+// then confirm exact membership so a name can't be probed and a wildcard/substring can't false-match.
+const projectIdForCommentImage = name => {
+  if (!name) return null;
+  const rows = db.prepare(`SELECT c.attachments, t.project_id AS p FROM comments c
+                           JOIN tracks t ON c.track_id = t.id WHERE c.attachments LIKE ?`).all('%' + name + '%');
+  for (const r of rows) { try { if (JSON.parse(r.attachments || '[]').includes(name)) return r.p ?? null; } catch {} }
+  return null;
+};
 const isMember = (username, projectId) => !!db.prepare('SELECT 1 FROM project_users WHERE project_id = ? AND username = ?').get(projectId, username);
 
 // Resolvers (req → projectId|null). Param ids are the project itself; others look the project up.
@@ -1240,6 +1296,7 @@ app.delete('/api/projects/:id', requireAdmin, (req, res) => {
   if (!projectExists(pid)) return res.status(404).json({ error: 'Not found' });
   const revs = db.prepare('SELECT r.stored_name, r.original_stored_name FROM revisions r JOIN tracks t ON r.track_id = t.id WHERE t.project_id = ?').all(pid);
   const vids = db.prepare('SELECT video_stored_name, video_proxy_name, video_micro_name, video_original_stored_name FROM tracks WHERE project_id = ?').all(pid);
+  const cimgs = db.prepare('SELECT c.attachments FROM comments c JOIN tracks t ON c.track_id = t.id WHERE t.project_id = ?').all(pid);
   const art = db.prepare('SELECT art_stored_name FROM projects WHERE id = ?').get(pid)?.art_stored_name;
   db.transaction(() => {
     db.prepare('DELETE FROM seen WHERE track_id IN (SELECT id FROM tracks WHERE project_id = ?)').run(pid);
@@ -1249,6 +1306,7 @@ app.delete('/api/projects/:id', requireAdmin, (req, res) => {
   })();
   for (const r of revs) { unlinkStored(r.stored_name); unlinkStored(r.original_stored_name); }
   for (const v of vids) { unlinkStored(v.video_stored_name); unlinkStored(v.video_proxy_name); unlinkStored(v.video_micro_name); unlinkStored(v.video_original_stored_name); }
+  for (const c of cimgs) { try { JSON.parse(c.attachments || '[]').forEach(unlinkStored); } catch {} }
   unlinkStored(art);
   // Membership is gone now, so anyone who had it open re-validates via the projects ping → 404 → list.
   broadcastProjects();
@@ -1310,6 +1368,9 @@ app.put('/api/tracks/:id', requireProjectEngineer(pTrack), (req, res) => {
 app.delete('/api/tracks/:id', requireProjectEngineer(pTrack), (req, res) => {
   const revs = db.prepare('SELECT stored_name, original_stored_name FROM revisions WHERE track_id = ?').all(req.params.id);
   const trk = db.prepare('SELECT video_stored_name, video_proxy_name, video_micro_name, video_original_stored_name FROM tracks WHERE id = ?').get(req.params.id);
+  // Comment picture attachments cascade-delete with their comments (FK from tracks), so collect their
+  // on-disk names first and unlink them after the cascade — same as the revision/video files below.
+  const cimgs = db.prepare('SELECT attachments FROM comments WHERE track_id = ?').all(req.params.id);
   // `seen` has no FK to tracks (PK is username+track_id), so it does NOT cascade — delete it explicitly
   // (mirroring the project-delete path) or every viewer's seen row for this track leaks forever.
   db.transaction(() => {
@@ -1318,6 +1379,7 @@ app.delete('/api/tracks/:id', requireProjectEngineer(pTrack), (req, res) => {
   })();
   for (const r of revs) { unlinkStored(r.stored_name); unlinkStored(r.original_stored_name); }
   if (trk) { unlinkStored(trk.video_stored_name); unlinkStored(trk.video_proxy_name); unlinkStored(trk.video_micro_name); unlinkStored(trk.video_original_stored_name); }
+  for (const c of cimgs) { try { JSON.parse(c.attachments || '[]').forEach(unlinkStored); } catch {} }
   broadcastChange(req.projectId);
   res.json({ ok: true });
 });
@@ -1617,29 +1679,45 @@ app.get('/api/art/:name', requireProjectAccess(req => projectIdForArt(req.params
   res.sendFile(p);
 });
 
+// Comment picture attachment, gated to project members (any role) — the name resolves to its owning
+// project via the comment that references it (same name-is-the-key pattern as art). Always a jpg.
+app.get('/api/cimg/:name', requireProjectAccess(req => projectIdForCommentImage(req.params.name)), (req, res) => {
+  const p = path.join(UPLOADS_DIR, req.params.name);
+  if (!fs.existsSync(p)) return res.status(404).json({ error: 'Not found' });
+  res.type('image/jpeg');
+  res.sendFile(p);
+});
+
 // ── Comments ─────────────────────────────────────────────────
 app.get('/api/tracks/:id/comments', requireProjectAccess(pTrack), (req, res) => {
   // Soft-deleted notes are hidden from everyone — except an admin when show_deleted_notes is on,
   // who sees them (greyed, with who/when) so deletions are reviewable/recoverable. The fragment is
   // a fixed literal, not user input.
   const seeDeleted = settingOn('show_deleted_notes', false) && req.session.user.role === 'admin';
-  res.json(db.prepare(`SELECT c.*, r.rev_number FROM comments c
+  const rows = db.prepare(`SELECT c.*, r.rev_number FROM comments c
                        LEFT JOIN revisions r ON c.revision_id = r.id
-                       WHERE c.track_id = ? ${seeDeleted ? '' : 'AND c.deleted_at IS NULL'} ORDER BY c.created_at`).all(req.params.id));
+                       WHERE c.track_id = ? ${seeDeleted ? '' : 'AND c.deleted_at IS NULL'} ORDER BY c.created_at`).all(req.params.id);
+  // attachments is stored as JSON TEXT — parse it to an array so the client gets a real list (matches
+  // the store-as-TEXT/parse-on-read contract used by the revisions metering series).
+  res.json(rows.map(c => ({ ...c, attachments: JSON.parse(c.attachments || '[]') })));
 });
 
-app.post('/api/tracks/:id/comments', requireProjectAccess(pTrack), (req, res) => {
+app.post('/api/tracks/:id/comments', requireProjectAccess(pTrack), noteImagesUpload, async (req, res) => {
+  // Multipart: text fields land on req.body (same names as the old JSON body), images on req.files.
+  // A note may be image-only (no body) — but must have at least one of text/image.
+  const files = req.files || [];
+  const cleanupTemps = () => { for (const f of files) { try { fs.unlinkSync(f.path); } catch {} } };
   const body = String(req.body.body || '').trim().slice(0, 10000);
-  if (!body) return res.status(400).json({ error: 'Comment body required' });
+  if (!body && !files.length) { cleanupTemps(); return res.status(400).json({ error: 'Comment body required' }); }
   let ts = (req.body.ts === null || req.body.ts === undefined || req.body.ts === '') ? null : Number(req.body.ts);
   let revisionId = req.body.revision_id ? Number(req.body.revision_id) : null;
   const parentId = req.body.parent_id ? Number(req.body.parent_id) : null;
   if (parentId != null) {
     // Reply: parent must exist, live on this track, and itself be a top-level note (one level deep).
     const parent = db.prepare('SELECT track_id, parent_id, deleted_at FROM comments WHERE id = ?').get(parentId);
-    if (!parent || parent.deleted_at != null) return res.status(400).json({ error: 'Parent note not found' });
-    if (parent.track_id !== Number(req.params.id)) return res.status(400).json({ error: 'Parent note is on a different track' });
-    if (parent.parent_id != null) return res.status(400).json({ error: 'Cannot reply to a reply' });
+    if (!parent || parent.deleted_at != null) { cleanupTemps(); return res.status(400).json({ error: 'Parent note not found' }); }
+    if (parent.track_id !== Number(req.params.id)) { cleanupTemps(); return res.status(400).json({ error: 'Parent note is on a different track' }); }
+    if (parent.parent_id != null) { cleanupTemps(); return res.status(400).json({ error: 'Cannot reply to a reply' }); }
     ts = null; revisionId = null; // replies are never pinned and never carry a revision
   }
   // A pinned note's revision must belong to THIS track — otherwise a member could smuggle a foreign
@@ -1647,14 +1725,24 @@ app.post('/api/tracks/:id/comments', requireProjectAccess(pTrack), (req, res) =>
   // raw FK-constraint 500. The frontend only ever sends the open track's own revision.
   if (revisionId != null) {
     const rv = db.prepare('SELECT track_id, duration FROM revisions WHERE id = ?').get(revisionId);
-    if (!rv || rv.track_id !== Number(req.params.id)) return res.status(400).json({ error: 'Revision is not on this track' });
+    if (!rv || rv.track_id !== Number(req.params.id)) { cleanupTemps(); return res.status(400).json({ error: 'Revision is not on this track' }); }
     // Clamp a pin to [0, duration]: the playhead can't be past the audio, and this keeps a bogus ts
     // (e.g. a hand-crafted huge value) from later driving an unbounded silent-WAV bed in the export.
     if (ts != null && Number.isFinite(ts) && rv.duration > 0) ts = Math.min(Math.max(0, ts), rv.duration);
   }
   if (ts != null && !Number.isFinite(ts)) ts = null; // NaN/Infinity ts → unpinned (defensive)
-  const r = db.prepare('INSERT INTO comments (track_id, revision_id, author, ts, body, parent_id) VALUES (?, ?, ?, ?, ?, ?)')
-    .run(req.params.id, revisionId, req.session.user.username, ts, body, parentId);
+  // Validate + downscale each attached image (synchronous like album art — sub-second, no media queue).
+  // On any failure, remove every file: the already-processed jpgs AND the still-unprocessed temp inputs.
+  const stored = [];
+  try {
+    for (const f of files) stored.push(await processNoteImage(f));
+  } catch (e) {
+    cleanupTemps();
+    for (const n of stored) unlinkStored(n);
+    return res.status(e.status || 400).json({ error: 'Could not process an attached image' });
+  }
+  const r = db.prepare('INSERT INTO comments (track_id, revision_id, author, ts, body, parent_id, attachments) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run(req.params.id, revisionId, req.session.user.username, ts, body, parentId, JSON.stringify(stored));
   broadcastChange(req.projectId);
   res.json({ id: r.lastInsertRowid });
 });

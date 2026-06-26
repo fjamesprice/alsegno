@@ -261,6 +261,29 @@
   .addc{display:flex;flex-direction:column;gap:8px}
   .addc .arow{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 
+  /* Picture attachments: thumbnails shown in a note/reply, + the compose staging strip. */
+  .catts{display:flex;flex-wrap:wrap;gap:6px;margin-top:7px}
+  .catt{width:66px;height:66px;object-fit:cover;border-radius:8px;border:1px solid var(--line);background:var(--panel2);cursor:pointer;transition:border-color .12s}
+  .catt:hover{border-color:var(--accent)}
+  .cstrip{display:flex;flex-wrap:wrap;gap:7px}
+  .cstrip:empty{display:none}
+  .cstrip-item{position:relative;display:inline-flex}
+  .cstrip-item img{width:56px;height:56px;object-fit:cover;border-radius:7px;border:1px solid var(--line)}
+  .cstrip-x{position:absolute;top:-6px;right:-6px;width:19px;height:19px;border-radius:50%;background:var(--danger);color:#fff;border:none;font-size:11px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;box-shadow:0 1px 4px rgba(0,0,0,.5)}
+
+  /* Full-size picture lightbox. Prev/next/close/count reveal on stage hover (forced visible on touch
+     via the mobile block); sits above the modals (z 90). Arrows get .hidden at the first/last image. */
+  #imgModal{z-index:90;background:rgba(0,0,0,.85);padding:16px}
+  .lb-stage{position:relative;display:inline-flex;max-width:calc(100vw - 32px);max-height:calc(100vh - 32px)}
+  .lb-stage img{max-width:calc(100vw - 32px);max-height:calc(100vh - 32px);object-fit:contain;border-radius:8px;display:block}
+  .lb-nav,.lb-close{position:absolute;background:rgba(0,0,0,.5);color:#fff;border:none;border-radius:50%;cursor:pointer;opacity:0;transition:opacity .12s;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(2px);padding:0}
+  .lb-nav{top:50%;transform:translateY(-50%);width:46px;height:46px;font-size:30px;line-height:1}
+  .lb-prev{left:12px} .lb-next{right:12px}
+  .lb-close{top:12px;right:12px;width:36px;height:36px;font-size:18px}
+  .lb-count{position:absolute;bottom:12px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,.5);color:#fff;font-size:12px;padding:3px 10px;border-radius:11px;opacity:0;transition:opacity .12s;pointer-events:none}
+  .lb-stage:hover .lb-nav:not(.hidden),.lb-stage:hover .lb-close,.lb-stage:hover .lb-count{opacity:1}
+  .lb-nav:hover,.lb-close:hover{background:rgba(0,0,0,.78)}
+
   .open-note{color:var(--warn)}  /* unresolved-notes count stands out (item 6) */
 
   /* Version notes block.  In the bar (audio) it's a compact note-mini line; in the video theater
@@ -388,6 +411,8 @@
     .cmt .crev{white-space:nowrap}
     .cmt .cact{opacity:1;justify-content:flex-start;gap:10px;margin-top:1px}
     .cmt .cact button{padding:7px 10px;font-size:12.5px}
+    /* Touch has no hover — keep the lightbox controls visible. */
+    .lb-stage .lb-nav:not(.hidden),.lb-stage .lb-close,.lb-stage .lb-count{opacity:1}
 
     /* Player: compact, tightly-spaced meters (PEAK/LUFS close together + smaller) + a shorter wave. */
     .wave-wrap{height:48px;margin-bottom:6px}
@@ -471,10 +496,13 @@
       <div class="clist" id="clist"></div>
       <div class="addc hidden" id="addc">
         <textarea id="cInput" rows="2" placeholder="Leave a note…"></textarea>
+        <div class="cstrip" id="cStrip"></div>
         <div class="arow">
           <label class="toggle"><input type="checkbox" id="cPin"> Pin at <b id="cPinTime" style="margin-left:3px">0:00</b></label>
           <span class="faint small" id="cRevTag"></span>
-          <button class="btn primary sm" id="cSend" style="margin-left:auto">Post note</button>
+          <button class="btn ghost sm" id="cAttach" type="button" title="Attach a picture" style="margin-left:auto">📎 Image</button>
+          <button class="btn primary sm" id="cSend">Post note</button>
+          <input type="file" id="cFile" accept="image/*" multiple class="hidden">
         </div>
       </div>
     </div>
@@ -740,6 +768,17 @@
     <div class="modal-actions">
       <button class="btn primary" type="button" id="aboutClose">Close</button>
     </div>
+  </div>
+</div>
+
+<!-- Full-size picture lightbox — opened by clicking a note/reply thumbnail. -->
+<div id="imgModal" class="modal-bg hidden">
+  <div class="lb-stage" id="lbStage">
+    <img id="lbImg" alt="Attachment">
+    <button class="lb-nav lb-prev hidden" id="lbPrev" type="button" aria-label="Previous image">‹</button>
+    <button class="lb-nav lb-next hidden" id="lbNext" type="button" aria-label="Next image">›</button>
+    <button class="lb-close" id="lbClose" type="button" aria-label="Close">✕</button>
+    <div class="lb-count" id="lbCount"></div>
   </div>
 </div>
 
@@ -1855,6 +1894,8 @@ async function openTrack(trackId, fromPlayer){
   const t=trackById(trackId); if(!t)return;
   panelTrackId=trackId;
   editingId=null; replyingId=null;
+  clearStaged(noteImages); clearStaged(replyImages);   // drop staged images so they can't bleed onto another track
+  renderStrip($('#cStrip'), noteImages);               // clear the compose strip's thumbnails
   $('#cpanel').classList.remove('hidden');
   $('#addc').classList.remove('hidden');          // show the note-input box (it lives above #cpanel)
   $('.pb-inner').classList.add('with-notes');   // theater: reveal the notes column now a track is open
@@ -1868,6 +1909,44 @@ async function openTrack(trackId, fromPlayer){
   const r=revById(t, (trackId===curTrackId && curRevId) ? curRevId : t.revisions[t.revisions.length-1]?.id);
   $('#cRevTag').textContent = r? ('→ attaches to v'+r.rev_number) : '';
 }
+// ───────── picture attachments on notes/replies ─────────
+const MAX_IMGS=8;
+const noteImages=[], replyImages=[];  // in-memory File[] staged in the new-note / reply composers (never reassigned — clearStaged empties in place so _urls tracking stays stable)
+// Thumbnails for a comment's attachments (empty string if none). Clicks are handled via delegation on
+// #clist (openLightbox) so they survive every renderComments repaint, including SSE-driven ones.
+function attHtml(c){
+  if(!c.attachments || !c.attachments.length) return '';
+  return '<div class="catts">'+c.attachments.map((n,i)=>
+    `<img class="catt" src="api/cimg/${esc(n)}" data-cid="${c.id}" data-idx="${i}" alt="attachment" loading="lazy">`).join('')+'</div>';
+}
+// Stage picked files (image-only, capped) into the backing array. Toasts on reject.
+function addStaged(arr, fileList){
+  for(const f of fileList){
+    if(!/^image\//.test(f.type)){ toast('Only images can be attached',true); continue; }
+    if(arr.length>=MAX_IMGS){ toast('Up to '+MAX_IMGS+' images per note',true); break; }
+    arr.push(f);
+  }
+}
+// Render the staged-file thumbnails (with remove ×) into `el`, backed by the File[] `arr`. Object URLs are
+// tracked on the PERSISTENT array (`arr._urls`), not the DOM element — the reply strip element is rebuilt
+// fresh on every renderComments, so element-scoped tracking would leak the prior render's URLs. Each call
+// revokes the array's previous URLs and recreates them, so removals AND re-renders never leak.
+function renderStrip(el, arr){
+  (arr._urls||[]).forEach(u=>URL.revokeObjectURL(u)); arr._urls=[];
+  el.innerHTML='';
+  arr.forEach((f,i)=>{
+    const u=URL.createObjectURL(f); arr._urls.push(u);
+    const w=document.createElement('span'); w.className='cstrip-item';
+    const img=document.createElement('img'); img.src=u; img.alt='';
+    const x=document.createElement('button'); x.type='button'; x.className='cstrip-x'; x.textContent='✕'; x.setAttribute('aria-label','Remove image');
+    x.addEventListener('click',()=>{ arr.splice(i,1); renderStrip(el,arr); });
+    w.appendChild(img); w.appendChild(x); el.appendChild(w);
+  });
+  el.classList.toggle('hidden', !arr.length);
+}
+// Revoke a staged array's object URLs and empty it IN PLACE (keep the same array object so `_urls`
+// tracking stays stable). Use this everywhere instead of reassigning noteImages/replyImages.
+function clearStaged(arr){ (arr._urls||[]).forEach(u=>URL.revokeObjectURL(u)); arr._urls=[]; arr.length=0; }
 function renderComments(){
   const box=$('#clist');
   // Preserve any in-progress edit AND reply text across re-renders (resolve/del/send on other
@@ -1897,7 +1976,7 @@ function renderComments(){
     // with who/when and no actions — recoverable-by-review, not interactive.
     if(c.deleted_at){
       div.className='cmt deleted'+(isReply?' reply':'');
-      div.innerHTML=`<div class="cbody"><span class="cwho" style="color:${userColor(c.author)}">${esc(c.author)}</span>${esc(c.body)}<span class="cedit">(deleted ${esc(fmtDate(c.deleted_at))})</span></div>`;
+      div.innerHTML=`<div class="cbody"><span class="cwho" style="color:${userColor(c.author)}">${esc(c.author)}</span>${esc(c.body)}<span class="cedit">(deleted ${esc(fmtDate(c.deleted_at))})</span>${attHtml(c)}</div>`;
       return div;
     }
     const canEdit = c.author===ME.username || ME.role==='admin';
@@ -1936,7 +2015,7 @@ function renderComments(){
     const editedHtml = c.edited_at ? `<span class="cedit" title="last edited ${esc(fmtDate(c.edited_at))}">(last edited ${esc(fmtDate(c.edited_at))})</span>` : '';
     if(isReply){
       div.className='cmt reply';
-      div.innerHTML=`<div class="cbody"><span class="cwho" style="color:${userColor(c.author)}">${esc(c.author)}</span>${esc(c.body)}${editedHtml}</div>
+      div.innerHTML=`<div class="cbody"><span class="cwho" style="color:${userColor(c.author)}">${esc(c.author)}</span>${esc(c.body)}${editedHtml}${attHtml(c)}</div>
         <div class="cact">
           ${canEdit?'<button class="edit">edit</button>':''}
           ${canEdit?'<button class="del danger">del</button>':''}
@@ -1948,7 +2027,7 @@ function renderComments(){
       div.className='cmt'+(c.resolved?' resolved':'')+(c.revision_id===curRevId?' cur':'');
       div.innerHTML=`${tsHtml}
         <div class="cbody"><span class="cwho" style="color:${userColor(c.author)}">${esc(c.author)}</span>${esc(c.body)}
-          <span class="crev">${c.rev_number?('· v'+c.rev_number):''}</span>${editedHtml}${rcountHtml}</div>
+          <span class="crev">${c.rev_number?('· v'+c.rev_number):''}</span>${editedHtml}${rcountHtml}${attHtml(c)}</div>
         <div class="cact">
           <button class="res">${c.resolved?'reopen':'resolve'}</button>
           <button class="reply">reply</button>
@@ -1963,7 +2042,7 @@ function renderComments(){
       div.querySelector('.res').addEventListener('click',async()=>{ const nv=c.resolved?0:1;
         try{ await api('comments/'+c.id,{method:'PUT',body:{resolved:nv}}); }catch(e){ toast(e.message,true); return; }
         c.resolved=nv; renderComments(); refreshCounts(); });
-      div.querySelector('.reply').addEventListener('click',()=>{ replyingId=(replyingId===c.id?null:c.id); renderComments(); });
+      div.querySelector('.reply').addEventListener('click',()=>{ replyingId=(replyingId===c.id?null:c.id); clearStaged(replyImages); renderComments(); });
     }
     const ed=div.querySelector('.edit'); if(ed) ed.addEventListener('click',()=>{ editingId=c.id; renderComments(); });
     const del=div.querySelector('.del'); if(del) del.addEventListener('click',async()=>{
@@ -1989,23 +2068,32 @@ function renderComments(){
     if(replyingId===note.id){
       const ed=document.createElement('div'); ed.className='creply';
       ed.innerHTML=`<textarea class="creply-ta" data-pid="${note.id}" rows="2" placeholder="Reply…"></textarea>
+        <div class="cstrip"></div>
         <div class="row" style="margin-top:6px;gap:8px">
           <button class="btn sm primary rsave">Reply</button>
           <button class="btn sm ghost rcancel">Cancel</button>
+          <button class="btn sm ghost rattach" type="button" title="Attach a picture">📎 Image</button>
+          <input type="file" class="rfile hidden" accept="image/*" multiple>
         </div>`;
       const ta=ed.querySelector('.creply-ta');
       ta.value = replyDraft!=null ? replyDraft : '';
+      const strip=ed.querySelector('.cstrip'); renderStrip(strip, replyImages);  // re-shows staged images across re-renders
+      const rfile=ed.querySelector('.rfile');
+      ed.querySelector('.rattach').addEventListener('click',()=>rfile.click());
+      rfile.addEventListener('change',()=>{ addStaged(replyImages, rfile.files); rfile.value=''; renderStrip(strip, replyImages); });
       const save=async()=>{
-        const nb=ta.value.trim(); if(!nb){ toast('Reply cannot be empty',true); return; }
+        const nb=ta.value.trim(); if(!nb && !replyImages.length){ toast('Reply cannot be empty',true); return; }
         try{
-          await api('tracks/'+panelTrackId+'/comments',{method:'POST',body:{parent_id:note.id, body:nb}});
-          replyingId=null;
+          const fd=new FormData(); fd.append('body',nb); fd.append('parent_id',note.id);
+          replyImages.forEach(f=>fd.append('images',f));
+          await api('tracks/'+panelTrackId+'/comments',{method:'POST',body:fd});
+          clearStaged(replyImages); replyingId=null;
           if(await fetchCommentsInto(panelTrackId)){ renderComments(); refreshCounts(); }
         }catch(e){ toast(e.message,true); }
       };
       ed.querySelector('.rsave').addEventListener('click',save);
-      ed.querySelector('.rcancel').addEventListener('click',()=>{ replyingId=null; renderComments(); });
-      ta.addEventListener('keydown',e=>{ if((e.metaKey||e.ctrlKey)&&e.key==='Enter'){ e.preventDefault(); save(); } else if(e.key==='Escape'){ replyingId=null; renderComments(); } });
+      ed.querySelector('.rcancel').addEventListener('click',()=>{ clearStaged(replyImages); replyingId=null; renderComments(); });
+      ta.addEventListener('keydown',e=>{ if((e.metaKey||e.ctrlKey)&&e.key==='Enter'){ e.preventDefault(); save(); } else if(e.key==='Escape'){ clearStaged(replyImages); replyingId=null; renderComments(); } });
       thread.appendChild(ed);
       if(replyDraft==null) toFocus=ta;                                                              // first open
       else if(focused && !focused.edit && focused.id===note.id){ toFocus=ta; caret=[focused.s,focused.e]; }  // keep focus+caret across a remote re-render
@@ -2025,18 +2113,57 @@ async function refreshCounts(){ // light refresh of badges
 }
 $('#cSend').addEventListener('click',sendComment);
 $('#cInput').addEventListener('keydown',e=>{ if((e.metaKey||e.ctrlKey)&&e.key==='Enter') sendComment(); });
+$('#cAttach').addEventListener('click',()=>$('#cFile').click());
+$('#cFile').addEventListener('change',()=>{ addStaged(noteImages,$('#cFile').files); $('#cFile').value=''; renderStrip($('#cStrip'),noteImages); });
 async function sendComment(){
-  const body=$('#cInput').value.trim(); if(!body)return;
+  const body=$('#cInput').value.trim(); if(!body && !noteImages.length)return;  // need text or an image
   const tId=panelTrackId; if(!tId){ toast('Open a track first',true); return; }
   const t=trackById(tId); const revId=(tId===curTrackId && curRevId) ? curRevId : t.revisions.at(-1)?.id;
   const pin=$('#cPin').checked;
   const ts = (pin && tId===curTrackId) ? (nullOn?nullTime():audio.currentTime) : null;
   try{
-    await api('tracks/'+tId+'/comments',{method:'POST',body:{revision_id:revId, ts, body}});
+    // Multipart so images ride along; api() sends FormData untouched (no JSON Content-Type override).
+    const fd=new FormData(); fd.append('body',body);
+    if(revId!=null) fd.append('revision_id',revId);
+    if(ts!=null) fd.append('ts',ts);
+    noteImages.forEach(f=>fd.append('images',f));
+    await api('tracks/'+tId+'/comments',{method:'POST',body:fd});
     $('#cInput').value=''; $('#cPin').checked=false;
+    clearStaged(noteImages); renderStrip($('#cStrip'),noteImages);
     if(await fetchCommentsInto(tId)){ renderComments(); drawPins(); refreshCounts(); }
   }catch(e){ toast(e.message,true); }
 }
+// ───────── picture lightbox ─────────
+let lbImgs=[], lbIdx=0;
+function openLightbox(names, idx){
+  if(!names || !names.length) return;
+  lbImgs=names; lbIdx=Math.max(0, Math.min(idx|0, names.length-1));
+  showLbImg(); $('#imgModal').classList.remove('hidden');
+}
+function showLbImg(){
+  $('#lbImg').src='api/cimg/'+lbImgs[lbIdx];
+  $('#lbCount').textContent = lbImgs.length>1 ? (lbIdx+1)+' / '+lbImgs.length : '';
+  $('#lbPrev').classList.toggle('hidden', lbIdx<=0);                  // hide the arrow that makes no sense
+  $('#lbNext').classList.toggle('hidden', lbIdx>=lbImgs.length-1);
+}
+function lbStep(d){ const n=lbIdx+d; if(n<0||n>=lbImgs.length) return; lbIdx=n; showLbImg(); }
+function closeLightbox(){ $('#imgModal').classList.add('hidden'); $('#lbImg').removeAttribute('src'); lbImgs=[]; }
+$('#lbClose').addEventListener('click',closeLightbox);
+$('#lbPrev').addEventListener('click',e=>{ e.stopPropagation(); lbStep(-1); });
+$('#lbNext').addEventListener('click',e=>{ e.stopPropagation(); lbStep(1); });
+$('#imgModal').addEventListener('click',e=>{ if(e.target===$('#imgModal')) closeLightbox(); });   // backdrop
+document.addEventListener('keydown',e=>{
+  if($('#imgModal').classList.contains('hidden')) return;
+  if(e.key==='Escape'){ closeLightbox(); }
+  else if(e.key==='ArrowLeft'){ e.preventDefault(); lbStep(-1); }
+  else if(e.key==='ArrowRight'){ e.preventDefault(); lbStep(1); }
+});
+// Thumbnails are rebuilt on every renderComments (incl. SSE repaints), so delegate from the stable #clist.
+$('#clist').addEventListener('click',e=>{
+  const img=e.target.closest('.catt'); if(!img) return;
+  const c=comments.find(x=>x.id===Number(img.dataset.cid)); if(!c||!c.attachments) return;
+  openLightbox(c.attachments, Number(img.dataset.idx));
+});
 
 async function markSeen(t,revId){
   if(ME.role!=='client')return; // seen-tracking drives clients' "NEW" badges only
@@ -2605,6 +2732,7 @@ document.addEventListener('keydown',e=>{ if(e.key==='Escape' && !$('#exportModal
 
 // ───────── keyboard ─────────
 document.addEventListener('keydown',e=>{
+  if(!$('#imgModal').classList.contains('hidden'))return;  // lightbox owns the keyboard (arrows/esc/space) while open
   if(e.target.matches('input,textarea,select'))return;
   if(e.code==='Space'){ if(e.target.closest('button')) return;   // let a focused button (e.g. Hide/▤ Player) activate natively
     e.preventDefault(); if(curTrackId && (VIEW==='player'||VIEW==='studio')) togglePlay(); }
