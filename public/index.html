@@ -99,6 +99,10 @@
   .nav{display:flex;gap:4px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:3px}
   .nav button{padding:6px 14px;border-radius:7px;color:var(--muted);font-size:14px}
   .nav button.active{background:var(--accent2);color:#fff}
+  /* Hamburger toggle for the nav — hidden on desktop, shown (and the nav becomes a dropdown) on mobile. */
+  .navburger{display:none;flex:none;width:34px;height:34px;align-items:center;justify-content:center;background:var(--panel);border:1px solid var(--line);border-radius:8px;color:var(--text);font-size:16px;cursor:pointer;padding:0}
+  .navburger:hover{border-color:var(--accent)}
+  .nav .navx-logout{display:none}   /* the "Sign out" entry only appears inside the mobile hamburger menu */
   .who{font-size:13px;color:var(--muted);background:none;border:0;font:inherit;cursor:pointer;display:inline-flex;align-items:center;gap:5px;padding:5px 8px;border-radius:8px}
   .who:hover{color:var(--text);background:var(--panel2)}
   .who #whoName{max-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -352,8 +356,58 @@
   @media(max-width:620px){
     .done-ctl{width:120px} .done-ctl input[type=range],.dbar{width:110px}
     .track{flex-wrap:wrap} .topbar .title{font-size:14px}
-    .nav button{padding:6px 10px}
     .pcard .pprog{display:none}
+    /* Track row: drop the doneness control to its own line so the title gets the full width instead
+       of being truncated to a couple characters. */
+    .track .done-ctl{flex-basis:100%;align-items:flex-start;margin-top:2px;width:auto}
+    /* HTML5 drag-reorder never fires on touch, so the grip is dead weight that steals title width —
+       hide it on mobile (reordering still works via the ▲▼ arrows). */
+    .track .handle{display:none}
+
+    /* Topbar: collapse the nav into a hamburger dropdown so the bar stays a single compact row
+       (logo · title · account · sign-out · ☰) and the nav is out of the way until tapped. */
+    .topbar{flex-wrap:wrap;gap:8px 10px;padding:11px 2px}
+    .navburger{display:inline-flex}
+    .nav{position:absolute;top:calc(100% - 1px);right:2px;flex-direction:column;align-items:stretch;
+         gap:2px;display:none;min-width:170px;background:var(--panel);border:1px solid var(--line);
+         border-radius:10px;padding:6px;box-shadow:0 14px 36px rgba(0,0,0,.55);z-index:25}
+    .nav.open{display:flex}
+    .nav button{width:100%;text-align:left;padding:10px 12px;border-radius:7px;font-size:15px}
+    /* Sign out lives in the menu on mobile (frees the bar so the project title can breathe). */
+    #logoutBtn{display:none}
+    .nav .navx-logout{display:block;color:var(--muted);border-top:1px solid var(--line);margin-top:4px;padding-top:11px}
+    .who #whoName{max-width:120px}
+
+    /* Notes: stack each note vertically so the body text gets its own FULL-width line under the
+       timestamp chip — instead of being squeezed into a narrow column beside it, which broke the text
+       (even the "· v3" tag) one character per line. Actions get their own full-width row below,
+       always visible (touch has no hover). */
+    .cmt{flex-direction:column;gap:6px}
+    .cmt .tsbtn, .cmt .gen{align-self:flex-start}
+    .cmt .cbody{flex:0 0 auto;width:100%}
+    .cmt .crev{white-space:nowrap}
+    .cmt .cact{opacity:1;justify-content:flex-start;gap:10px;margin-top:1px}
+    .cmt .cact button{padding:7px 10px;font-size:12.5px}
+
+    /* Player: compact, tightly-spaced meters (PEAK/LUFS close together + smaller) + a shorter wave. */
+    .wave-wrap{height:48px;margin-bottom:6px}
+    .meters{gap:3px;margin:6px 0 2px}
+    .meter{min-width:0;flex-basis:100%;gap:6px}
+    .mk{font-size:9.5px;width:26px}
+    .mbar{height:7px}
+    .mv{min-width:0;font-size:10.5px}
+    /* Keep the volume slider, now-playing title and download button on ONE row rather than each
+       getting a wasteful line of its own. */
+    .nowtitle{min-width:0;text-align:left}
+    .pb-controls > .seg.vol{order:1}
+    .pb-controls > .nowtitle{order:2}
+    .pb-controls > #dlBtn{order:3}
+
+    /* Bigger touch targets for the range sliders (volume / doneness / null-boost). The seek/scrub bar
+       is a <canvas>, not a range input, so playback scrubbing is unaffected. */
+    input[type=range]{height:9px}
+    input[type=range]::-webkit-slider-thumb{width:20px;height:20px}
+    input[type=range]::-moz-range-thumb{width:20px;height:20px}
   }
 </style>
 </head>
@@ -383,6 +437,7 @@
     <button type="button" class="who" id="who" aria-haspopup="dialog" title="Account settings">
       <span id="whoName"></span></button>
     <button class="btn ghost sm" id="logoutBtn">Sign out</button>
+    <button type="button" class="navburger" id="navBurger" aria-label="Menu" aria-haspopup="true" aria-expanded="false" aria-controls="nav">☰</button>
   </div>
 
   <!-- PROJECTS LIST VIEW -->
@@ -1149,7 +1204,8 @@ function renderNav(){
   $('#nav').innerHTML = btn('projects','Projects')
     + (has?btn('player','Player'):'')
     + (manage?btn('studio','Studio'):'')
-    + (ME.role==='admin'?btn('admin','Admin')+btn('settings','Settings'+(UPDATE_INFO&&UPDATE_INFO.behind>0?' <span style="color:var(--warn)" title="Update available">●</span>':'')):'');
+    + (ME.role==='admin'?btn('admin','Admin')+btn('settings','Settings'+(UPDATE_INFO&&UPDATE_INFO.behind>0?' <span style="color:var(--warn)" title="Update available">●</span>':'')):'')
+    + '<button type="button" data-act="logout" class="navx-logout">Sign out</button>';   // shown only inside the mobile hamburger menu
 }
 function setView(v){
   // Guard the views that need context/role; silently fall back rather than show an empty/forbidden page.
@@ -1169,7 +1225,14 @@ function setView(v){
   if(v==='settings') renderSettings();
   syncBottomPad();   // the player bar shows/hides with the view → re-measure the content clearance
 }
-$('#nav').addEventListener('click',e=>{ const b=e.target.closest('button'); if(b&&b.dataset.view) setView(b.dataset.view); });
+$('#nav').addEventListener('click',e=>{ const b=e.target.closest('button'); if(!b) return;
+  if(b.dataset.act==='logout'){ closeNavMenu(); $('#logoutBtn').click(); return; }   // menu "Sign out" → real (hidden-on-mobile) button
+  if(b.dataset.view){ setView(b.dataset.view); closeNavMenu(); } });
+// Mobile hamburger: the nav is a dropdown (CSS) toggled here; close on outside tap, Escape, or select.
+function closeNavMenu(){ $('#nav').classList.remove('open'); const t=$('#navBurger'); if(t) t.setAttribute('aria-expanded','false'); }
+$('#navBurger').addEventListener('click',e=>{ e.stopPropagation(); const open=$('#nav').classList.toggle('open'); $('#navBurger').setAttribute('aria-expanded', open?'true':'false'); });
+document.addEventListener('click',e=>{ if($('#nav').classList.contains('open') && !e.target.closest('#nav') && !e.target.closest('#navBurger')) closeNavMenu(); });
+document.addEventListener('keydown',e=>{ if(e.key==='Escape') closeNavMenu(); });
 
 // ───────── render player ─────────
 // fromEvent=true marks an SSE-driven re-render: it must NEVER pause/seek the player, even if the
