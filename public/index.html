@@ -270,6 +270,8 @@
   .cstrip-item{position:relative;display:inline-flex}
   .cstrip-item img{width:56px;height:56px;object-fit:cover;border-radius:7px;border:1px solid var(--line)}
   .cstrip-x{position:absolute;top:-6px;right:-6px;width:19px;height:19px;border-radius:50%;background:var(--danger);color:#fff;border:none;font-size:11px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;box-shadow:0 1px 4px rgba(0,0,0,.5)}
+  /* Drag-a-file-over highlight for the note/reply composer (outline doesn't shift layout). */
+  #addc.dragover,.creply.dragover{outline:2px dashed var(--accent);outline-offset:3px;border-radius:9px;background:rgba(122,162,255,.06)}
 
   /* Full-size picture lightbox. Prev/next/close/count reveal on stage hover (forced visible on touch
      via the mobile block); sits above the modals (z 90). Arrows get .hidden at the first/last image. */
@@ -1947,6 +1949,24 @@ function renderStrip(el, arr){
 // Revoke a staged array's object URLs and empty it IN PLACE (keep the same array object so `_urls`
 // tracking stays stable). Use this everywhere instead of reassigning noteImages/replyImages.
 function clearStaged(arr){ (arr._urls||[]).forEach(u=>URL.revokeObjectURL(u)); arr._urls=[]; arr.length=0; }
+// Add drag-&-drop (onto `zone`) and clipboard paste (into `ta`, e.g. a screenshot) as two more ways to
+// stage images, alongside the 📎 file picker. `zone` gets a `.dragover` outline while a file hovers.
+function wireComposerImages(zone, ta, arr, strip){
+  const stage=files=>{ addStaged(arr, files); renderStrip(strip, arr); };
+  const hasFiles=e=>e.dataTransfer && Array.from(e.dataTransfer.types||[]).includes('Files');
+  ta.addEventListener('paste',e=>{
+    const items=e.clipboardData && e.clipboardData.items; if(!items) return;
+    const imgs=[];
+    for(const it of items){ if(it.kind==='file' && /^image\//.test(it.type)){ const f=it.getAsFile(); if(f) imgs.push(f); } }
+    if(!imgs.length) return;            // not an image paste → let normal text paste through
+    e.preventDefault(); stage(imgs);
+  });
+  let depth=0;                          // counter so nested child enter/leave doesn't flicker the outline
+  zone.addEventListener('dragenter',e=>{ if(!hasFiles(e)) return; e.preventDefault(); if(!depth++) zone.classList.add('dragover'); });
+  zone.addEventListener('dragover',e=>{ if(hasFiles(e)) e.preventDefault(); });   // required for drop to fire
+  zone.addEventListener('dragleave',e=>{ if(!hasFiles(e)) return; if(--depth<=0){ depth=0; zone.classList.remove('dragover'); } });
+  zone.addEventListener('drop',e=>{ if(!hasFiles(e)) return; e.preventDefault(); depth=0; zone.classList.remove('dragover'); if(e.dataTransfer.files.length) stage(e.dataTransfer.files); });
+}
 function renderComments(){
   const box=$('#clist');
   // Preserve any in-progress edit AND reply text across re-renders (resolve/del/send on other
@@ -2081,6 +2101,7 @@ function renderComments(){
       const rfile=ed.querySelector('.rfile');
       ed.querySelector('.rattach').addEventListener('click',()=>rfile.click());
       rfile.addEventListener('change',()=>{ addStaged(replyImages, rfile.files); rfile.value=''; renderStrip(strip, replyImages); });
+      wireComposerImages(ed, ta, replyImages, strip);   // drag-drop + paste onto the reply box
       const save=async()=>{
         const nb=ta.value.trim(); if(!nb && !replyImages.length){ toast('Reply cannot be empty',true); return; }
         try{
@@ -2115,6 +2136,7 @@ $('#cSend').addEventListener('click',sendComment);
 $('#cInput').addEventListener('keydown',e=>{ if((e.metaKey||e.ctrlKey)&&e.key==='Enter') sendComment(); });
 $('#cAttach').addEventListener('click',()=>$('#cFile').click());
 $('#cFile').addEventListener('change',()=>{ addStaged(noteImages,$('#cFile').files); $('#cFile').value=''; renderStrip($('#cStrip'),noteImages); });
+wireComposerImages($('#addc'), $('#cInput'), noteImages, $('#cStrip'));   // drag-drop + paste
 async function sendComment(){
   const body=$('#cInput').value.trim(); if(!body && !noteImages.length)return;  // need text or an image
   const tId=panelTrackId; if(!tId){ toast('Open a track first',true); return; }
