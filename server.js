@@ -38,8 +38,10 @@ const ENABLE_HSTS = /^(1|true|yes|on)$/i.test((process.env.ENABLE_HSTS || '').tr
 // Env-overridable so a throwaway test instance can point at a temp DB/uploads dir
 // (DATA_DIR=/tmp/at-test/data UPLOADS_DIR=/tmp/at-test/uploads PORT=3999 node server.js)
 // without touching the live store. Unset in prod ⇒ the original __dirname paths.
-const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
-const UPLOADS_DIR = process.env.UPLOADS_DIR || path.join(__dirname, 'uploads');
+// path.resolve: these must be ABSOLUTE — ffmpeg children may run with a different cwd (see
+// analyzeLoudness), so a relative env override would resolve against the wrong directory there.
+const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data'));
+const UPLOADS_DIR = path.resolve(process.env.UPLOADS_DIR || path.join(__dirname, 'uploads'));
 // Owner-only by default: the SQLite DB and uploaded media must not be world-readable on a shared host.
 // umask covers every file the process creates (DB, WAL/SHM, uploads, temp scratch); the chmods tighten
 // the two dirs in case they pre-existed with looser permissions. Opt out with STRICT_FILE_PERMS=0 for
@@ -307,6 +309,35 @@ try {
     if (/^\.wavtmp-.*\.f32$/.test(f)) { try { fs.unlinkSync(path.join(UPLOADS_DIR, f)); } catch {} }
   }
 } catch {}
+// Sweep media files orphaned by a crash/restart mid-job: a queued upload's multer original (up to
+// 1 GB) or a half-written transcode has no DB row pointing at it once the in-flight queue is lost,
+// and nothing else ever reclaims it. Everything legitimately kept in UPLOADS_DIR is referenced by
+// exactly one of the columns below, so an unreferenced file is garbage — with two guards:
+//   1. skip entirely when the DB references nothing (a mispaired DATA_DIR/UPLOADS_DIR — e.g. a fresh
+//      DB pointed at a real media dir — must never nuke that dir), and
+//   2. only remove files older than an hour (never an upload racing this very startup).
+try {
+  const referenced = new Set();
+  for (const r of db.prepare('SELECT stored_name, original_stored_name FROM revisions').all())
+    for (const n of [r.stored_name, r.original_stored_name]) if (n) referenced.add(n);
+  for (const t of db.prepare('SELECT video_stored_name, video_proxy_name, video_micro_name, video_original_stored_name FROM tracks').all())
+    for (const n of [t.video_stored_name, t.video_proxy_name, t.video_micro_name, t.video_original_stored_name]) if (n) referenced.add(n);
+  for (const p of db.prepare('SELECT art_stored_name FROM projects WHERE art_stored_name IS NOT NULL').all()) referenced.add(p.art_stored_name);
+  for (const c of db.prepare("SELECT attachments FROM comments WHERE attachments IS NOT NULL AND attachments <> '[]'").all()) {
+    try { for (const n of JSON.parse(c.attachments)) if (n) referenced.add(n); } catch {}
+  }
+  if (referenced.size) {
+    const cutoff = Date.now() - 60 * 60 * 1000;
+    for (const f of fs.readdirSync(UPLOADS_DIR)) {
+      if (f.startsWith('.') || referenced.has(f)) continue;
+      const p = path.join(UPLOADS_DIR, f);
+      try {
+        const st = fs.statSync(p);
+        if (st.isFile() && st.mtimeMs < cutoff) { fs.unlinkSync(p); console.log('[startup] removed orphaned upload:', f); }
+      } catch {}
+    }
+  }
+} catch (e) { console.warn('[startup] orphan sweep skipped:', e && e.message); }
 
 // Indexes for the project-scoped lookups added in Phase 3b (membership-by-user, tracks-by-project).
 // Created after the ALTER above so tracks.project_id exists; idempotent.
@@ -544,12 +575,16 @@ async function computeWaveAndPeaks(file, buckets = 1000, peakIntervalSec = 0.05)
 //   - short-term LUFS time-series (from per-frame metadata), resampled to a uniform grid
 function analyzeLoudness(file) {
   return new Promise((resolve) => {
-    const metaFile = path.join(os.tmpdir(), 'eb-' + crypto.randomUUID() + '.txt');
+    // The metadata file is passed to the filtergraph as a bare RELATIVE name (with cwd set to the
+    // temp dir): an absolute Windows path's drive colon (C:\...) is a filter-option separator and
+    // breaks parsing, silently killing loudness analysis on the shipped Windows installs.
+    const metaName = 'eb-' + crypto.randomUUID() + '.txt';
+    const metaFile = path.join(os.tmpdir(), metaName);
     const empty = { i: null, lra: null, tp: null, st_interval: 0, st: [] };
     execFile('ffmpeg',
       ['-hide_banner', '-nostats', '-i', file, '-af',
-       `ebur128=peak=true:metadata=1,ametadata=mode=print:file=${metaFile}`, '-f', 'null', '-'],
-      { maxBuffer: 1024 * 1024 * 64, encoding: 'buffer', timeout: FFMPEG_TIMEOUT, killSignal: 'SIGKILL' },
+       `ebur128=peak=true:metadata=1,ametadata=mode=print:file=${metaName}`, '-f', 'null', '-'],
+      { maxBuffer: 1024 * 1024 * 64, encoding: 'buffer', timeout: FFMPEG_TIMEOUT, killSignal: 'SIGKILL', cwd: os.tmpdir() },
       (err, _so, se) => {
         const stderr = se ? se.toString() : '';
         let txt = ''; try { txt = fs.readFileSync(metaFile, 'utf8'); } catch {}
@@ -607,7 +642,10 @@ async function ffprobeVideo(file) {
 // 1920 (height auto-even via -2) to bound file size. Mirrors the audio pipeline's "always make a
 // browser-friendly preview that streams; keep the original only for download" rule.
 async function transcodeToVideoPreview(input, output) {
-  await run('ffmpeg', ['-y', '-i', input, '-vf', "scale='min(1920,iw)':-2",
+  // Width forced EVEN (2*trunc(w/2)): libx264 + yuv420p refuses odd dimensions, and an un-capped
+  // odd-width source (e.g. 853×480) would otherwise fail the whole upload after the route already
+  // answered {processing:true}. -2 keeps the height even.
+  await run('ffmpeg', ['-y', '-i', input, '-vf', "scale='2*trunc(min(1920,iw)/2)':-2",
     '-c:v', 'libx264', '-preset', 'medium', '-crf', '20', '-pix_fmt', 'yuv420p',
     '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', output]);
 }
@@ -742,11 +780,23 @@ async function processAudioUpload(file, keepLossless = false) {
   const ext = path.extname(file.originalname).toLowerCase();
   let storedName, finalPath;
   try {
-    if (ext === '.mp3') {
+    // Trust the .mp3 extension only if the container really is MPEG audio — a video (or anything
+    // else) renamed .mp3 would otherwise be stored verbatim and served as audio/mpeg, giving an
+    // unplayable "revision". Anything that isn't a true mp3 goes through the normal transcode.
+    let isMp3 = ext === '.mp3';
+    if (isMp3) {
+      try {
+        const out = await run('ffprobe', ['-v', 'error', '-show_entries', 'format=format_name',
+          '-of', 'default=nokey=1:noprint_wrappers=1', inputPath]);
+        isMp3 = out.toString().trim() === 'mp3';
+      } catch { isMp3 = false; }
+    }
+    if (isMp3) {
       storedName = file.filename;
       finalPath = inputPath;
     } else {
       storedName = path.basename(file.filename, ext) + '.mp3';
+      if (storedName === file.filename) storedName = crypto.randomUUID() + '.mp3'; // .mp3-named non-mp3: never transcode in place
       finalPath = path.join(UPLOADS_DIR, storedName);
       await transcodeToMp3(inputPath, finalPath);
     }
@@ -987,6 +1037,18 @@ function broadcastChange(projectId) {
 // refetches its own server-scoped list and re-validates whatever it has open.
 function broadcastProjects() {
   for (const c of [...sseClients]) if (isActiveUser(c.username)) sseSend(c, 'projects', {});
+}
+// A queued media job failed AFTER its route already answered {processing:true} — without this the
+// "processing…" state just evaporates and the uploader never learns why. Members of the project get
+// a 'joberror' event (the client shows it as an error toast). Reason strings are truncated and the
+// ffmpeg stderr tail (after " :: ") is dropped.
+function broadcastJobError(projectId, message) {
+  if (projectId == null) return;
+  for (const c of [...sseClients]) if (canSeeProject(c.username, projectId)) sseSend(c, 'joberror', { projectId, message });
+}
+function jobErrorMsg(prefix, e, filename) {
+  const reason = String((e && e.message) || 'unknown error').split(' :: ')[0].slice(0, 300);
+  return `${prefix}${filename ? ` for “${filename}”` : ''}: ${reason}`;
 }
 // Admin-only: the "update available" badge (Cluster E). Mirrors the live role re-check of the
 // broadcasts above — a demoted/deactivated admin on a still-open stream stops receiving it.
@@ -1254,13 +1316,15 @@ app.post('/api/projects', requireAdmin, (req, res) => {
   res.json({ id });
 });
 
-app.put('/api/projects/:id', requireAdmin, (req, res) => {
-  if (!projectExists(Number(req.params.id))) return res.status(404).json({ error: 'Not found' });
+// Retitle a project. Engineer-on-the-project (or admin) — the Studio title card is shown to
+// engineers, and art upload/removal below is already engineer-scoped; admin-only here was the odd
+// one out (an engineer's Save always 403'd).
+app.put('/api/projects/:id', requireProjectEngineer(pParam), (req, res) => {
   const title = String(req.body.title || '').trim().slice(0, 200);
   if (!title) return res.status(400).json({ error: 'Title required' });
-  db.prepare("UPDATE projects SET title = ?, updated_at = datetime('now') WHERE id = ?").run(title, req.params.id);
-  broadcastChange(Number(req.params.id)); // members viewing it get the new title
-  broadcastProjects();                    // and it re-titles in everyone's list
+  db.prepare("UPDATE projects SET title = ?, updated_at = datetime('now') WHERE id = ?").run(title, req.projectId);
+  broadcastChange(req.projectId); // members viewing it get the new title
+  broadcastProjects();            // and it re-titles in everyone's list
   res.json({ ok: true });
 });
 
@@ -1274,8 +1338,12 @@ app.post('/api/projects/:id/art', requireProjectEngineer(pParam), artUpload, asy
   let storedName;
   try { storedName = await processArtImage(req.file); }
   catch (e) { console.error('[art] processing failed:', e.message); return res.status(e.status || 400).json({ error: e.status ? e.message : 'Could not process image' }); }
+  // Re-read the current art NOW (post-await): a concurrent upload may have swapped it while ffmpeg
+  // ran — unlinking the pre-await snapshot would orphan that upload's fresh jpg. The read + update
+  // are synchronous (better-sqlite3), so nothing can interleave between them.
+  const prevArt = db.prepare('SELECT art_stored_name FROM projects WHERE id = ?').get(pid)?.art_stored_name;
   db.prepare("UPDATE projects SET art_stored_name = ?, updated_at = datetime('now') WHERE id = ?").run(storedName, pid);
-  unlinkStored(proj.art_stored_name);
+  if (prevArt && prevArt !== storedName) unlinkStored(prevArt);
   broadcastChange(pid); broadcastProjects();
   res.json({ art_stored_name: storedName });
 });
@@ -1450,14 +1518,16 @@ app.post('/api/tracks/:id/video', requireProjectEngineer(pTrack), uploadGuard(),
   // appears via the SSE 'change' when it's done. Studio shows "processing…" via video_processing.
   const file = req.file, projectId = req.projectId, username = req.session.user.username, trackId = track.id;
   const keepLossless = wantKeepLossless(req);
-  db.prepare('UPDATE tracks SET video_processing = 1 WHERE id = ?').run(trackId);
+  // A COUNTER (like mix_processing), not a flag: with two uploads queued, the first job's completion
+  // must not clear the "processing…" state while the second is still queued/running.
+  db.prepare('UPDATE tracks SET video_processing = video_processing + 1 WHERE id = ?').run(trackId);
   broadcastChange(projectId);
   res.json({ ok: true, processing: true });
 
   enqueueMedia(async () => {
     let a;
     try { a = await processTrackVideo(file, keepLossless); }
-    catch (e) { console.error('[track-video] processing failed:', e.message); db.prepare('UPDATE tracks SET video_processing = 0 WHERE id = ?').run(trackId); broadcastChange(projectId); return; }
+    catch (e) { console.error('[track-video] processing failed:', e.message); broadcastJobError(projectId, jobErrorMsg('Video processing failed', e, file.originalname)); db.prepare('UPDATE tracks SET video_processing = MAX(0, video_processing - 1) WHERE id = ?').run(trackId); broadcastChange(projectId); return; }
     // Re-read current state INSIDE the job (FIFO queue ⇒ a prior video upload to this track may have
     // run first; the track could also have been deleted while queued).
     const cur = db.prepare('SELECT video_stored_name, video_proxy_name, video_micro_name, video_original_stored_name FROM tracks WHERE id = ?').get(trackId);
@@ -1470,7 +1540,7 @@ app.post('/api/tracks/:id/video', requireProjectEngineer(pTrack), uploadGuard(),
       db.transaction(() => {
         db.prepare(`UPDATE tracks SET video_stored_name=?, video_proxy_name=?, video_micro_name=?, video_original_name=?, video_original_stored_name=?,
                       video_fps=?, video_width=?, video_height=?, video_duration=?, video_uploaded_by=?, video_updated_at=datetime('now'),
-                      video_processing=0, updated_at=datetime('now') WHERE id=?`)
+                      video_processing=MAX(0, video_processing - 1), updated_at=datetime('now') WHERE id=?`)
           .run(a.video.storedName, a.video.proxyName, a.video.microName, a.video.originalName, a.video.originalStoredName,
                a.video.fps, a.video.width, a.video.height, a.video.duration, username, trackId);
         if (oa && oldOrig) {
@@ -1497,8 +1567,9 @@ app.post('/api/tracks/:id/video', requireProjectEngineer(pTrack), uploadGuard(),
     } catch (e) {
       unlinkStored(a.video.storedName); unlinkStored(a.video.proxyName); unlinkStored(a.video.microName); unlinkStored(a.video.originalStoredName);
       if (oa) unlinkStored(oa.storedName);
-      db.prepare('UPDATE tracks SET video_processing = 0 WHERE id = ?').run(trackId);
+      db.prepare('UPDATE tracks SET video_processing = MAX(0, video_processing - 1) WHERE id = ?').run(trackId);
       console.error('[track-video] db failed:', e.message);
+      broadcastJobError(projectId, 'Video upload failed: server error while saving.');
       broadcastChange(projectId);
       return;
     }
@@ -1531,9 +1602,17 @@ app.post('/api/tracks/:id/revisions', requireProjectEngineer(pTrack), uploadGuar
     const done = () => { db.prepare('UPDATE tracks SET mix_processing = MAX(0, mix_processing - 1) WHERE id = ?').run(trackId); broadcastChange(projectId); };
     let a;
     try { a = await processAudioUpload(file, keepLossless); }
-    catch (e) { console.error('[mix] processing failed:', e.message); done(); return; }
+    catch (e) { console.error('[mix] processing failed:', e.message); broadcastJobError(projectId, jobErrorMsg('Audio processing failed', e, file.originalname)); done(); return; }
     if (!db.prepare('SELECT id FROM tracks WHERE id = ?').get(trackId)) {   // track deleted while queued
       unlinkStored(a.storedName); unlinkStored(a.originalStoredName); done(); return;
+    }
+    // Re-check the per-track cap against COMMITTED rows: uploadGuard ran at HTTP time, before any
+    // queued peers ahead of this job had landed, so a burst of uploads could overshoot it.
+    const committed = db.prepare('SELECT COUNT(*) c FROM revisions WHERE track_id = ? AND is_orig_audio = 0').get(trackId).c;
+    if (committed >= MAX_REVISIONS_PER_TRACK) {
+      unlinkStored(a.storedName); unlinkStored(a.originalStoredName);
+      broadcastJobError(projectId, `Upload discarded — the track already has the maximum of ${MAX_REVISIONS_PER_TRACK} revisions.`);
+      done(); return;
     }
     try {
       const nextRev = (db.prepare('SELECT COALESCE(MAX(rev_number), 0) v FROM revisions WHERE track_id = ?').get(trackId).v) + 1;
@@ -1548,6 +1627,7 @@ app.post('/api/tracks/:id/revisions', requireProjectEngineer(pTrack), uploadGuar
     } catch (e) {
       unlinkStored(a.storedName); unlinkStored(a.originalStoredName);
       console.error('[mix] db insert failed:', e.message);
+      broadcastJobError(projectId, 'Upload failed: server error while saving the revision.');
     }
     done();
   });
@@ -1577,7 +1657,7 @@ app.post('/api/revisions/:id/replace', requireProjectEngineer(pRev), uploadGuard
     const done = () => { db.prepare('UPDATE tracks SET mix_processing = MAX(0, mix_processing - 1) WHERE id = ?').run(trackId); broadcastChange(projectId); };
     let a;
     try { a = await processAudioUpload(file, keepLossless); }
-    catch (e) { console.error('[replace] processing failed:', e.message); done(); return; }
+    catch (e) { console.error('[replace] processing failed:', e.message); broadcastJobError(projectId, jobErrorMsg('Audio replacement failed', e, file.originalname)); done(); return; }
     // Re-read the revision INSIDE the job — it may have been deleted (or itself replaced again, or
     // turned into an orig-audio rev) while queued. If so, the freshly-stored files belong to nothing.
     const cur = db.prepare('SELECT id, stored_name, original_stored_name FROM revisions WHERE id = ? AND is_orig_audio = 0').get(revId);
@@ -1599,6 +1679,7 @@ app.post('/api/revisions/:id/replace', requireProjectEngineer(pRev), uploadGuard
       // DB update failed — the freshly-stored files are orphaned; remove them, leave the row intact.
       unlinkStored(a.storedName); unlinkStored(a.originalStoredName);
       console.error('[replace] db update failed:', e.message);
+      broadcastJobError(projectId, 'Audio replacement failed: server error while saving.');
       done(); return;
     }
     // Committed — the old preview + old kept original (read live at job time) are no longer referenced.
@@ -1665,7 +1746,9 @@ app.get('/api/audio/:name', requireProjectAccess(pAudio), (req, res) => {
       const dn = path.basename(baseName, path.extname(baseName)) + path.extname(orig);
       return res.download(op, dn);
     }
-    return res.download(p, baseName);
+    // No kept original: the served file IS the preview — name it with the preview's real extension,
+    // so a video uploaded as "movie.mkv" downloads as movie.mp4 instead of a mislabeled .mkv.
+    return res.download(p, path.basename(baseName, path.extname(baseName)) + path.extname(p));
   }
   res.type(MEDIA_TYPES[path.extname(name).toLowerCase()] || 'application/octet-stream');
   res.sendFile(p); // `send` adds Accept-Ranges + handles Range requests for seeking
@@ -1702,7 +1785,7 @@ app.get('/api/tracks/:id/comments', requireProjectAccess(pTrack), (req, res) => 
   res.json(rows.map(c => ({ ...c, attachments: JSON.parse(c.attachments || '[]') })));
 });
 
-app.post('/api/tracks/:id/comments', requireProjectAccess(pTrack), noteImagesUpload, async (req, res) => {
+app.post('/api/tracks/:id/comments', requireProjectAccess(pTrack), uploadGuard(), noteImagesUpload, async (req, res) => {
   // Multipart: text fields land on req.body (same names as the old JSON body), images on req.files.
   // A note may be image-only (no body) — but must have at least one of text/image.
   const files = req.files || [];
@@ -1731,6 +1814,7 @@ app.post('/api/tracks/:id/comments', requireProjectAccess(pTrack), noteImagesUpl
     if (ts != null && Number.isFinite(ts) && rv.duration > 0) ts = Math.min(Math.max(0, ts), rv.duration);
   }
   if (ts != null && !Number.isFinite(ts)) ts = null; // NaN/Infinity ts → unpinned (defensive)
+  if (revisionId == null) ts = null; // a pin is meaningless without its revision — never store an orphaned ts
   // Validate + downscale each attached image (synchronous like album art — sub-second, no media queue).
   // On any failure, remove every file: the already-processed jpgs AND the still-unprocessed temp inputs.
   const stored = [];
@@ -1741,8 +1825,15 @@ app.post('/api/tracks/:id/comments', requireProjectAccess(pTrack), noteImagesUpl
     for (const n of stored) unlinkStored(n);
     return res.status(e.status || 400).json({ error: 'Could not process an attached image' });
   }
-  const r = db.prepare('INSERT INTO comments (track_id, revision_id, author, ts, body, parent_id, attachments) VALUES (?, ?, ?, ?, ?, ?, ?)')
-    .run(req.params.id, revisionId, req.session.user.username, ts, body, parentId, JSON.stringify(stored));
+  let r;
+  try {
+    r = db.prepare('INSERT INTO comments (track_id, revision_id, author, ts, body, parent_id, attachments) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(req.params.id, revisionId, req.session.user.username, ts, body, parentId, JSON.stringify(stored));
+  } catch (e) {
+    // Track/revision deleted while the images were processing (FK) — don't orphan the stored jpgs.
+    for (const n of stored) unlinkStored(n);
+    return res.status(400).json({ error: 'Note could not be saved — the track may have been deleted' });
+  }
   broadcastChange(req.projectId);
   res.json({ id: r.lastInsertRowid });
 });
@@ -1763,7 +1854,9 @@ app.put('/api/comments/:id', requireProjectAccess(pComment), (req, res) => {
       return res.status(403).json({ error: 'Not your note' });
     }
     newBody = String(req.body.body).trim().slice(0, 10000);
-    if (!newBody) return res.status(400).json({ error: 'Comment body required' });
+    // An image-only note (legal on create) may keep an empty body on edit too.
+    let hasAtt = false; try { hasAtt = JSON.parse(c.attachments || '[]').length > 0; } catch {}
+    if (!newBody && !hasAtt) return res.status(400).json({ error: 'Comment body required' });
   }
   let mutated = false;
   db.transaction(() => {
@@ -2087,7 +2180,9 @@ app.post('/api/users', requireAdmin, (req, res) => {
   const username = String(req.body.username || '').trim().toLowerCase();
   const role = String(req.body.role || '');
   const display_name = String(req.body.display_name || '').trim().slice(0, 64) || null;
-  if (!/^[a-z0-9_.-]{2,32}$/.test(username)) return res.status(400).json({ error: 'Username must be 2–32 chars: a–z 0–9 . _ -' });
+  // Reject all-dot names too: '..' (and '.') vanish under URL dot-segment normalization, making the
+  // account unreachable by every /api/users/:u management route.
+  if (!/^[a-z0-9_.-]{2,32}$/.test(username) || /^\.+$/.test(username)) return res.status(400).json({ error: 'Username must be 2–32 chars: a–z 0–9 . _ -' });
   if (!ROLES.has(role)) return res.status(400).json({ error: 'Invalid role' });
   if (db.prepare('SELECT 1 FROM users WHERE username = ?').get(username)) return res.status(400).json({ error: 'Username already exists' });
   // pw_hash NULL ⇒ TOFU; the invite token is what unlocks that first login. Return it so the admin

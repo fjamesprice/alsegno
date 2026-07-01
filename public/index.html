@@ -845,7 +845,7 @@ async function api(path, opts={}){
   if(o.body && !(o.body instanceof FormData)){ o.headers['Content-Type']='application/json'; o.body=JSON.stringify(o.body); }
   const res=await fetch('api/'+path,o);
   if(res.status===401){ showLogin(); throw new Error('unauth'); }
-  if(!res.ok){ let e={}; try{e=await res.json()}catch{}; throw new Error(e.error||('HTTP '+res.status)); }
+  if(!res.ok){ let e={}; try{e=await res.json()}catch{}; const err=new Error(e.error||('HTTP '+res.status)); err.status=res.status; throw err; }   // .status lets callers tell "gone/forbidden" from a transient failure
   const ct=res.headers.get('content-type')||'';
   return ct.includes('application/json')?res.json():res;
 }
@@ -893,9 +893,13 @@ $('#loginForm').addEventListener('submit',async e=>{
         body:JSON.stringify({username:$('#luser').value,password:$('#lpass').value, token: INVITE?INVITE.token:undefined})}); }
   catch{ $('#loginErr').textContent='Could not reach the server. Please try again.'; return; }
   if(!r.ok){
-    $('#loginErr').textContent = INVITE
+    // Surface the server's real reason (password policy, rate limit, deactivated account) instead of
+    // collapsing everything into "Invalid credentials". A 401 on the invite path keeps the friendlier
+    // stale-link hint (the server's generic message would just confuse there).
+    let msg=null; try{ msg=(await r.json()).error; }catch{}
+    $('#loginErr').textContent = (INVITE && r.status===401)
       ? 'This invite link is no longer valid — it may have already been used. Ask your admin for a new link.'
-      : 'Invalid credentials';
+      : (msg || 'Invalid credentials');
     return;
   }
   ME=await r.json();
@@ -1403,7 +1407,12 @@ function revById(t,id){ return t && t.revisions.find(r=>r.id===id); }
 async function loadTrack(trackId, revId, {play=false, keepPos=null}={}){
   const t=trackById(trackId); if(!t)return;
   const rev=revById(t,revId)||t.revisions[t.revisions.length-1]; if(!rev)return;
+  // Token-guard the WHOLE load, not just `begin`: every await below yields to a possible newer
+  // loadTrack, and a stale continuation resuming after it would clobber its state — most damaging
+  // via openTrack() re-pointing panelTrackId at the old track, so new notes post to the wrong track.
+  const myLoad=++loadSeq;
   if(crossing) await settleCrossfade();   // don't fight an in-flight A/B crossfade over the audio elements
+  if(myLoad!==loadSeq) return;            // superseded while waiting on the fade
   if(nullOn) stopNull();
   const other=players[1-act]; try{other.pause();}catch{} other.volume=0; other._revId=null;
   curTrackId=trackId; curRevId=rev.id; stepT=null;   // new track/rev → drop the frame-step accumulator
@@ -1413,9 +1422,8 @@ async function loadTrack(trackId, revId, {play=false, keepPos=null}={}){
   audio.src='api/audio/'+rev.stored_name;
   audio.load();
   const startAt = keepPos!=null? keepPos : 0;
-  // Token-guard so a stale 'begin' from a superseded loadTrack (its {once:true} listener never fired
-  // before this call replaced the src) can't seek/play the new media to the previous call's position.
-  const myLoad=++loadSeq;
+  // The same token also guards `begin`: a stale 'begin' from a superseded loadTrack (its {once:true}
+  // listener never fired before this call replaced the src) can't seek/play the new media.
   const begin=()=>{ if(myLoad!==loadSeq) return; const sa=startAt?Math.min(startAt, rev.duration||startAt):0; if(startAt) audio.currentTime=sa; audio.volume=userVol; if(play) audio.play().catch(()=>{}); seekPicture(sa); syncVid(); };
   audio.addEventListener('loadedmetadata',begin,{once:true});
   syncPlayerSelectors(t);
@@ -1423,7 +1431,9 @@ async function loadTrack(trackId, revId, {play=false, keepPos=null}={}){
   updateRevNote(rev);
   peakMaxHold=-Infinity;
   updateStage();   // reveal the <video> for a video project / hide for audio
-  await ensurePeaks(rev.id); drawWave();
+  await ensurePeaks(rev.id);
+  if(myLoad!==loadSeq) return;   // superseded while fetching peaks — the newer load owns the panel/selectors now
+  drawWave();
   if(!nullOn) updateMeters(startAt||0); else blankMeters();
   // mark seen + open comments + clear NEW
   markSeen(t, rev.id);
@@ -1437,16 +1447,19 @@ function revLabel(r){ return r && r.is_orig_audio ? 'Original audio' : ('v'+(r?r
 // Count of real mix revisions for the "N revs" badge. A video's auto-made "Original audio" (the
 // baseline, not an uploaded mix) is NOT a revision, so it's excluded — audio projects never have one.
 function mixRevCount(t){ return t.revisions.filter(r=>!r.is_orig_audio).length; }
-let selTrackId=null, selRevCount=-1;
+let selTrackId=null, selRevSig='';
 function syncPlayerSelectors(t){
   const revSel=$('#revSel'), cmpSel=$('#cmpSel');
-  if(selTrackId!==t.id || selRevCount!==t.revisions.length){      // rebuild options only when needed
+  // Rebuild-needed signature is the rev ID LIST, not the count — a delete + re-upload between syncs
+  // keeps the count while invalidating the option ids, which would strand stale (dead) entries.
+  const sig=t.revisions.map(r=>r.id).join(',');
+  if(selTrackId!==t.id || selRevSig!==sig){      // rebuild options only when needed
     const opt=r=>`<option value="${r.id}">${esc(revLabel(r))}</option>`;
     revSel.innerHTML=t.revisions.map(opt).join('');
     cmpSel.innerHTML=t.revisions.map(opt).join('');
     const others=t.revisions.filter(r=>r.id!==curRevId);          // default compare = previous revision
     if(others.length){ const prev=[...t.revisions].reverse().find(r=>r.id<curRevId)||others[others.length-1]; cmpSel.value=prev.id; }
-    selTrackId=t.id; selRevCount=t.revisions.length;
+    selTrackId=t.id; selRevSig=sig;
   }
   if(curRevId) revSel.value=curRevId;
   // Keep the compare/swap target distinct from what's playing — otherwise ⇄ swap (a===b guard)
@@ -1468,7 +1481,8 @@ function updateRevNote(rev){
 
 async function ensurePeaks(revId){
   if(peaksCache[revId])return peaksCache[revId];
-  try{ peaksCache[revId]=await api('revisions/'+revId+'/peaks'); }catch{ peaksCache[revId]={duration:0,peaks:[]}; }
+  try{ peaksCache[revId]=await api('revisions/'+revId+'/peaks'); }
+  catch{ return {duration:0,peaks:[]}; }   // transient failure: DON'T cache it, or the waveform/meters stay dead all session — the next load retries
   return peaksCache[revId];
 }
 
@@ -1564,15 +1578,17 @@ async function renullForCompareChange(){
   if(!a||!b||a.id===b.id) return;   // syncPlayerSelectors keeps them distinct; ignore a transient equal pick
   const was=nullPlaying, pos=nullTime();
   stopNullSources();
+  const myNull=++nullSeq;   // same stale-decode guard as toggleNullMode
   try{
     $('#playBtn').innerHTML='<span class="spin"></span>';
     const [bufA,bufB]=await Promise.all([getDecoded(a.stored_name),getDecoded(b.stored_name)]);
+    if(myNull!==nullSeq || !nullOn) return;   // null was exited while re-decoding
     nDur=Math.min(bufA.duration,bufB.duration);
     nOffset=Math.min(pos,nDur);
     $('#nullHint').innerHTML='Null: <b>v'+a.rev_number+' − v'+b.rev_number+'</b> — you hear only what changed. Previews are MP3 so a faint hiss remains where nothing changed; real mix moves sit above it. Raise boost for quiet differences.';
     $('#nowTitle').textContent=t.title+'  (null v'+a.rev_number+'−v'+b.rev_number+')';
     if(was) startNull(nOffset); else { nullPlaying=false; updateTime(nOffset,nDur); $('#playBtn').textContent='▶'; }
-  }catch(e){ toast('Null decode failed: '+e.message,true); stopNull(); $('#nowTitle').textContent=(trackById(curTrackId)||{}).title||''; }
+  }catch(e){ if(myNull!==nullSeq) return; toast('Null decode failed: '+e.message,true); stopNull(); $('#nowTitle').textContent=(trackById(curTrackId)||{}).title||''; }
 }
 $('#autoAdv').addEventListener('change',e=>autoAdvance=e.target.checked);
 $('#dlBtn').addEventListener('click',()=>{ const t=trackById(curTrackId); const r=revById(t,curRevId); if(r) window.location='api/audio/'+r.stored_name+'?dl=1'; });
@@ -1779,6 +1795,11 @@ function endScrub(e){
 }
 window.addEventListener('pointerup',endScrub);
 window.addEventListener('pointercancel',endScrub);
+// Safety net: if a doneness slider is rebuilt mid-drag (a local render()), its own pointerup
+// listeners die with the element and doneDragging would stay true forever — deferring every SSE
+// resync for the rest of the session. Any pointer release ends the drag by definition.
+window.addEventListener('pointerup',()=>{ doneDragging=false; });
+window.addEventListener('pointercancel',()=>{ doneDragging=false; });
 cv.addEventListener('lostpointercapture',endScrub);   // safety: if capture is lost abnormally, end the drag cleanly
 let rafId=null;
 function raf(){ cancelAnimationFrame(rafId);
@@ -1809,6 +1830,8 @@ function drawPins(){
 let actx=null, nullOn=false, nullPlaying=false;
 let nSrcA=null,nSrcB=null,nGainB=null,nMakeup=null,nMaster=null;
 let nStartCtx=0,nOffset=0,nDur=0;
+let nullSeq=0;   // generation token: bumped on every null (re)start AND in stopNull, so a decode that
+                 // finishes after null mode was exited can't start phantom Web Audio playback
 const decoded={}; // storedName -> AudioBuffer
 function ensureActx(){
   if(!actx){ actx=new (window.AudioContext||window.webkitAudioContext)(); nMaster=actx.createGain(); nMaster.gain.value=userVol; nMaster.connect(actx.destination); }
@@ -1840,21 +1863,26 @@ async function toggleNullMode(){
   // turn on
   const a=revById(t,+$('#revSel').value), b=revById(t,+$('#cmpSel').value);
   if(!a||!b||a.id===b.id){ toast('Pick two different revisions',true); return; }
+  // Never arm null mid-crossfade: the fade's completion branch would swap in the incoming <audio>
+  // at full volume underneath the null mix (doubled audio with a desynced transport).
+  if(crossing) await settleCrossfade();
   // Capture the playhead + play-state BEFORE pausing so null starts where playback was (ROADMAP 1.1).
   const pos=audio.currentTime, wasPlaying=!audio.paused;
   ensureActx(); audio.pause();
-  nullOn=true; $('#nullBox').classList.add('on'); $('#nullToggle').classList.add('on'); $('#boostWrap').classList.remove('hidden');
+  nullOn=true; const myNull=++nullSeq;
+  $('#nullBox').classList.add('on'); $('#nullToggle').classList.add('on'); $('#boostWrap').classList.remove('hidden');
   $('#nullHint').classList.remove('hidden');
   $('#nullHint').innerHTML='Null: <b>v'+a.rev_number+' − v'+b.rev_number+'</b> — you hear only what changed. Previews are MP3 so a faint hiss remains where nothing changed; real mix moves sit above it. Raise boost for quiet differences.';
   $('#nowTitle').textContent=t.title+'  (null v'+a.rev_number+'−v'+b.rev_number+')';
   try{
     $('#playBtn').innerHTML='<span class="spin"></span>';
     const [bufA,bufB]=await Promise.all([getDecoded(a.stored_name),getDecoded(b.stored_name)]);
+    if(myNull!==nullSeq || !nullOn) return;             // null was exited (or restarted) during the decode — a stale start here would be unstoppable phantom playback
     nDur=Math.min(bufA.duration,bufB.duration);
     nOffset=Math.min(pos, nDur);                       // continue at the playback playhead, clamped to null length
     if(wasPlaying){ startNull(nOffset); }              // was playing → keep playing the null
     else { nullPlaying=false; updateTime(nOffset,nDur); $('#playBtn').textContent='▶'; }   // was paused → stay paused at nOffset
-  }catch(e){ toast('Null decode failed: '+e.message,true); stopNull(); $('#nowTitle').textContent=(trackById(curTrackId)||{}).title||''; }
+  }catch(e){ if(myNull!==nullSeq) return; toast('Null decode failed: '+e.message,true); stopNull(); $('#nowTitle').textContent=(trackById(curTrackId)||{}).title||''; }
 }
 function buildNullGraph(bufA,bufB){
   nSrcA=actx.createBufferSource(); nSrcA.buffer=bufA;
@@ -1866,6 +1894,7 @@ function buildNullGraph(bufA,bufB){
 function startNull(offset){
   const t=trackById(curTrackId); const a=revById(t,+$('#revSel').value), b=revById(t,+$('#cmpSel').value);
   const bufA=decoded[a.stored_name], bufB=decoded[b.stored_name]; if(!bufA||!bufB)return;
+  stopNullSources();   // belt-and-braces: never layer a second source pair over a still-running one
   buildNullGraph(bufA,bufB);
   nStartCtx=actx.currentTime+0.03; nOffset=offset; nullPlaying=true;
   const playLen=Math.max(0,nDur-offset);   // hard-stop both at nDur so the longer rev can't sound past the (shorter) null length
@@ -1881,7 +1910,7 @@ function toggleNull(){ // play/pause within null mode
 function nullSeek(sec){ const was=nullPlaying; stopNullSources(); nOffset=Math.max(0,Math.min(sec,nDur)); if(was) startNull(nOffset); else { updateTime(nOffset,nDur);} }
 function resetNullUI(){ $('#nullBox').classList.remove('on'); $('#nullToggle').classList.remove('on'); $('#boostWrap').classList.add('hidden'); $('#nullHint').classList.add('hidden'); }
 // Full exit from null mode: stop sources, free decoded PCM (bounded to current session), reset all null UI.
-function stopNull(){ stopNullSources(); for(const k in decoded) delete decoded[k]; nullOn=false; nDur=0; nOffset=0; $('#playBtn').textContent='▶'; resetNullUI(); }
+function stopNull(){ nullSeq++; stopNullSources(); for(const k in decoded) delete decoded[k]; nullOn=false; nDur=0; nOffset=0; $('#playBtn').textContent='▶'; resetNullUI(); }
 
 // ───────── comments ─────────
 // Fetch a track's comments into the global `comments`, guarded by a generation token so a slow
@@ -1894,10 +1923,14 @@ async function fetchCommentsInto(trackId){
 }
 async function openTrack(trackId, fromPlayer){
   const t=trackById(trackId); if(!t)return;
+  if(panelTrackId!==trackId){
+    // Switching tracks: drop composer state so staged images can't bleed onto another track. A
+    // SAME-track re-open (A/B swap, pin click, rev switch) must keep in-progress drafts + images.
+    editingId=null; replyingId=null;
+    clearStaged(noteImages); clearStaged(replyImages);
+    renderStrip($('#cStrip'), noteImages);             // clear the compose strip's thumbnails
+  }
   panelTrackId=trackId;
-  editingId=null; replyingId=null;
-  clearStaged(noteImages); clearStaged(replyImages);   // drop staged images so they can't bleed onto another track
-  renderStrip($('#cStrip'), noteImages);               // clear the compose strip's thumbnails
   $('#cpanel').classList.remove('hidden');
   $('#addc').classList.remove('hidden');          // show the note-input box (it lives above #cpanel)
   $('.pb-inner').classList.add('with-notes');   // theater: reveal the notes column now a track is open
@@ -1951,6 +1984,10 @@ function renderStrip(el, arr){
 function clearStaged(arr){ (arr._urls||[]).forEach(u=>URL.revokeObjectURL(u)); arr._urls=[]; arr.length=0; }
 // Add drag-&-drop (onto `zone`) and clipboard paste (into `ta`, e.g. a screenshot) as two more ways to
 // stage images, alongside the 📎 file picker. `zone` gets a `.dragover` outline while a file hovers.
+// A drop that misses a composer zone must not do the browser default — navigating the tab to the
+// image file, unloading the whole app. (Zone handlers run first and stage the files as usual.)
+document.addEventListener('dragover',e=>e.preventDefault());
+document.addEventListener('drop',e=>e.preventDefault());
 function wireComposerImages(zone, ta, arr, strip){
   const stage=files=>{ addStaged(arr, files); renderStrip(strip, arr); };
   const hasFiles=e=>e.dataTransfer && Array.from(e.dataTransfer.types||[]).includes('Files');
@@ -2014,13 +2051,18 @@ function renderComments(){
           </div>
         </div>`;
       const ta=div.querySelector('.cedit-ta');
+      let busy=false;
       const save=async()=>{
-        const nb=ta.value.trim(); if(!nb){ toast((isReply?'Reply':'Note')+' cannot be empty',true); return; }
+        if(busy) return;
+        // An image-only note may keep an empty body (matches the create rule: text OR image).
+        const nb=ta.value.trim(); if(!nb && !(c.attachments&&c.attachments.length)){ toast((isReply?'Reply':'Note')+' cannot be empty',true); return; }
+        busy=true;
         try{
           await api('comments/'+c.id,{method:'PUT',body:{body:nb}});
           editingId=null;
           if(await fetchCommentsInto(panelTrackId)){ renderComments(); drawPins(); }
         }catch(e){ toast(e.message,true); }
+        finally{ busy=false; }
       };
       div.querySelector('.esave').addEventListener('click',save);
       div.querySelector('.ecancel').addEventListener('click',()=>{ editingId=null; renderComments(); });
@@ -2102,8 +2144,11 @@ function renderComments(){
       ed.querySelector('.rattach').addEventListener('click',()=>rfile.click());
       rfile.addEventListener('change',()=>{ addStaged(replyImages, rfile.files); rfile.value=''; renderStrip(strip, replyImages); });
       wireComposerImages(ed, ta, replyImages, strip);   // drag-drop + paste onto the reply box
+      let busy=false;   // double-click / double Cmd-Enter would post the reply (and its images) twice
       const save=async()=>{
+        if(busy) return;
         const nb=ta.value.trim(); if(!nb && !replyImages.length){ toast('Reply cannot be empty',true); return; }
+        busy=true;
         try{
           const fd=new FormData(); fd.append('body',nb); fd.append('parent_id',note.id);
           replyImages.forEach(f=>fd.append('images',f));
@@ -2111,6 +2156,7 @@ function renderComments(){
           clearStaged(replyImages); replyingId=null;
           if(await fetchCommentsInto(panelTrackId)){ renderComments(); refreshCounts(); }
         }catch(e){ toast(e.message,true); }
+        finally{ busy=false; }
       };
       ed.querySelector('.rsave').addEventListener('click',save);
       ed.querySelector('.rcancel').addEventListener('click',()=>{ clearStaged(replyImages); replyingId=null; renderComments(); });
@@ -2138,11 +2184,13 @@ $('#cAttach').addEventListener('click',()=>$('#cFile').click());
 $('#cFile').addEventListener('change',()=>{ addStaged(noteImages,$('#cFile').files); $('#cFile').value=''; renderStrip($('#cStrip'),noteImages); });
 wireComposerImages($('#addc'), $('#cInput'), noteImages, $('#cStrip'));   // drag-drop + paste
 async function sendComment(){
+  if(sendComment._busy) return;   // double-click / double Cmd-Enter would post the note (and its images) twice
   const body=$('#cInput').value.trim(); if(!body && !noteImages.length)return;  // need text or an image
   const tId=panelTrackId; if(!tId){ toast('Open a track first',true); return; }
   const t=trackById(tId); const revId=(tId===curTrackId && curRevId) ? curRevId : t.revisions.at(-1)?.id;
   const pin=$('#cPin').checked;
   const ts = (pin && tId===curTrackId) ? (nullOn?nullTime():audio.currentTime) : null;
+  sendComment._busy=true;
   try{
     // Multipart so images ride along; api() sends FormData untouched (no JSON Content-Type override).
     const fd=new FormData(); fd.append('body',body);
@@ -2154,6 +2202,7 @@ async function sendComment(){
     clearStaged(noteImages); renderStrip($('#cStrip'),noteImages);
     if(await fetchCommentsInto(tId)){ renderComments(); drawPins(); refreshCounts(); }
   }catch(e){ toast(e.message,true); }
+  finally{ sendComment._busy=false; }
 }
 // ───────── picture lightbox ─────────
 let lbImgs=[], lbIdx=0;
@@ -2388,8 +2437,9 @@ function buildStudioBody(el,t){
       <textarea class="rnotes" rows="2" placeholder="e.g. brightened vocals, tightened low end, new master chain">${esc(r.notes)}</textarea></div>
       <div class="row" style="margin-top:7px">${actions}</div>
       ${replBox}`;
-    d.querySelector('.nsave').addEventListener('click',async()=>{ const nv=d.querySelector('.rnotes').value;
-      try{ await api('revisions/'+r.id,{method:'PUT',body:{notes:nv}}); r.notes=nv; if(curRevId===r.id)updateRevNote(r); toast('Notes saved'); }catch(e){ toast(e.message,true); } });
+    d.querySelector('.nsave').addEventListener('click',async()=>{ const ta=d.querySelector('.rnotes'), nv=ta.value;
+      try{ await api('revisions/'+r.id,{method:'PUT',body:{notes:nv}}); r.notes=nv; ta.defaultValue=nv;   // defaultValue too, so studioHasPendingFile stops counting it as unsaved
+        if(curRevId===r.id)updateRevNote(r); toast('Notes saved'); }catch(e){ toast(e.message,true); } });
     const box=d.querySelector('.rrepl-box'), rfile=d.querySelector('.rfile'), rstat=d.querySelector('.rstat'), rup=d.querySelector('.rupload'), rreplBtn=d.querySelector('.rrepl'), rcancelBtn=d.querySelector('.rcancel'), rdelBtn=d.querySelector('.rdel');
     const rKeep=box?box.querySelector('.ukeep-row'):null;   // hide the keep checkbox for mp3 (no original to keep)
     if(rKeep&&rfile) rfile.addEventListener('change',()=>{ const f=rfile.files[0]; rKeep.classList.toggle('hidden', !!f && /\.mp3$/i.test(f.name)); });
@@ -2604,9 +2654,11 @@ $('#newProjModal').addEventListener('click',e=>{ if(e.target===$('#newProjModal'
 $('#npName').addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); $('#npCreate').click(); } });
 document.addEventListener('keydown',e=>{ if(e.key==='Escape' && !$('#newProjModal').classList.contains('hidden')) closeNewProject(); });
 $('#npCreate').addEventListener('click',async()=>{
+  const btn=$('#npCreate'); if(btn.disabled) return;   // double-click would create the project twice
   const title=$('#npName').value.trim(); if(!title){ $('#npName').focus(); return; }
   // Every project starts as a single track ('song'); adding a 2nd track promotes it to an album.
   const media_type=(VIDEO_ENABLED && segValue('npKind')==='video') ? 'video' : 'audio';
+  btn.disabled=true;
   try{
     const r=await api('projects',{method:'POST',body:{type:'song',title,media_type}});
     closeNewProject();
@@ -2614,6 +2666,7 @@ $('#npCreate').addEventListener('click',async()=>{
     if(npAfter==='admin') renderAdmin();
     else { await loadProjects(); if(r&&r.id) await openProject(r.id); }
   }catch(e){ toast(e.message,true); }
+  finally{ btn.disabled=false; }
 });
 
 // ───────── account menu (self-service profile) ─────────
@@ -2792,7 +2845,11 @@ async function resyncOpenProject(){
   try{ await reload(true); }                                             // refetch + re-render WITHOUT pausing the player
   catch(e){
     if(e && e.message==='unauth') return;                               // session expired: api() already showed login — don't re-show projects
-    PROJECT=null; stopAll(); setView('projects'); return;              // access revoked / project deleted → leave it (whole project gone)
+    if(e && (e.status===404 || e.status===403)){ PROJECT=null; stopAll(); setView('projects'); return; }   // access revoked / project deleted → leave it
+    // Transient failure (server restarting, network blip, 5xx): keep the project on screen —
+    // stopping playback and kicking to the list here would punish the user for a hiccup. Retry.
+    clearTimeout(resyncRetry); resyncRetry=setTimeout(()=>{ syncProj=true; scheduleSync(); }, 3000);
+    return;
   }
   // Invalidate caches for any revision whose audio changed underneath us (replace / video re-extract)
   // or that vanished — otherwise the waveform/meters keep the old analysis and the audio src points at
@@ -2825,10 +2882,17 @@ async function resyncOpenProject(){
 // an SSE re-render that would clear the picker out from under the user.
 function studioHasPendingFile(){
   if(VIEW!=='studio') return false;
-  // A chosen file OR a ticked "keep lossless" checkbox counts as in-progress — don't let an SSE
-  // re-render wipe either out from under the user before they click upload.
+  // A chosen file, a ticked "keep lossless" checkbox, OR unsaved text (change notes, rename, the
+  // add-track field) counts as in-progress — don't let an SSE re-render wipe any of it out from
+  // under the user. Mid-typing is covered by the focus check; already-typed-but-blurred text in the
+  // innerHTML-built fields is caught by value≠defaultValue (#albInput is set via JS so its
+  // defaultValue is meaningless — the focus check covers it instead).
+  const ae=document.activeElement;
+  if(ae && ae.matches && ae.matches('#studioView input, #studioView textarea')) return true;
   return [...document.querySelectorAll('#studioView input[type=file]')].some(i=>i.files && i.files.length)
-      || [...document.querySelectorAll('#studioView .ukeep')].some(c=>c.checked);
+      || [...document.querySelectorAll('#studioView .ukeep')].some(c=>c.checked)
+      || [...document.querySelectorAll('#studioTracks textarea, #studioTracks input:not([type=file])')].some(el=>el.value!==el.defaultValue)
+      || $('#newTrack').value!=='';
 }
 // The set of projects / who can see them / a user's role changed → refresh whatever's on screen and
 // re-validate the open project (a revoked member is dropped to the list by resyncOpenProject).
@@ -2845,14 +2909,27 @@ function connectEvents(){
     else if(PROJECT && d.projectId===PROJECT.id){ syncProj=true; scheduleSync(); } // the open project changed
   });
   es.addEventListener('projects',()=>{ syncList=true; scheduleSync(); });
+  // A queued upload job failed server-side after its {processing:true} response — show the reason
+  // (the "processing…" pill just vanishing was the only signal before).
+  es.addEventListener('joberror',e=>{ try{ const d=JSON.parse(e.data); if(PROJECT && d.projectId===PROJECT.id) toast(d.message,true); }catch{} });
   // Admin-only update-available nudge (Cluster E): refresh the badge + panel, toast once.
   es.addEventListener('update',e=>{ try{ UPDATE_INFO=JSON.parse(e.data); }catch{} renderNav(); if(VIEW==='settings') renderUpdateStatus(); if(UPDATE_INFO&&UPDATE_INFO.behind>0) toast('Update available — see Settings'); });
   // 'open' fires on first connect AND every reconnect; only a RECONNECT may have missed events → resync.
   es.addEventListener('open',()=>{ if(esWasOpen){ syncList=true; scheduleSync(); } esWasOpen=true; });
   // A transient drop leaves readyState=CONNECTING and EventSource auto-reconnects (the 'open' above
-  // then resyncs). readyState=CLOSED means the browser gave up — a non-200 at (re)connect, i.e. the
-  // session is no longer valid — so surface the login screen instead of dangling silently.
-  es.addEventListener('error',()=>{ if(es && es.readyState===EventSource.CLOSED){ showLogin(); } });
+  // then resyncs). readyState=CLOSED means the browser gave up — a non-200 at (re)connect. That's
+  // EITHER an expired session (401) OR a transient proxy error during a server restart (502) — probe
+  // /api/me to tell them apart: on 401 api() shows the login screen itself; otherwise the session is
+  // fine, so quietly reopen the stream and resync instead of bouncing a valid user to login.
+  es.addEventListener('error',()=>{
+    if(!(es && es.readyState===EventSource.CLOSED)) return;
+    disconnectEvents();
+    setTimeout(async()=>{
+      if(es || !ME) return;                                  // already reconnected, or logged out meanwhile
+      try{ await api('me'); }catch(e){ if(e.message==='unauth') return; }   // 401 → login shown; other errors: still retry the stream
+      connectEvents(); syncList=true; scheduleSync();
+    }, 3000);
+  });
 }
 function disconnectEvents(){ if(es){ try{es.close()}catch{} es=null; } esWasOpen=false; }
 
