@@ -2,6 +2,8 @@
 .env
 .env.*
 !.env.example
+# curl cookie jar from local API testing — could hold a live session cookie
+cookies.txt
 
 # ── Live runtime data (NEVER commit — real user data) ──
 data/
