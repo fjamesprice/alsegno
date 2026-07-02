@@ -837,6 +837,12 @@ let commentsReq=0;           // generation token so a slow comments fetch can't 
 let doneDragging=false;      // true while a doneness slider is being dragged (defer SSE re-renders)
 let uploadsInFlight=0;       // studio uploads in progress (defer SSE re-renders that would nuke the UI)
 let resyncRetry=null;        // pending retry of a deferred SSE resync
+// A LOCAL upload we're waiting to finish processing, so we can (for a new revision) auto-switch the
+// player to it and, either way, clear the studio "processing…" state. We don't rely solely on the
+// completion SSE 'change' (a proxy can drop/buffer a single event, leaving "processing" stuck until
+// the user navigates) — while this is set we also POLL the project until the job's counter clears.
+let awaitUpload=null;        // { trackId, doSwitch } | null
+let awaitPollT=null, awaitDeadline=0;
 
 // ───────── API ─────────
 async function api(path, opts={}){
@@ -2368,7 +2374,7 @@ function buildStudioBody(el,t){
         const fd=new FormData(); fd.append('file',vfile.files[0]);
         if(vsec.querySelector('.ukeep')?.checked) fd.append('keep_lossless','1');
         vbtn.disabled=true; vstat.innerHTML='<span class="spin"></span> uploading…'; uploadsInFlight++;
-        try{ await api('tracks/'+t.id+'/video',{method:'POST',body:fd}); await reload(); toast('Uploaded — processing in the background'); }
+        try{ await api('tracks/'+t.id+'/video',{method:'POST',body:fd}); await reload(); toast('Uploaded — processing in the background'); startAwaitUpload(t.id, false); }
         catch(e){ toast(e.message,true); vstat.textContent=''; vbtn.disabled=false; }
         finally{ uploadsInFlight--; }
       });
@@ -2401,7 +2407,7 @@ function buildStudioBody(el,t){
     const fd=new FormData(); fd.append('file',fileEl.files[0]); fd.append('notes',up.querySelector('.unotes').value);
     if(up.querySelector('.ukeep')?.checked) fd.append('keep_lossless','1');
     btn.disabled=true; stat.innerHTML='<span class="spin"></span> uploading…'; uploadsInFlight++;
-    try{ await api('tracks/'+t.id+'/revisions',{method:'POST',body:fd}); await reload(); toast('Uploaded — processing in the background'); }
+    try{ await api('tracks/'+t.id+'/revisions',{method:'POST',body:fd}); await reload(); toast('Uploaded — processing in the background'); startAwaitUpload(t.id, true); }
     catch(e){ toast(e.message,true); stat.textContent=''; btn.disabled=false; }
     finally{ uploadsInFlight--; }
   });
@@ -2455,7 +2461,7 @@ function buildStudioBody(el,t){
         // stale-cache cleanup + dead-src re-point for the loaded rev is handled centrally in the SSE
         // resync (so OTHER viewers get it too), not just here.
         await api('revisions/'+r.id+'/replace',{method:'POST',body:fd});
-        await reload(); toast('Replacing — processing in the background');
+        await reload(); toast('Replacing — processing in the background'); startAwaitUpload(t.id, false);
       }catch(e){ toast(e.message,true); rstat.textContent=''; rup.disabled=false; }
       finally{ uploadsInFlight--; }
     });
@@ -2829,12 +2835,47 @@ function scheduleSync(){ if(syncT) return; syncT=setTimeout(async()=>{ syncT=nul
 }, 150); }
 // A change inside a project we have OPEN → refresh its contents + the open notes panel (preserving
 // any in-progress edit/reply via renderComments' draft+caret guard). The player is left alone.
+// Start waiting on a local upload to finish. doSwitch=true (a NEW revision) auto-loads it into the
+// player once done; false (replace / video) just polls so the "processing…" state reliably clears.
+// The poll is a safety net over the SSE 'change' — it forces a resync every few seconds until the
+// track's processing counter hits 0 (or a 5-minute cap), so a dropped completion event can't leave
+// the UI stuck. This is the ONE case the player follows a background event, and only because it's the
+// caller's own just-uploaded revision — never a remote change (that invariant still holds elsewhere).
+function startAwaitUpload(trackId, doSwitch){
+  awaitUpload={ trackId, doSwitch:!!doSwitch };
+  awaitDeadline=Date.now()+5*60*1000;
+  scheduleAwaitPoll();
+}
+function scheduleAwaitPoll(){
+  clearTimeout(awaitPollT);
+  awaitPollT=setTimeout(async()=>{
+    if(!awaitUpload) return;
+    if(Date.now()>awaitDeadline){ clearAwaitUpload(); return; }   // give up quietly after the cap
+    if(PROJECT){
+      // CHEAP data-only probe: is the awaited track still processing? We deliberately DON'T touch the
+      // DOM here — re-rendering the studio every tick during a multi-minute job would wipe a file/text
+      // the user might be staging in another uploader. Only once the job's counter clears do we fire a
+      // full resync (which renders + auto-switches, via the awaitUpload block in resyncOpenProject).
+      try{
+        const data=await api('projects/'+PROJECT.id);
+        const tr=(data.tracks||[]).find(t=>t.id===awaitUpload.trackId);
+        if(!tr){ clearAwaitUpload(); return; }
+        if(!(tr.mix_processing>0 || tr.video_processing>0)){ syncProj=true; scheduleSync(); }
+      }catch(e){ if(e && (e.status===404 || e.status===403 || e.message==='unauth')){ clearAwaitUpload(); return; } }
+    }
+    scheduleAwaitPoll();
+  }, 2500);
+}
+function clearAwaitUpload(){ awaitUpload=null; clearTimeout(awaitPollT); awaitPollT=null; }
+
 async function resyncOpenProject(){
   if(!PROJECT) return;
   // Defer the re-render while the user is mid-interaction — render() rebuilds #trackList and the studio
   // bodies via innerHTML, which would abort an in-progress doneness drag or wipe a chosen file / the
-  // "uploading…" spinner. Retry shortly; the data update lands once they're done.
-  if(doneDragging || uploadsInFlight>0 || studioHasPendingFile()){
+  // "uploading…" spinner. Retry shortly; the data update lands once they're done. EXCEPTION: when we're
+  // awaiting a local upload, bypass the studio-pending defer — the whole point is to land that upload
+  // (its own uploader is already consumed/rebuilt), so a stray pending field elsewhere mustn't block it.
+  if(doneDragging || uploadsInFlight>0 || (!awaitUpload && studioHasPendingFile())){
     clearTimeout(resyncRetry); resyncRetry=setTimeout(()=>{ syncProj=true; scheduleSync(); }, 500);
     return;
   }
@@ -2877,6 +2918,27 @@ async function resyncOpenProject(){
   if(panelTrackId && trackById(panelTrackId)){
     try{ if(await fetchCommentsInto(panelTrackId)){ renderComments(); drawPins(); } }catch{}
   }
+  // A local upload we were awaiting: reload(true) above already refreshed the studio (clearing its
+  // "processing…" note) — now, once the track's job counter has cleared, finish the job. For a NEW
+  // revision, switch the player to it (the caller's expressed intent); for replace/video the loaded
+  // rev's audio was already re-pointed above, so we just stop polling.
+  if(awaitUpload){
+    const tr=trackById(awaitUpload.trackId);
+    if(!tr){ clearAwaitUpload(); }
+    else if(!(tr.mix_processing>0 || tr.video_processing>0)){
+      const doSwitch=awaitUpload.doSwitch; clearAwaitUpload();
+      if(doSwitch){
+        const mixes=tr.revisions.filter(r=>!r.is_orig_audio);
+        const newest=mixes.length ? mixes[mixes.length-1] : tr.revisions[tr.revisions.length-1];
+        // Only take over the player if it's already on this track (or nothing is loaded) — never
+        // hijack playback of a DIFFERENT track the user is listening to.
+        if(newest && newest.id!==curRevId && (curTrackId===tr.id || !curRevId)){
+          const wasPlaying=(curTrackId===tr.id) && !nullOn && !audio.paused;
+          loadTrack(tr.id, newest.id, {play:wasPlaying});
+        }
+      }
+    }
+  }
 }
 // True when the studio has a file staged in any uploader (chosen but not yet uploaded) — used to defer
 // an SSE re-render that would clear the picker out from under the user.
@@ -2887,11 +2949,15 @@ function studioHasPendingFile(){
   // under the user. Mid-typing is covered by the focus check; already-typed-but-blurred text in the
   // innerHTML-built fields is caught by value≠defaultValue (#albInput is set via JS so its
   // defaultValue is meaningless — the focus check covers it instead).
+  // TEXT fields only in both checks below: a checkbox with no value attribute has value 'on' but
+  // defaultValue '' — matching it made this permanently true whenever an uploader was open, which
+  // deferred every SSE resync until the user left Studio ("processing…" never cleared, new
+  // revisions never appeared). Checkbox state is covered by the explicit .ukeep check instead.
   const ae=document.activeElement;
-  if(ae && ae.matches && ae.matches('#studioView input, #studioView textarea')) return true;
+  if(ae && ae.matches && ae.matches('#studioView textarea, #studioView input[type=text], #studioView input:not([type])')) return true;
   return [...document.querySelectorAll('#studioView input[type=file]')].some(i=>i.files && i.files.length)
       || [...document.querySelectorAll('#studioView .ukeep')].some(c=>c.checked)
-      || [...document.querySelectorAll('#studioTracks textarea, #studioTracks input:not([type=file])')].some(el=>el.value!==el.defaultValue)
+      || [...document.querySelectorAll('#studioTracks textarea, #studioTracks input[type=text], #studioTracks input:not([type])')].some(el=>el.value!==el.defaultValue)
       || $('#newTrack').value!=='';
 }
 // The set of projects / who can see them / a user's role changed → refresh whatever's on screen and
