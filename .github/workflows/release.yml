@@ -3,7 +3,9 @@ name: Release
 # Cut a release by pushing a version tag:
 #   git tag v1.2.0 && git push origin v1.2.0
 # This builds the downloadable archives (scripts/package-release.sh) and publishes a
-# GitHub Release with them attached, using auto-generated notes from the commit log.
+# GitHub Release with them attached. The notes list every commit since the previous tag
+# as a "What's changed" section (GitHub's --generate-notes only lists merged PRs, and
+# this repo is committed to directly — so it always produced an empty changelog).
 
 on:
   push:
@@ -18,9 +20,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out the tagged commit
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.0 (pinned by SHA)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0 (pinned by SHA; Node 24)
         with:
-          fetch-depth: 0   # full history so auto-generated notes can diff against prior tags
+          fetch-depth: 0   # full history + tags, so the notes step can diff against the prior tag
 
       - name: Build release archives
         run: bash scripts/package-release.sh "$GITHUB_REF_NAME"
@@ -37,15 +39,27 @@ jobs:
           # Steer downloaders to the named assets — GitHub also auto-attaches "Source code"
           # archives, which work but unzip to a different folder name.
           intro="$(printf '**To install:** download `alsegno-%s.zip` (Windows) or `alsegno-%s.tar.gz` (macOS/Linux) from **Assets** below, unzip, and run the installer — see the [README](https://github.com/%s#quick-start). The auto-generated *Source code* assets also work, but unzip to a different folder name.' "$ver" "$ver" "$GITHUB_REPOSITORY")"
+          # Highlights: one bullet per commit since the previous tag (version-bump commits dropped).
+          prev="$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)"
+          highlights="$(git log --no-merges --format='- %s' "${prev:+$prev..}$GITHUB_REF_NAME" | grep -vi '^- bump version' || true)"
+          [ -n "$highlights" ] || highlights='- Maintenance release.'
+          notes="$intro
+
+          ---
+
+          ## What's changed
+
+          $highlights"
+          if [ -n "$prev" ]; then
+            notes="$notes
+
+          **Full Changelog**: https://github.com/$GITHUB_REPOSITORY/compare/$prev...$GITHUB_REF_NAME"
+          fi
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" dist/alsegno-*.zip dist/alsegno-*.tar.gz dist/SHA256SUMS.txt --clobber
           else
             gh release create "$GITHUB_REF_NAME" \
               dist/alsegno-*.zip dist/alsegno-*.tar.gz dist/SHA256SUMS.txt \
               --title "alsegno $GITHUB_REF_NAME" \
-              --generate-notes
-            body="$(gh release view "$GITHUB_REF_NAME" --json body -q .body)"
-            # Join with explicit separators — $(...) strips trailing newlines, so the spacing
-            # must live between the two values, not at the end of intro.
-            gh release edit "$GITHUB_REF_NAME" --notes "$(printf '%s\n\n---\n\n%s' "$intro" "$body")"
+              --notes "$notes"
           fi
