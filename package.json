@@ -1,6 +1,6 @@
 {
   "name": "alsegno",
-  "version": "1.0.12",
+  "version": "1.0.13",
   "description": "alsegno — lightweight, self-hosted A/B review and timestamped notes for audio & video revisions",
   "author": "F. James Price",
   "license": "MIT",
