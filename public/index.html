@@ -200,6 +200,9 @@
   .pin{position:absolute;top:-3px;transform:translateX(-50%);pointer-events:auto;cursor:pointer;color:var(--warn);line-height:0}
   .pin svg{width:15px;height:15px;display:block}
   .pin:hover{color:#fff}
+  /* Range pin: a thin line protruding from the right side of the segno to the range end. It starts at
+     the pin's center (the glyph overlays its first few px) and is %-sized so it survives resizes. */
+  .pinline{position:absolute;top:3px;height:2px;background:var(--warn);opacity:.6;border-radius:1px;pointer-events:none}
   .pb-controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
   .transport{display:flex;align-items:center;gap:6px}
   .tbtn{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:14px;background:var(--panel2);border:1px solid var(--line)}
@@ -219,16 +222,18 @@
   .nullbox .nb-btn.on{color:var(--warn);font-weight:700}
   .pb-empty{color:var(--faint);text-align:center;padding:14px;font-size:14px}
   /* meters */
-  .meters{display:flex;gap:16px;flex-wrap:wrap;margin:9px 0 3px}
-  .meter{display:flex;align-items:center;gap:8px;flex:1;min-width:240px}
+  /* PEAK cluster hugs the left edge, LUFS cluster the right, open space between (fixed-width bars,
+     values tight against their bar — space-between does the separating). */
+  .meters{display:flex;gap:16px;flex-wrap:wrap;justify-content:space-between;margin:9px 0 3px}
+  .meter{display:flex;align-items:center;gap:8px;flex:0 1 auto;min-width:0}
   .mk{color:var(--faint);font-weight:700;letter-spacing:.6px;font-size:10.5px;width:32px;flex:none}
-  .mbar{position:relative;flex:1;height:9px;border-radius:5px;overflow:hidden;background:#0a0b0f}
+  .mbar{position:relative;flex:0 1 200px;width:200px;height:9px;border-radius:5px;overflow:hidden;background:#0a0b0f}
   .mbar.peak{background:linear-gradient(90deg,#2c7d61 0%,#3ad29f 58%,var(--warn) 82%,var(--danger) 97%)}
   .mbar.lufs{background:linear-gradient(90deg,#39406a 0%,#5b86ff 70%,#3ad29f 100%)}
   .mbar .cover{position:absolute;right:0;top:0;bottom:0;width:100%;background:#0a0b0f}
   .mbar .hold{position:absolute;top:0;bottom:0;width:2px;background:#fff;opacity:.85;left:0;display:none}
   .mbar .tick{position:absolute;top:0;bottom:0;width:1px;background:#0d0e12;opacity:.85}
-  .mv{color:var(--muted);font-variant-numeric:tabular-nums;font-size:11.5px;white-space:nowrap;min-width:178px;text-align:right}
+  .mv{color:var(--muted);font-variant-numeric:tabular-nums;font-size:11.5px;white-space:nowrap;min-width:0;text-align:left}
   .srev .sl{font-size:11.5px;color:var(--muted);font-variant-numeric:tabular-nums;margin-top:5px}
   .note-mini{font-size:12.5px;color:var(--muted);margin-top:7px;border-left:2px solid var(--line);padding-left:9px}
 
@@ -241,6 +246,14 @@
   .cmt.cur{border-color:var(--line)}
   .cmt .tsbtn{flex:none;font-variant-numeric:tabular-nums;color:var(--warn);background:rgba(227,179,65,.12);border-radius:6px;padding:2px 7px;font-size:12px;height:fit-content}
   .cmt .gen{flex:none;color:var(--faint);font-size:12px;padding:2px 4px}
+  .tsin{width:64px;padding:3px 6px;font-size:12px;border-radius:6px;font-variant-numeric:tabular-nums;background:var(--bg)}
+  #cPinStartLock.on{color:var(--warn)}
+  #cPinStart.locked{color:var(--warn);border-color:rgba(227,179,65,.5)}
+  /* Editable pin time in a note's edit mode (sits in the timestamp chip's slot). */
+  .cmt .tsedit{flex:none;display:flex;flex-direction:column;gap:3px;align-items:flex-start}
+  .cmt .tsedit .tsin{width:96px;color:var(--warn)}
+  .cmt .tsedit .etsnow{font-size:11px;color:var(--faint);padding:1px 2px}
+  .cmt .tsedit .etsnow:hover{color:var(--text)}
   .cmt .cbody{flex:1;min-width:0;word-wrap:break-word}
   .cmt .cwho{font-weight:600;margin-right:6px}  /* color set inline per-author (userColor) */
   .cmt.deleted{opacity:.5} .cmt.deleted .cbody{font-style:italic}
@@ -421,7 +434,7 @@
     .meters{gap:3px;margin:6px 0 2px}
     .meter{min-width:0;flex-basis:100%;gap:6px}
     .mk{font-size:9.5px;width:26px}
-    .mbar{height:7px}
+    .mbar{flex:1;width:auto;height:7px}   /* stacked full-width rows: let the bar fill again */
     .mv{min-width:0;font-size:10.5px}
     /* Keep the volume slider, now-playing title and download button on ONE row rather than each
        getting a wasteful line of its own. */
@@ -500,7 +513,18 @@
         <textarea id="cInput" rows="2" placeholder="Leave a note…"></textarea>
         <div class="cstrip" id="cStrip"></div>
         <div class="arow">
-          <label class="toggle"><input type="checkbox" id="cPin"> Pin at <b id="cPinTime" style="margin-left:3px">0:00</b></label>
+          <!-- The start field follows the playhead until locked — by the ⌖ button (stamps + freezes)
+               or by typing a time. It sits OUTSIDE the label: clicks inside a <label> toggle the checkbox. -->
+          <label class="toggle"><input type="checkbox" id="cPin"> Pin at</label>
+          <span class="row" style="gap:5px">
+            <input type="text" id="cPinStart" class="tsin" value="0:00" title="Pin start — follows the playhead until locked; type a time (m:ss) to set it yourself">
+            <button class="btn ghost sm" id="cPinStartLock" type="button" title="Lock the start at the current playhead">⌖</button>
+          </span>
+          <!-- Optional range end — only shown while Pin is checked. Blank = ordinary point pin. -->
+          <span class="row hidden" id="cRangeWrap" style="gap:5px">to
+            <input type="text" id="cPinEnd" class="tsin" placeholder="m:ss" title="Optional range end (e.g. 2:06) — leave blank for a point pin">
+            <button class="btn ghost sm" id="cPinEndNow" type="button" title="Stamp the current playhead as the range end">⌖</button>
+          </span>
           <span class="faint small" id="cRevTag"></span>
           <button class="btn ghost sm" id="cAttach" type="button" title="Attach a picture" style="margin-left:auto">📎 Image</button>
           <button class="btn primary sm" id="cSend">Post note</button>
@@ -790,6 +814,35 @@ const $ = s => document.querySelector(s);
 const $$ = s => Array.from(document.querySelectorAll(s));
 const esc = s => String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmt = t => { if(!isFinite(t)||t<0)t=0; const m=Math.floor(t/60),s=Math.floor(t%60); return m+':'+String(s).padStart(2,'0'); };
+// A note's pin time(s) for display: "1:59" or "1:59–2:06" for a range.
+const fmtPin = c => fmt(c.ts) + (c.ts_end!=null ? '–'+fmt(c.ts_end) : '');
+// Pin time for EDITING: keeps sub-second precision (one decimal) when present, so opening a note's
+// timestamp and saving it untouched can't silently truncate the stored ts to the displayed second.
+function fmtTsEdit(t){ if(t==null||!isFinite(t)) return '';
+  let m=Math.floor(t/60), s=Math.round((t-m*60)*10)/10;
+  if(s>=60){ m++; s=0; }
+  const whole=Math.floor(s), frac=Math.round((s-whole)*10);
+  return m+':'+String(whole).padStart(2,'0')+(frac?'.'+frac:'');
+}
+// Parse a human-typed pin time: "1:59", "1:59.5", "95" (plain seconds), or "1:02:03" (h:mm:ss).
+// '' → null (no pin); unparsable → NaN (caller shows the error).
+function parseTs(str){
+  const s=String(str||'').trim(); if(!s) return null;
+  let m=s.match(/^(\d+):([0-5]?\d(?:\.\d+)?)$/);         if(m) return (+m[1])*60+parseFloat(m[2]);
+  m=s.match(/^(\d+):([0-5]?\d):([0-5]?\d(?:\.\d+)?)$/);  if(m) return (+m[1])*3600+(+m[2])*60+parseFloat(m[3]);
+  if(/^\d+(\.\d+)?$/.test(s)) return parseFloat(s);
+  return NaN;
+}
+// Parse a pin field that may hold a single time or a "start-end" range.
+// Returns {ts,tsEnd} ('' → both null = unpin); null when unparsable or end ≤ start.
+function parseTsRange(str){
+  const s=String(str||'').trim(); if(!s) return {ts:null,tsEnd:null};
+  const parts=s.split(/\s*[-–—]\s*/); if(parts.length>2) return null;
+  const t0=parseTs(parts[0]); if(t0==null||Number.isNaN(t0)) return null;
+  let t1=null;
+  if(parts.length===2){ t1=parseTs(parts[1]); if(t1==null||Number.isNaN(t1)||t1<=t0) return null; }
+  return {ts:t0,tsEnd:t1};
+}
 // Playhead readout. For a video track, append the SMPTE-style frame within the current second
 // (m:ss:ff, non-drop) so you can see the exact frame; audio tracks fall back to plain m:ss.
 const fmtCur = t => {
@@ -1454,25 +1507,34 @@ function revLabel(r){ return r && r.is_orig_audio ? 'Original audio' : ('v'+(r?r
 // baseline, not an uploaded mix) is NOT a revision, so it's excluded — audio projects never have one.
 function mixRevCount(t){ return t.revisions.filter(r=>!r.is_orig_audio).length; }
 let selTrackId=null, selRevSig='';
+let selCmpAuto=null, selCmpRev=null;   // the compare value WE last auto-picked + the playing rev it was picked for; selCmpAuto=null once the user chooses a compare manually
 function syncPlayerSelectors(t){
   const revSel=$('#revSel'), cmpSel=$('#cmpSel');
   // Rebuild-needed signature is the rev ID LIST, not the count — a delete + re-upload between syncs
   // keeps the count while invalidating the option ids, which would strand stale (dead) entries.
   const sig=t.revisions.map(r=>r.id).join(',');
+  const pickPrev=()=>{ const others=t.revisions.filter(r=>r.id!==curRevId);   // default compare = previous revision
+    return others.length ? ([...t.revisions].reverse().find(r=>r.id<curRevId)||others[others.length-1]).id : null; };
   if(selTrackId!==t.id || selRevSig!==sig){      // rebuild options only when needed
     const opt=r=>`<option value="${r.id}">${esc(revLabel(r))}</option>`;
     revSel.innerHTML=t.revisions.map(opt).join('');
     cmpSel.innerHTML=t.revisions.map(opt).join('');
-    const others=t.revisions.filter(r=>r.id!==curRevId);          // default compare = previous revision
-    if(others.length){ const prev=[...t.revisions].reverse().find(r=>r.id<curRevId)||others[others.length-1]; cmpSel.value=prev.id; }
+    const prev=pickPrev(); if(prev!=null) cmpSel.value=prev;
+    selCmpAuto=prev; selCmpRev=curRevId;
     selTrackId=t.id; selRevSig=sig;
+  } else if(curRevId!==selCmpRev && selCmpAuto!=null && +cmpSel.value===selCmpAuto){
+    // The playing revision changed since the default was picked (e.g. the player auto-switched to a
+    // fresh upload) and the compare still sits on that stale default — recompute so "vs" tracks the
+    // new previous revision. A manually-chosen compare (selCmpAuto=null) is never touched.
+    const prev=pickPrev(); if(prev!=null) cmpSel.value=prev;
+    selCmpAuto=prev; selCmpRev=curRevId;
   }
   if(curRevId) revSel.value=curRevId;
   // Keep the compare/swap target distinct from what's playing — otherwise ⇄ swap (a===b guard)
   // and the null test ("pick two different revisions") silently wedge until reload.
   if(curRevId && t.revisions.length>1 && +cmpSel.value===curRevId){
     const alt=[...t.revisions].reverse().find(r=>r.id!==curRevId);
-    if(alt) cmpSel.value=alt.id;
+    if(alt){ cmpSel.value=alt.id; selCmpAuto=alt.id; selCmpRev=curRevId; }
   }
   const single=t.revisions.length<2;
   $('#nullBox').style.opacity=single?'.5':'1';
@@ -1567,6 +1629,7 @@ function drainPendingRev(){ const p=pendingRev; pendingRev=null; if(p && p!==cur
 function settleCrossfade(){ return new Promise(res=>{ if(!crossing) return res(); const t0=performance.now();
   const iv=setInterval(()=>{ if(!crossing || performance.now()-t0>1500){ clearInterval(iv); res(); } },40); }); }
 $('#cmpSel').addEventListener('change',()=>{
+  selCmpAuto=null;   // the user picked this compare deliberately — stop auto-retargeting it on rev changes
   // In null mode the new compare buffer was never decoded — re-run the null setup (decode + restart)
   // instead of leaving startNull to bail silently and wedge null playback.
   if(nullOn){ renullForCompareChange(); return; }
@@ -1590,8 +1653,9 @@ async function renullForCompareChange(){
     const [bufA,bufB]=await Promise.all([getDecoded(a.stored_name),getDecoded(b.stored_name)]);
     if(myNull!==nullSeq || !nullOn) return;   // null was exited while re-decoding
     nDur=Math.min(bufA.duration,bufB.duration);
+    nullPeaks=computeNullPeaks(bufA,bufB); drawBars();  // new pair → new difference waveform
     nOffset=Math.min(pos,nDur);
-    $('#nullHint').innerHTML='Null: <b>v'+a.rev_number+' − v'+b.rev_number+'</b> — you hear only what changed. Previews are MP3 so a faint hiss remains where nothing changed; real mix moves sit above it. Raise boost for quiet differences.';
+    $('#nullHint').innerHTML='Null: <b>v'+a.rev_number+' − v'+b.rev_number+'</b> — <i>FYI: MP3 preview causes faint hiss. Real changes are usually louder.</i>';
     $('#nowTitle').textContent=t.title+'  (null v'+a.rev_number+'−v'+b.rev_number+')';
     if(was) startNull(nOffset); else { nullPlaying=false; updateTime(nOffset,nDur); $('#playBtn').textContent='▶'; }
   }catch(e){ if(myNull!==nullSeq) return; toast('Null decode failed: '+e.message,true); stopNull(); $('#nowTitle').textContent=(trackById(curTrackId)||{}).title||''; }
@@ -1703,7 +1767,11 @@ async function crossfadeTo(revId){
   }
 }
 
-function updateTime(cur,dur){ $('#timeLbl').textContent=fmtCur(cur)+' / '+fmt(dur||0); $('#cPinTime').textContent=fmt(cur); drawBars(); if(nullOn) blankMeters(); else updateMeters(cur); }
+function updateTime(cur,dur){ $('#timeLbl').textContent=fmtCur(cur)+' / '+fmt(dur||0);
+  // Pin start follows the playhead until locked (⌖ or hand-typed); pause following while the field
+  // is focused so the live update can't fight the user's caret mid-edit.
+  const ps=$('#cPinStart'); if(!pinStartLocked && document.activeElement!==ps) ps.value=fmt(cur);
+  drawBars(); if(nullOn) blankMeters(); else updateMeters(cur); }
 
 // ── meters: peak dBFS (current + max-hold) and EBU R128 LUFS (short-term + integrated) ──
 // Values come from the file (volume-independent program level), read at the playhead.
@@ -1747,15 +1815,21 @@ function layoutCanvas(){ const r=cv.getBoundingClientRect(); if(!r.width)return 
   waveW=r.width; waveH=r.height; cv.width=r.width*dpr; cv.height=r.height*dpr; ctx.setTransform(dpr,0,0,dpr,0,0);
   accentCol=getCss('--accent')||'#7aa2ff'; return true; }
 function drawBars(){                                  // bars + playhead only (called every frame)
-  const data=peaksCache[curRevId]; if(!data)return;
+  const data=peaksCache[curRevId];
+  // Null mode paints the DIFFERENCE (|A−B|) instead of A's waveform, scaled by the boost gain so the
+  // bars grow with the makeup gain (clamped to the lane). Until the diff is computed (mid-decode),
+  // fall back to the normal waveform so the lane never goes blank.
+  const diff=(nullOn&&nullPeaks)?nullPeaks:null;
+  if(!data && !diff)return;
   if(!waveW && !layoutCanvas())return;
   const W=waveW,H=waveH,mid=H/2;
   ctx.clearRect(0,0,W,H);
-  const peaks=data.peaks||[]; const n=peaks.length||1;
-  const cur=nullOn?nullTime():audio.currentTime; const dur=(nullOn?nullDur():audio.duration)||data.duration||1;
+  const peaks=diff||data.peaks||[]; const n=peaks.length||1;
+  const gain=diff?boostLinear():1;
+  const cur=nullOn?nullTime():audio.currentTime; const dur=(nullOn?nullDur():audio.duration)||(data&&data.duration)||1;
   const prog=Math.max(0,Math.min(1,cur/dur));
   for(let x=0;x<W;x++){
-    const p=peaks[Math.floor(x/W*n)]||0; const h=Math.max(1.5,p*(H*0.92));
+    const p=(peaks[Math.floor(x/W*n)]||0)*gain; const h=Math.max(1.5,Math.min(H*0.92,p*(H*0.92)));
     ctx.fillStyle = (x/W)<=prog ? accentCol : '#3a3f52';
     ctx.fillRect(x, mid-h/2, 1, h);
   }
@@ -1822,9 +1896,18 @@ function drawPins(){
   const wrap=$('#pins'); wrap.innerHTML='';
   const dur=(nullOn?nullDur():(audio.duration||peaksCache[curRevId]?.duration))||1;
   comments.filter(c=>c.ts!=null && c.parent_id==null && c.revision_id===curRevId && !c.deleted_at).forEach(c=>{
+    const startPct=Math.max(0,Math.min(1,c.ts/dur))*100;
+    // Ranged pin: a thin line from the segno out to the range end (appended before the pin so the
+    // glyph always paints on top of its own tail).
+    if(c.ts_end!=null && c.ts_end>c.ts){
+      const endPct=Math.max(0,Math.min(1,c.ts_end/dur))*100;
+      const ln=document.createElement('div'); ln.className='pinline';
+      ln.style.left=startPct+'%'; ln.style.width=Math.max(0,endPct-startPct)+'%';
+      wrap.appendChild(ln);
+    }
     const el=document.createElement('div'); el.className='pin'; el.innerHTML='<svg viewBox="0 0 64 64" aria-hidden="true"><path d="M41 21C41 15 23 15 23 24C23 31 41 33 41 40C41 49 23 49 23 42" fill="none" stroke="currentColor" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M18 46L46 18" fill="none" stroke="currentColor" stroke-width="5.5" stroke-linecap="round"/><circle cx="18" cy="29" r="3" fill="currentColor"/><circle cx="46" cy="35" r="3" fill="currentColor"/></svg>';
-    el.style.left=Math.max(0,Math.min(1,c.ts/dur))*100+'%';
-    el.title=`${c.author} @ ${fmt(c.ts)}: ${c.body}`;
+    el.style.left=startPct+'%';
+    el.title=`${c.author} @ ${fmtPin(c)}: ${c.body}`;
     el.addEventListener('click',()=>{ if(nullOn){ nullSeek(c.ts); return; }
       const dur=audio.duration||peaksCache[curRevId]?.duration;   // metadata may not be ready yet; fall back to the peaks duration so the click still seeks
       if(dur){ const t=Math.min(c.ts,dur); try{ audio.currentTime=t; }catch{} seekPicture(t); audio.play().catch(()=>{}); } });
@@ -1836,6 +1919,7 @@ function drawPins(){
 let actx=null, nullOn=false, nullPlaying=false;
 let nSrcA=null,nSrcB=null,nGainB=null,nMakeup=null,nMaster=null;
 let nStartCtx=0,nOffset=0,nDur=0;
+let nullPeaks=null;   // per-bucket max |A−B| (raw linear) — the difference waveform drawn while null is on
 let nullSeq=0;   // generation token: bumped on every null (re)start AND in stopNull, so a decode that
                  // finishes after null mode was exited can't start phantom Web Audio playback
 const decoded={}; // storedName -> AudioBuffer
@@ -1845,11 +1929,29 @@ function ensureActx(){
 }
 async function getDecoded(name){ if(decoded[name])return decoded[name]; const res=await fetch('api/audio/'+name); const ab=await res.arrayBuffer(); decoded[name]=await actx.decodeAudioData(ab); return decoded[name]; }
 function boostLinear(){ return Math.pow(10, (+$('#boost').value)/20); }
+// Difference waveform for null mode: bucket the overlapping PCM into per-bucket max |A−B| across
+// channels. Raw linear values — drawBars multiplies by the boost gain at paint time, so the visual
+// height tracks what the makeup gain is doing to what you hear (no re-scan when boost moves).
+function computeNullPeaks(bufA,bufB){
+  const len=Math.min(bufA.length,bufB.length); if(!len) return null;
+  const N=1000, per=len/N, chs=Math.max(1,Math.min(bufA.numberOfChannels,bufB.numberOfChannels));
+  const out=new Float32Array(N);
+  for(let ch=0;ch<chs;ch++){
+    const a=bufA.getChannelData(ch), b=bufB.getChannelData(ch);
+    for(let k=0;k<N;k++){
+      const s=Math.floor(k*per), e=Math.min(len,Math.floor((k+1)*per));
+      let m=out[k];
+      for(let i=s;i<e;i++){ const d=a[i]-b[i], ad=d<0?-d:d; if(ad>m)m=ad; }
+      out[k]=m;
+    }
+  }
+  return out;
+}
 function nullTime(){ return nullPlaying? nOffset+(actx.currentTime-nStartCtx) : nOffset; }
 function nullDur(){ return nDur; }
 
 $('#nullToggle').addEventListener('click',()=>toggleNullMode());
-$('#boost').addEventListener('input',()=>{ $('#boostLbl').textContent='+'+$('#boost').value+' dB'; if(nMakeup) nMakeup.gain.value=boostLinear(); });
+$('#boost').addEventListener('input',()=>{ $('#boostLbl').textContent='+'+$('#boost').value+' dB'; if(nMakeup) nMakeup.gain.value=boostLinear(); if(nullOn&&nullPeaks) drawBars(); });
 
 async function toggleNullMode(){
   const t=trackById(curTrackId); if(!t||t.revisions.length<2)return;
@@ -1878,13 +1980,14 @@ async function toggleNullMode(){
   nullOn=true; const myNull=++nullSeq;
   $('#nullBox').classList.add('on'); $('#nullToggle').classList.add('on'); $('#boostWrap').classList.remove('hidden');
   $('#nullHint').classList.remove('hidden');
-  $('#nullHint').innerHTML='Null: <b>v'+a.rev_number+' − v'+b.rev_number+'</b> — you hear only what changed. Previews are MP3 so a faint hiss remains where nothing changed; real mix moves sit above it. Raise boost for quiet differences.';
+  $('#nullHint').innerHTML='Null: <b>v'+a.rev_number+' − v'+b.rev_number+'</b> — <i>FYI: MP3 preview causes faint hiss. Real changes are usually louder.</i>';
   $('#nowTitle').textContent=t.title+'  (null v'+a.rev_number+'−v'+b.rev_number+')';
   try{
     $('#playBtn').innerHTML='<span class="spin"></span>';
     const [bufA,bufB]=await Promise.all([getDecoded(a.stored_name),getDecoded(b.stored_name)]);
     if(myNull!==nullSeq || !nullOn) return;             // null was exited (or restarted) during the decode — a stale start here would be unstoppable phantom playback
     nDur=Math.min(bufA.duration,bufB.duration);
+    nullPeaks=computeNullPeaks(bufA,bufB); drawBars();  // swap the lane to the difference waveform
     nOffset=Math.min(pos, nDur);                       // continue at the playback playhead, clamped to null length
     if(wasPlaying){ startNull(nOffset); }              // was playing → keep playing the null
     else { nullPlaying=false; updateTime(nOffset,nDur); $('#playBtn').textContent='▶'; }   // was paused → stay paused at nOffset
@@ -1916,7 +2019,7 @@ function toggleNull(){ // play/pause within null mode
 function nullSeek(sec){ const was=nullPlaying; stopNullSources(); nOffset=Math.max(0,Math.min(sec,nDur)); if(was) startNull(nOffset); else { updateTime(nOffset,nDur);} }
 function resetNullUI(){ $('#nullBox').classList.remove('on'); $('#nullToggle').classList.remove('on'); $('#boostWrap').classList.add('hidden'); $('#nullHint').classList.add('hidden'); }
 // Full exit from null mode: stop sources, free decoded PCM (bounded to current session), reset all null UI.
-function stopNull(){ nullSeq++; stopNullSources(); for(const k in decoded) delete decoded[k]; nullOn=false; nDur=0; nOffset=0; $('#playBtn').textContent='▶'; resetNullUI(); }
+function stopNull(){ nullSeq++; stopNullSources(); for(const k in decoded) delete decoded[k]; nullOn=false; nullPeaks=null; nDur=0; nOffset=0; $('#playBtn').textContent='▶'; resetNullUI(); }
 
 // ───────── comments ─────────
 // Fetch a track's comments into the global `comments`, guarded by a generation token so a slow
@@ -2015,12 +2118,14 @@ function renderComments(){
   // Preserve any in-progress edit AND reply text across re-renders (resolve/del/send on other
   // notes re-render the whole list; without this an open editor would reset to the stored body).
   const liveTa=box.querySelector('.cedit-ta'); const draft=(liveTa && Number(liveTa.dataset.cid)===editingId)?liveTa.value:null;
+  const liveTs=box.querySelector('.ets'); const tsDraft=(liveTs && draft!=null)?liveTs.value:null;   // pin-time field rides with the body draft (same editor row)
   const liveRep=box.querySelector('.creply-ta'); const replyDraft=(liveRep && Number(liveRep.dataset.pid)===replyingId)?liveRep.value:null;
   // If an editor/reply box is focused, remember which one + its caret so a remote-triggered re-render
   // (an SSE 'change' landing mid-type, Phase 4) doesn't steal focus or jump the cursor.
   const ae=document.activeElement;
-  const focused=(ae&&(ae.classList.contains('cedit-ta')||ae.classList.contains('creply-ta')))
-    ? {edit:ae.classList.contains('cedit-ta'), id:Number(ae.dataset.cid||ae.dataset.pid), s:ae.selectionStart, e:ae.selectionEnd} : null;
+  const focused=(ae&&(ae.classList.contains('cedit-ta')||ae.classList.contains('creply-ta')||ae.classList.contains('ets')))
+    ? {edit:ae.classList.contains('cedit-ta'), ets:ae.classList.contains('ets'),
+       id:ae.classList.contains('ets')?editingId:Number(ae.dataset.cid||ae.dataset.pid), s:ae.selectionStart, e:ae.selectionEnd} : null;
   let toFocus=null; // textarea to focus once it's connected — focus() is a no-op while the subtree is detached
   let caret=null;   // [start,end] to restore on toFocus (null ⇒ first open: place caret at end)
   box.innerHTML='';
@@ -2045,10 +2150,17 @@ function renderComments(){
     const canEdit = c.author===ME.username || ME.role==='admin';
 
     if(c.id===editingId){
-      const tsStatic = (!isReply && c.ts!=null) ? `<span class="tsbtn" style="cursor:default">${fmt(c.ts)}</span>` : '';
+      // Top-level notes that still have their revision get an editable pin field in the timestamp
+      // chip's slot: "1:59", a range "1:59-2:06", or blank to unpin. Notes orphaned from a deleted
+      // revision can't be (re)pinned — a pin is meaningless without its revision (the server rule).
+      const canPin = !isReply && c.revision_id!=null;
+      const tsInit = c.ts!=null ? fmtTsEdit(c.ts)+(c.ts_end!=null?'-'+fmtTsEdit(c.ts_end):'') : '';
+      const tsSlot = canPin
+        ? `<span class="tsedit"><input type="text" class="tsin ets" value="${esc(tsDraft!=null?tsDraft:tsInit)}" placeholder="m:ss" title="Pin time — m:ss, a range m:ss-m:ss, or blank for no pin"><button type="button" class="etsnow" title="Stamp the current playhead (fills the start, then the end)">⌖ playhead</button></span>`
+        : ((!isReply && c.ts!=null) ? `<span class="tsbtn" style="cursor:default">${fmtPin(c)}</span>` : '');
       const initial = draft!=null ? draft : c.body;
       div.className='cmt'+(isReply?' reply editing':'');
-      div.innerHTML=`${tsStatic}
+      div.innerHTML=`${tsSlot}
         <div class="cbody"><span class="cwho" style="color:${userColor(c.author)}">${esc(c.author)}</span>
           <textarea class="cedit-ta" data-cid="${c.id}" rows="2">${esc(initial)}</textarea>
           <div class="row" style="margin-top:6px;gap:8px">
@@ -2062,9 +2174,20 @@ function renderComments(){
         if(busy) return;
         // An image-only note may keep an empty body (matches the create rule: text OR image).
         const nb=ta.value.trim(); if(!nb && !(c.attachments&&c.attachments.length)){ toast((isReply?'Reply':'Note')+' cannot be empty',true); return; }
+        const payload={body:nb};
+        if(canPin){
+          const raw=div.querySelector('.ets').value;
+          // Only send the pin when the field was touched — re-parsing an untouched display string
+          // must never nudge the stored sub-second ts.
+          if(raw.trim()!==tsInit){
+            const pr=parseTsRange(raw);
+            if(!pr){ toast('Pin time: m:ss or m:ss-m:ss (end after start)',true); return; }
+            payload.ts=pr.ts; payload.ts_end=pr.tsEnd;
+          }
+        }
         busy=true;
         try{
-          await api('comments/'+c.id,{method:'PUT',body:{body:nb}});
+          await api('comments/'+c.id,{method:'PUT',body:payload});
           editingId=null;
           if(await fetchCommentsInto(panelTrackId)){ renderComments(); drawPins(); }
         }catch(e){ toast(e.message,true); }
@@ -2073,6 +2196,19 @@ function renderComments(){
       div.querySelector('.esave').addEventListener('click',save);
       div.querySelector('.ecancel').addEventListener('click',()=>{ editingId=null; renderComments(); });
       ta.addEventListener('keydown',e=>{ if((e.metaKey||e.ctrlKey)&&e.key==='Enter'){ e.preventDefault(); save(); } else if(e.key==='Escape'){ editingId=null; renderComments(); } });
+      const tsel=div.querySelector('.ets');
+      if(tsel){
+        // ⌖: first stamp fills the start, a second stamp extends it to a range ending at the playhead,
+        // further stamps move that end (so you can play up to the out-point and just click).
+        div.querySelector('.etsnow').addEventListener('click',()=>{
+          const now=fmtTsEdit(nullOn?nullTime():audio.currentTime), v=tsel.value.trim();
+          if(!v) tsel.value=now;
+          else if(!/[-–—]/.test(v)) tsel.value=v+'-'+now;
+          else tsel.value=v.replace(/\s*[-–—].*$/,'-'+now);
+        });
+        tsel.addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); save(); } else if(e.key==='Escape'){ editingId=null; renderComments(); } });
+        if(focused && focused.ets && focused.id===c.id){ toFocus=tsel; caret=[focused.s,focused.e]; }   // keep typing in the pin field across a remote re-render
+      }
       // Focus only when first opening the editor (draft==null); on incidental re-renders keep focus where it is.
       // Deferred to after append — the row is still detached here, and focus() does nothing while detached.
       if(draft==null) toFocus=ta;                                                            // first open → caret to end
@@ -2089,7 +2225,7 @@ function renderComments(){
           ${canEdit?'<button class="del danger">del</button>':''}
         </div>`;
     } else {
-      const tsHtml = c.ts!=null ? `<button class="tsbtn">${fmt(c.ts)}</button>` : `<span class="gen">general</span>`;
+      const tsHtml = c.ts!=null ? `<button class="tsbtn" title="Jump to ${esc(fmtPin(c))}">${fmtPin(c)}</button>` : `<span class="gen">general</span>`;
       const nReplies=(repliesByParent[c.id]||[]).length;
       const rcountHtml = nReplies ? `<span class="rcount">${nReplies} repl${nReplies===1?'y':'ies'}</span>` : '';
       div.className='cmt'+(c.resolved?' resolved':'')+(c.revision_id===curRevId?' cur':'');
@@ -2186,6 +2322,29 @@ async function refreshCounts(){ // light refresh of badges
 }
 $('#cSend').addEventListener('click',sendComment);
 $('#cInput').addEventListener('keydown',e=>{ if((e.metaKey||e.ctrlKey)&&e.key==='Enter') sendComment(); });
+// Optional range end for a pinned note — the "to __" box lives behind the Pin checkbox.
+$('#cPin').addEventListener('change',()=>{ const on=$('#cPin').checked; $('#cRangeWrap').classList.toggle('hidden',!on); if(!on){ $('#cPinEnd').value=''; setPinStartLock(false); } });
+$('#cPinEndNow').addEventListener('click',()=>{ $('#cPinEnd').value=fmtTsEdit(nullOn?nullTime():audio.currentTime); });
+// Pin START: the field mirrors the playhead until it locks. Locking happens two ways — ⌖ stamps the
+// exact playhead (full precision kept in pinStartVal, not the displayed string) and freezes it, or
+// typing a time locks onto what was typed (field text becomes the source of truth). ⌖ again unlocks.
+let pinStartLocked=false, pinStartVal=null;   // pinStartVal: exact seconds when ⌖-stamped; null = parse the field
+function setPinStartLock(on){
+  pinStartLocked=on; if(!on) pinStartVal=null;
+  const b=$('#cPinStartLock');
+  b.classList.toggle('on',on); $('#cPinStart').classList.toggle('locked',on);
+  b.title = on ? 'Start locked — click to follow the playhead again' : 'Lock the start at the current playhead';
+  // Unlocking resumes following NOW — paused playback fires no timeupdate, so without this the old
+  // locked value would sit there stale until the playhead next moves.
+  if(!on && curRevId) $('#cPinStart').value=fmt(nullOn?nullTime():audio.currentTime);
+}
+$('#cPinStartLock').addEventListener('click',()=>{
+  if(pinStartLocked){ setPinStartLock(false); return; }
+  setPinStartLock(true);
+  pinStartVal=nullOn?nullTime():audio.currentTime;
+  $('#cPinStart').value=fmtTsEdit(pinStartVal);
+});
+$('#cPinStart').addEventListener('input',()=>{ setPinStartLock(true); pinStartVal=null; });
 $('#cAttach').addEventListener('click',()=>$('#cFile').click());
 $('#cFile').addEventListener('change',()=>{ addStaged(noteImages,$('#cFile').files); $('#cFile').value=''; renderStrip($('#cStrip'),noteImages); });
 wireComposerImages($('#addc'), $('#cInput'), noteImages, $('#cStrip'));   // drag-drop + paste
@@ -2195,16 +2354,30 @@ async function sendComment(){
   const tId=panelTrackId; if(!tId){ toast('Open a track first',true); return; }
   const t=trackById(tId); const revId=(tId===curTrackId && curRevId) ? curRevId : t.revisions.at(-1)?.id;
   const pin=$('#cPin').checked;
-  const ts = (pin && tId===curTrackId) ? (nullOn?nullTime():audio.currentTime) : null;
+  let ts=null;
+  if(pin && tId===curTrackId){
+    if(pinStartLocked){   // ⌖-stamped (exact seconds kept) or hand-typed (parse the field)
+      ts = pinStartVal!=null ? pinStartVal : parseTs($('#cPinStart').value);
+      if(ts==null||Number.isNaN(ts)){ toast('Start time: use m:ss (e.g. 1:59)',true); return; }
+    } else ts = nullOn?nullTime():audio.currentTime;   // unlocked: the playhead dictates the start
+  }
+  let tsEnd=null;
+  if(ts!=null && $('#cPinEnd').value.trim()){        // optional range end typed (or ⌖-stamped)
+    tsEnd=parseTs($('#cPinEnd').value);
+    if(tsEnd==null||Number.isNaN(tsEnd)){ toast('Range end: use m:ss (e.g. 2:06)',true); return; }
+    if(tsEnd<=ts){ toast('Range end must be after '+fmt(ts),true); return; }
+  }
   sendComment._busy=true;
   try{
     // Multipart so images ride along; api() sends FormData untouched (no JSON Content-Type override).
     const fd=new FormData(); fd.append('body',body);
     if(revId!=null) fd.append('revision_id',revId);
     if(ts!=null) fd.append('ts',ts);
+    if(tsEnd!=null) fd.append('ts_end',tsEnd);
     noteImages.forEach(f=>fd.append('images',f));
     await api('tracks/'+tId+'/comments',{method:'POST',body:fd});
-    $('#cInput').value=''; $('#cPin').checked=false;
+    $('#cInput').value=''; $('#cPin').checked=false; $('#cPinEnd').value=''; $('#cRangeWrap').classList.add('hidden');
+    setPinStartLock(false);   // programmatic uncheck fires no 'change' — release the start lock here too
     clearStaged(noteImages); renderStrip($('#cStrip'),noteImages);
     if(await fetchCommentsInto(tId)){ renderComments(); drawPins(); refreshCounts(); }
   }catch(e){ toast(e.message,true); }

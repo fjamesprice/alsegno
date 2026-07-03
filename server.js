@@ -221,6 +221,14 @@ db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('auto_update_che
   if (!cols.includes('attachments')) db.exec("ALTER TABLE comments ADD COLUMN attachments TEXT DEFAULT '[]'");
 }
 
+// Migration: optional range end on pinned notes.
+//   ts_end — NULL = point pin (the common case); non-NULL = the pin covers ts..ts_end (always > ts,
+//   enforced in the routes). Lives and dies with ts: every path that clears/clamps ts does ts_end too.
+{
+  const cols = db.prepare('PRAGMA table_info(comments)').all().map(c => c.name);
+  if (!cols.includes('ts_end')) db.exec('ALTER TABLE comments ADD COLUMN ts_end REAL');
+}
+
 // Migration (Phase 3a): projects model — new columns on existing tables.
 //   users.display_name — friendly name for the UI (NULL ⇒ fall back to username).
 //   users.active       — 0 deactivates login without hard-deleting (keeps authored comments).
@@ -1550,6 +1558,8 @@ app.post('/api/tracks/:id/video', requireProjectEngineer(pTrack), uploadGuard(),
                  oa.loud.i, oa.loud.lra, oa.loud.tp, oa.loud.st_interval, JSON.stringify(oa.loud.st),
                  oa.wave.peakInterval, JSON.stringify(oa.wave.peakSeries), oldOrig.id);
           db.prepare('UPDATE comments SET ts = ? WHERE revision_id = ? AND ts > ?').run(oa.duration, oldOrig.id, oa.duration);
+          db.prepare('UPDATE comments SET ts_end = ? WHERE revision_id = ? AND ts_end > ?').run(oa.duration, oldOrig.id, oa.duration);
+          db.prepare('UPDATE comments SET ts_end = NULL WHERE revision_id = ? AND ts_end IS NOT NULL AND ts_end <= ts').run(oldOrig.id);
         } else if (oa) {
           db.prepare(`INSERT INTO revisions (track_id, rev_number, stored_name, original_name, mime_type, size, duration, peaks, notes, uploaded_by,
                         lufs_i, lufs_lra, true_peak, st_interval, st_series, peak_interval, peak_series, is_orig_audio)
@@ -1559,7 +1569,7 @@ app.post('/api/tracks/:id/video', requireProjectEngineer(pTrack), uploadGuard(),
                  oa.wave.peakInterval, JSON.stringify(oa.wave.peakSeries));
         } else if (oldOrig) {
           // New picture is SILENT but a stale Original-audio rev (from the old picture) exists — drop it.
-          db.prepare('UPDATE comments SET revision_id = NULL, ts = NULL WHERE revision_id = ?').run(oldOrig.id);
+          db.prepare('UPDATE comments SET revision_id = NULL, ts = NULL, ts_end = NULL WHERE revision_id = ?').run(oldOrig.id);
           db.prepare('UPDATE tracks SET done_revision_id = NULL WHERE done_revision_id = ?').run(oldOrig.id);
           db.prepare('DELETE FROM revisions WHERE id = ?').run(oldOrig.id);
         }
@@ -1672,7 +1682,10 @@ app.post('/api/revisions/:id/replace', requireProjectEngineer(pRev), uploadGuard
                a.loud.i, a.loud.lra, a.loud.tp, a.loud.st_interval, JSON.stringify(a.loud.st),
                a.wave.peakInterval, JSON.stringify(a.wave.peakSeries), revId);
         // A shorter replacement can leave pins past the end — clamp them onto the new waveform.
+        // A range whose end (or whole extent) got clamped away collapses back to a point pin.
         db.prepare('UPDATE comments SET ts = ? WHERE revision_id = ? AND ts > ?').run(a.duration, revId, a.duration);
+        db.prepare('UPDATE comments SET ts_end = ? WHERE revision_id = ? AND ts_end > ?').run(a.duration, revId, a.duration);
+        db.prepare('UPDATE comments SET ts_end = NULL WHERE revision_id = ? AND ts_end IS NOT NULL AND ts_end <= ts').run(revId);
         db.prepare("UPDATE tracks SET updated_at = datetime('now') WHERE id = ?").run(trackId);
       })();
     } catch (e) {
@@ -1703,7 +1716,7 @@ app.delete('/api/revisions/:id', requireProjectEngineer(pRev), (req, res) => {
   // intact — just drop the now-meaningless pin offset and any "done" pointer to this rev.
   // (The comments FK is ON DELETE CASCADE; this UPDATE clears it before the row is removed.)
   const tx = db.transaction(() => {
-    db.prepare('UPDATE comments SET revision_id = NULL, ts = NULL WHERE revision_id = ?').run(req.params.id);
+    db.prepare('UPDATE comments SET revision_id = NULL, ts = NULL, ts_end = NULL WHERE revision_id = ?').run(req.params.id);
     db.prepare('UPDATE tracks SET done_revision_id = NULL WHERE done_revision_id = ?').run(req.params.id);
     db.prepare('DELETE FROM revisions WHERE id = ?').run(req.params.id);
   });
@@ -1793,6 +1806,7 @@ app.post('/api/tracks/:id/comments', requireProjectAccess(pTrack), uploadGuard()
   const body = String(req.body.body || '').trim().slice(0, 10000);
   if (!body && !files.length) { cleanupTemps(); return res.status(400).json({ error: 'Comment body required' }); }
   let ts = (req.body.ts === null || req.body.ts === undefined || req.body.ts === '') ? null : Number(req.body.ts);
+  let tsEnd = (req.body.ts_end === null || req.body.ts_end === undefined || req.body.ts_end === '') ? null : Number(req.body.ts_end);
   let revisionId = req.body.revision_id ? Number(req.body.revision_id) : null;
   const parentId = req.body.parent_id ? Number(req.body.parent_id) : null;
   if (parentId != null) {
@@ -1801,7 +1815,7 @@ app.post('/api/tracks/:id/comments', requireProjectAccess(pTrack), uploadGuard()
     if (!parent || parent.deleted_at != null) { cleanupTemps(); return res.status(400).json({ error: 'Parent note not found' }); }
     if (parent.track_id !== Number(req.params.id)) { cleanupTemps(); return res.status(400).json({ error: 'Parent note is on a different track' }); }
     if (parent.parent_id != null) { cleanupTemps(); return res.status(400).json({ error: 'Cannot reply to a reply' }); }
-    ts = null; revisionId = null; // replies are never pinned and never carry a revision
+    ts = null; tsEnd = null; revisionId = null; // replies are never pinned and never carry a revision
   }
   // A pinned note's revision must belong to THIS track — otherwise a member could smuggle a foreign
   // project's revision id in (leaking its existence/rev_number via the comments GET join) or trip a
@@ -1812,9 +1826,13 @@ app.post('/api/tracks/:id/comments', requireProjectAccess(pTrack), uploadGuard()
     // Clamp a pin to [0, duration]: the playhead can't be past the audio, and this keeps a bogus ts
     // (e.g. a hand-crafted huge value) from later driving an unbounded silent-WAV bed in the export.
     if (ts != null && Number.isFinite(ts) && rv.duration > 0) ts = Math.min(Math.max(0, ts), rv.duration);
+    if (tsEnd != null && Number.isFinite(tsEnd) && rv.duration > 0) tsEnd = Math.min(Math.max(0, tsEnd), rv.duration);
   }
   if (ts != null && !Number.isFinite(ts)) ts = null; // NaN/Infinity ts → unpinned (defensive)
   if (revisionId == null) ts = null; // a pin is meaningless without its revision — never store an orphaned ts
+  // A range end rides on ts: no pin → no range; a clamped/bogus end that doesn't extend past the start
+  // collapses back to a point pin rather than storing an inverted range.
+  if (tsEnd != null && (!Number.isFinite(tsEnd) || ts == null || tsEnd <= ts)) tsEnd = null;
   // Validate + downscale each attached image (synchronous like album art — sub-second, no media queue).
   // On any failure, remove every file: the already-processed jpgs AND the still-unprocessed temp inputs.
   const stored = [];
@@ -1827,8 +1845,8 @@ app.post('/api/tracks/:id/comments', requireProjectAccess(pTrack), uploadGuard()
   }
   let r;
   try {
-    r = db.prepare('INSERT INTO comments (track_id, revision_id, author, ts, body, parent_id, attachments) VALUES (?, ?, ?, ?, ?, ?, ?)')
-      .run(req.params.id, revisionId, req.session.user.username, ts, body, parentId, JSON.stringify(stored));
+    r = db.prepare('INSERT INTO comments (track_id, revision_id, author, ts, ts_end, body, parent_id, attachments) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(req.params.id, revisionId, req.session.user.username, ts, tsEnd, body, parentId, JSON.stringify(stored));
   } catch (e) {
     // Track/revision deleted while the images were processing (FK) — don't orphan the stored jpgs.
     for (const n of stored) unlinkStored(n);
@@ -1847,6 +1865,7 @@ app.put('/api/comments/:id', requireProjectAccess(pComment), (req, res) => {
   // a partial write behind an error response (and skipping the SSE broadcast).
   const wantResolved = req.body.resolved !== undefined;
   const wantBody = req.body.body !== undefined;
+  const wantTs = req.body.ts !== undefined;   // moving/adding/clearing the pin (ts_end rides along with it)
   if (wantResolved && c.parent_id != null) return res.status(400).json({ error: 'Replies cannot be resolved' });
   let newBody = null;
   if (wantBody) {
@@ -1858,6 +1877,25 @@ app.put('/api/comments/:id', requireProjectAccess(pComment), (req, res) => {
     let hasAtt = false; try { hasAtt = JSON.parse(c.attachments || '[]').length > 0; } catch {}
     if (!newBody && !hasAtt) return res.status(400).json({ error: 'Comment body required' });
   }
+  let newTs = null, newTsEnd = null;
+  if (wantTs) {
+    if (c.author !== req.session.user.username && req.session.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Not your note' });
+    }
+    if (c.parent_id != null) return res.status(400).json({ error: 'Replies cannot be pinned' });
+    newTs = (req.body.ts === null || req.body.ts === '') ? null : Number(req.body.ts);
+    newTsEnd = (req.body.ts_end === null || req.body.ts_end === undefined || req.body.ts_end === '') ? null : Number(req.body.ts_end);
+    if (newTs != null && !Number.isFinite(newTs)) return res.status(400).json({ error: 'Bad timestamp' });
+    if (newTs != null) {
+      // Same rules as create: a pin needs its revision, and lives inside that revision's duration.
+      if (c.revision_id == null) return res.status(400).json({ error: 'This note is not tied to a revision, so it cannot be pinned' });
+      const rv = db.prepare('SELECT duration FROM revisions WHERE id = ?').get(c.revision_id);
+      const dur = rv ? rv.duration : 0;
+      if (dur > 0) newTs = Math.min(Math.max(0, newTs), dur);
+      if (newTsEnd != null && Number.isFinite(newTsEnd) && dur > 0) newTsEnd = Math.min(Math.max(0, newTsEnd), dur);
+    }
+    if (newTsEnd != null && (!Number.isFinite(newTsEnd) || newTs == null || newTsEnd <= newTs)) newTsEnd = null;
+  }
   let mutated = false;
   db.transaction(() => {
     if (wantResolved) {
@@ -1867,6 +1905,11 @@ app.put('/api/comments/:id', requireProjectAccess(pComment), (req, res) => {
     // Only stamp edited_at when the text actually changes (avoids a no-op edit marking the note).
     if (wantBody && newBody !== c.body) {
       db.prepare("UPDATE comments SET body = ?, edited_at = datetime('now') WHERE id = ?").run(newBody, req.params.id);
+      mutated = true;
+    }
+    // Moving the pin is an edit of the note's content too — it gets the same edited_at stamp.
+    if (wantTs && (newTs !== c.ts || newTsEnd !== c.ts_end)) {
+      db.prepare("UPDATE comments SET ts = ?, ts_end = ?, edited_at = datetime('now') WHERE id = ?").run(newTs, newTsEnd, req.params.id);
       mutated = true;
     }
   })();
@@ -2035,8 +2078,8 @@ function makeMidi(markers) {
   return Buffer.concat([head, Buffer.from('MTrk', 'ascii'), u32be(trk.length), trk]);
 }
 
-function makeAudacity(markers) { // start<TAB>end<TAB>label, decimal seconds; point label start==end
-  return markers.length ? markers.map(k => `${fmtSeconds(k.ts)}\t${fmtSeconds(k.ts)}\t${markerText(k)}`).join('\n') + '\n' : '';
+function makeAudacity(markers) { // start<TAB>end<TAB>label, decimal seconds; a ranged note gets a real end, a point note start==end
+  return markers.length ? markers.map(k => `${fmtSeconds(k.ts)}\t${fmtSeconds(k.ts_end != null ? k.ts_end : k.ts)}\t${markerText(k)}`).join('\n') + '\n' : '';
 }
 // Neutralize spreadsheet formula injection: a field starting with = + - @ (or a tab/CR) is treated as
 // a live formula by Excel/Sheets/Numbers when the CSV is opened. Reviewer-authored note text is
@@ -2047,16 +2090,23 @@ const csvField = s => {
   return /[",]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
 };
 function makeReaper(markers) { // Region/Marker Manager CSV — decimal seconds (set ruler to Seconds)
+  // A ranged note imports as a REGION (R prefix, real start/end/length); a point note stays a marker.
   const rows = ['#,Name,Start,End,Length,Color'];
-  markers.forEach((k, i) => rows.push(`M${i + 1},${csvField(markerText(k))},${fmtSeconds(k.ts)},${fmtSeconds(k.ts)},0,`));
+  markers.forEach((k, i) => {
+    const end = k.ts_end != null ? k.ts_end : k.ts;
+    const tag = k.ts_end != null ? 'R' : 'M';
+    rows.push(`${tag}${i + 1},${csvField(markerText(k))},${fmtSeconds(k.ts)},${fmtSeconds(end)},${k.ts_end != null ? fmtSeconds(end - k.ts) : 0},`);
+  });
   return rows.join('\r\n') + '\r\n';
 }
 function makeEdl(markers, fps, title) { // CMX3600 + Resolve marker tags; record TC at a +1h start
   const out = [`TITLE: ${asciiLine(title).slice(0, 70) || 'Notes'}`, 'FCM: NON-DROP FRAME'];
   markers.forEach((k, i) => {
-    const tin = recTimecode(k.ts, fps), tout = recTimecode(k.ts, fps, 1);
+    // A ranged note becomes a marker with a real duration (|D: in frames, min 1); a point note stays |D:1.
+    const durF = k.ts_end != null ? Math.max(1, Math.round((k.ts_end - k.ts) * fps)) : 1;
+    const tin = recTimecode(k.ts, fps), tout = recTimecode(k.ts, fps, durF);
     out.push(`${String(i + 1).padStart(3, '0')}  AX       V     C        ${tin} ${tout} ${tin} ${tout}`);
-    out.push(`|C:ResolveColorBlue |M:${asciiLine(markerText(k)).replace(/\|/g, '/')} |D:1`);
+    out.push(`|C:ResolveColorBlue |M:${asciiLine(markerText(k)).replace(/\|/g, '/')} |D:${durF}`);
   });
   return out.join('\r\n') + '\r\n';
 }
@@ -2080,6 +2130,10 @@ function makeReadme(track, scopeLabel, fps, markers, untimed, replies) {
   L.push('  avid-locators.txt    Avid Media Composer: import locators (sequence start assumed 01:00:00:00)');
   L.push('');
   L.push(`Timed markers placed: ${markers.length}`);
+  if (markers.some(k => k.ts_end != null)) {
+    L.push('Ranged notes (start-end) become regions in Audacity/Reaper and duration markers in the Resolve EDL;');
+    L.push('the WAV/MIDI/Avid formats have no region concept, so those mark the range START.');
+  }
   if (untimed.length || replies.length) {
     L.push('');
     L.push('UNTIMED NOTES (no timestamp — not placed on the timeline):');
@@ -2132,7 +2186,7 @@ app.get('/api/tracks/:id/notes/export', requireProjectAccess(pTrack), (req, res)
   }
 
   // Timed markers = top-level, non-deleted notes that carry a ts (INNER JOIN ⇒ must have a revision).
-  let mSql = `SELECT c.ts, c.body, c.author FROM comments c JOIN revisions r ON c.revision_id = r.id
+  let mSql = `SELECT c.ts, c.ts_end, c.body, c.author FROM comments c JOIN revisions r ON c.revision_id = r.id
               WHERE c.track_id = ? AND c.parent_id IS NULL AND c.ts IS NOT NULL AND c.deleted_at IS NULL`;
   const mArgs = [trackId];
   if (scope === 'rev') { mSql += ' AND c.revision_id = ?'; mArgs.push(revId); }
