@@ -2402,6 +2402,122 @@ app.put('/api/settings', requireAdmin, (req, res) => {
   res.json({ ok: true });
 });
 
+// ── Admin storage (disk usage + media file manager) ──────────
+// Inventories UPLOADS_DIR by joining every on-disk file back to whatever references it (revision
+// preview, kept lossless original, track video tiers, album art, note image) so the admin UI can
+// show what each file is FOR and free space safely. Anything no row references is an orphan.
+app.get('/api/admin/storage', requireAdmin, (req, res) => {
+  const projTitle = new Map(db.prepare('SELECT id, title FROM projects').all().map(p => [p.id, p.title]));
+  const byName = new Map();
+  const tag = (name, info) => { if (name && !byName.has(name)) byName.set(name, info); };
+  for (const r of db.prepare(`SELECT r.rev_number, r.is_orig_audio, r.stored_name, r.original_stored_name,
+      r.original_name, r.created_at, r.uploaded_by, t.title AS track, t.project_id AS pid
+      FROM revisions r JOIN tracks t ON r.track_id = t.id`).all()) {
+    const rl = r.is_orig_audio ? 'Original audio' : 'v' + r.rev_number;
+    const base = { pid: r.pid, project: projTitle.get(r.pid) ?? null, track: r.track, source: r.original_name, by: r.uploaded_by, at: r.created_at };
+    // The preview IS the revision — deleting it deletes the revision (blocked for the video's own audio).
+    tag(r.stored_name, { ...base, kind: 'audio', label: rl + ' · preview', deletable: !r.is_orig_audio });
+    tag(r.original_stored_name, { ...base, kind: 'audio-orig', label: rl + ' · lossless original', deletable: true });
+  }
+  for (const t of db.prepare(`SELECT title, project_id AS pid, video_stored_name, video_proxy_name, video_micro_name,
+      video_original_stored_name, video_original_name, video_uploaded_by, video_updated_at FROM tracks
+      WHERE video_stored_name IS NOT NULL OR video_original_stored_name IS NOT NULL`).all()) {
+    const base = { pid: t.pid, project: projTitle.get(t.pid) ?? null, track: t.title, source: t.video_original_name, by: t.video_uploaded_by, at: t.video_updated_at };
+    tag(t.video_stored_name, { ...base, kind: 'video', label: 'HQ video', deletable: false });
+    tag(t.video_proxy_name, { ...base, kind: 'video-proxy', label: '480p proxy', deletable: false });
+    tag(t.video_micro_name, { ...base, kind: 'video-proxy', label: '240p proxy', deletable: false });
+    tag(t.video_original_stored_name, { ...base, kind: 'video-orig', label: 'original video', deletable: true });
+  }
+  for (const p of db.prepare('SELECT id, title, art_stored_name FROM projects WHERE art_stored_name IS NOT NULL').all())
+    tag(p.art_stored_name, { pid: p.id, project: p.title, track: null, source: null, by: null, at: null, kind: 'art', label: 'album art', deletable: true });
+  for (const c of db.prepare(`SELECT c.attachments, c.author, c.created_at, t.title AS track, t.project_id AS pid
+      FROM comments c JOIN tracks t ON c.track_id = t.id WHERE c.attachments IS NOT NULL AND c.attachments <> '[]'`).all()) {
+    try { for (const n of JSON.parse(c.attachments)) tag(n,
+      { pid: c.pid, project: projTitle.get(c.pid) ?? null, track: c.track, source: null, by: c.author, at: c.created_at, kind: 'image', label: 'note image', deletable: true });
+    } catch {}
+  }
+  const files = []; let total = 0;
+  for (const f of fs.readdirSync(UPLOADS_DIR)) {
+    let st; try { st = fs.statSync(path.join(UPLOADS_DIR, f)); } catch { continue; }
+    if (!st.isFile()) continue;
+    const ref = byName.get(f) || { pid: null, project: null, track: null, source: null, by: null, at: null,
+      kind: f.startsWith('.') ? 'temp' : 'orphan', label: f.startsWith('.') ? 'temp file' : 'unreferenced', deletable: true };
+    total += st.size;
+    files.push({ name: f, size: st.size, mtime: Math.round(st.mtimeMs), ...ref });
+  }
+  let dbBytes = 0;
+  for (const s of ['tracker.db', 'tracker.db-wal', 'tracker.db-shm']) { try { dbBytes += fs.statSync(path.join(DATA_DIR, s)).size; } catch {} }
+  let disk = null;
+  try { const s = fs.statfsSync(UPLOADS_DIR); disk = { total: s.blocks * s.bsize, free: s.bavail * s.bsize }; } catch {}
+  res.json({ files, total, dbBytes, disk });
+});
+
+// Delete by stored name. Semantics are resolved from LIVE DB state (never a client-sent kind):
+//   revision preview  → delete the whole revision (identical to DELETE /api/revisions/:id);
+//   kept originals    → drop the file + NULL the pointer (the streamed preview stays);
+//   video tiers       → refused (they ARE the picture — replace the video / delete the track);
+//   art / note image  → drop the file + detach it from its row;
+//   orphans & temp    → plain unlink.
+app.delete('/api/admin/storage/:name', requireAdmin, (req, res) => {
+  const name = req.params.name;
+  // The name becomes a filesystem path — accept only a plain filename (an encoded slash survives
+  // into req.params, so this is a real traversal guard, not paranoia).
+  if (!name || name !== path.basename(name) || name.includes('..') || name.includes('/') || name.includes('\\'))
+    return res.status(400).json({ error: 'Bad name' });
+
+  const rev = db.prepare('SELECT r.*, t.project_id AS pid FROM revisions r JOIN tracks t ON r.track_id = t.id WHERE r.stored_name = ?').get(name);
+  if (rev) {
+    if (rev.is_orig_audio) return res.status(400).json({ error: 'The original audio is set by the video — replace the video to change it.' });
+    const tx = db.transaction(() => {
+      db.prepare('UPDATE comments SET revision_id = NULL, ts = NULL, ts_end = NULL WHERE revision_id = ?').run(rev.id);
+      db.prepare('UPDATE tracks SET done_revision_id = NULL WHERE done_revision_id = ?').run(rev.id);
+      db.prepare('DELETE FROM revisions WHERE id = ?').run(rev.id);
+    });
+    tx();
+    unlinkStored(rev.stored_name); unlinkStored(rev.original_stored_name);
+    broadcastChange(rev.pid);
+    return res.json({ ok: true, deleted: 'revision' });
+  }
+  const ro = db.prepare('SELECT r.id, t.project_id AS pid FROM revisions r JOIN tracks t ON r.track_id = t.id WHERE r.original_stored_name = ?').get(name);
+  if (ro) {
+    db.prepare('UPDATE revisions SET original_stored_name = NULL WHERE id = ?').run(ro.id);
+    unlinkStored(name);
+    broadcastChange(ro.pid);
+    return res.json({ ok: true, deleted: 'original' });
+  }
+  if (db.prepare('SELECT id FROM tracks WHERE video_stored_name = ? OR video_proxy_name = ? OR video_micro_name = ?').get(name, name, name))
+    return res.status(400).json({ error: 'This is the video itself — replace the video or delete its track instead.' });
+  const vo = db.prepare('SELECT id, project_id AS pid FROM tracks WHERE video_original_stored_name = ?').get(name);
+  if (vo) {
+    db.prepare('UPDATE tracks SET video_original_stored_name = NULL WHERE id = ?').run(vo.id);
+    unlinkStored(name);
+    broadcastChange(vo.pid);
+    return res.json({ ok: true, deleted: 'original' });
+  }
+  const ap = db.prepare('SELECT id FROM projects WHERE art_stored_name = ?').get(name);
+  if (ap) {
+    db.prepare('UPDATE projects SET art_stored_name = NULL WHERE id = ?').run(ap.id);
+    unlinkStored(name);
+    broadcastChange(ap.id); broadcastProjects();   // open album header AND everyone's list thumb
+    return res.json({ ok: true, deleted: 'art' });
+  }
+  for (const r of db.prepare(`SELECT c.id, c.attachments, t.project_id AS pid FROM comments c
+      JOIN tracks t ON c.track_id = t.id WHERE c.attachments LIKE ?`).all('%' + name + '%')) {
+    let list = []; try { list = JSON.parse(r.attachments || '[]'); } catch {}
+    if (!list.includes(name)) continue;
+    db.prepare('UPDATE comments SET attachments = ? WHERE id = ?').run(JSON.stringify(list.filter(n => n !== name)), r.id);
+    unlinkStored(name);
+    broadcastChange(r.pid);
+    return res.json({ ok: true, deleted: 'image' });
+  }
+  // Unreferenced (orphan or temp) — nothing to detach, just remove the file itself.
+  const p = path.join(UPLOADS_DIR, name);
+  let st; try { st = fs.statSync(p); } catch { return res.status(404).json({ error: 'Not found' }); }
+  if (!st.isFile()) return res.status(404).json({ error: 'Not found' });
+  try { fs.unlinkSync(p); } catch { return res.status(500).json({ error: 'Delete failed' }); }
+  res.json({ ok: true, deleted: 'file' });
+});
+
 // ── Background update poller (Cluster E) ─────────────────────
 // Daily check when auto_update_check is on. Cheap (one fetch + a few rev-parses), guarded by an
 // in-flight flag, with the setting re-read each tick (toggling it off stops checks without a

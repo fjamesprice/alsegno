@@ -391,6 +391,52 @@
   .chip{display:inline-flex;align-items:center;gap:5px;background:var(--panel);border:1px solid var(--line);border-radius:20px;padding:3px 5px 3px 10px;font-size:12.5px}
   .chip button{color:var(--faint);font-size:14px;line-height:1} .chip button:hover{color:var(--danger)}
 
+  /* Admin storage (disk usage + media file manager) */
+  .stt{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+  .stt .tile{flex:1;min-width:118px;background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:10px 12px}
+  .stt .tile .tv{font-size:19px;font-weight:650;letter-spacing:.2px}
+  .stt .tile .tk{font-size:10.5px;font-weight:600;letter-spacing:.5px;text-transform:uppercase;color:var(--faint);margin-top:2px}
+  .stt .tile .ts{font-size:11.5px;color:var(--faint);margin-top:1px}
+  .stbar{display:flex;height:10px;border-radius:5px;overflow:hidden;background:var(--panel2);border:1px solid var(--line)}
+  .stbar span{display:block;height:100%;min-width:2px}
+  .stlegend{display:flex;gap:5px 16px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin:8px 0 16px}
+  .stlegend button{font-size:inherit;color:inherit;padding:1px 2px;border-radius:5px;display:inline-flex;align-items:center;gap:6px}
+  .stlegend button:hover{color:var(--text)} .stlegend button.on{color:var(--text);font-weight:600}
+  .stlegend .dot{width:8px;height:8px;border-radius:2px;flex:none}
+  .stctl{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+  .stctl input{flex:1;min-width:150px;padding:6px 10px;font-size:13px}
+  .stctl select{padding:6px 8px;font-size:13px;max-width:180px}
+  .stwrap{overflow-x:auto;border:1px solid var(--line);border-radius:9px;background:var(--panel2)}
+  .stfiles{width:100%;border-collapse:collapse;font-size:13px;min-width:640px}
+  .stfiles th{text-align:left;font-size:10.5px;font-weight:600;letter-spacing:.5px;text-transform:uppercase;color:var(--faint);
+    padding:9px 11px;border-bottom:1px solid var(--line);cursor:pointer;user-select:none;white-space:nowrap}
+  .stfiles th:hover{color:var(--text)} .stfiles th.st-noclick{cursor:default} .stfiles th.st-noclick:hover{color:var(--faint)}
+  .stfiles td{padding:7px 11px;border-bottom:1px solid var(--line);vertical-align:middle}
+  .stfiles tr:last-child td{border-bottom:none}
+  .stfiles tbody tr:hover td{background:rgba(255,255,255,.025)}
+  .stfiles .num{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
+  .stfiles .fmain{font-weight:600;white-space:nowrap}
+  .stfiles .fsub{font-size:11px;color:var(--faint);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    max-width:230px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .stfiles .fproj{max-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .stfiles .ftrack{font-size:11.5px;color:var(--muted);max-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .stfiles .fdel{visibility:hidden;color:var(--faint);font-size:15px;line-height:1;padding:3px 7px;border-radius:6px}
+  .stfiles tr:hover .fdel{visibility:visible}
+  @media(hover:none){.stfiles .fdel{visibility:visible}}   /* touch has no row-hover — keep delete reachable */
+  .stfiles .fdel:hover{color:var(--danger);background:rgba(240,98,107,.12)}
+  .stfiles .flock{color:var(--faint);opacity:.6;font-size:12px;cursor:help}
+  .kbadge{display:inline-block;font-size:9.5px;font-weight:700;letter-spacing:.45px;padding:2px 7px;border-radius:4px;
+    border:1px solid;text-transform:uppercase;white-space:nowrap}
+  .kb-audio{color:var(--accent);border-color:rgba(122,162,255,.55);background:rgba(122,162,255,.09)}
+  .kb-orig{color:var(--warn);border-color:rgba(227,179,65,.55);background:rgba(227,179,65,.09)}
+  .kb-video{color:#c39bff;border-color:rgba(195,155,255,.55);background:rgba(195,155,255,.09)}
+  .kb-proxy{color:#9b86c9;border-color:rgba(155,134,201,.4);background:rgba(155,134,201,.08)}
+  .kb-art{color:var(--done);border-color:rgba(58,210,159,.5);background:rgba(58,210,159,.08)}
+  .kb-image{color:#5fc9d8;border-color:rgba(95,201,216,.5);background:rgba(95,201,216,.08)}
+  .kb-orphan{color:var(--danger);border-color:rgba(240,98,107,.55);background:rgba(240,98,107,.09)}
+  .kb-temp{color:var(--muted);border-color:var(--line);background:var(--panel)}
+  .stempty{padding:18px 12px;text-align:center;color:var(--faint);font-size:13px}
+
   @media(max-width:620px){
     .done-ctl{width:120px} .done-ctl input[type=range],.dbar{width:110px}
     .track{flex-wrap:wrap} .topbar .title{font-size:14px}
@@ -592,6 +638,10 @@
       <div class="card">
         <h2>Projects</h2>
         <div id="adminProjects"></div>
+      </div>
+      <div class="card">
+        <h2>Storage</h2>
+        <div id="storageBox"><div class="faint small">Scanning…</div></div>
       </div>
     </div>
   </div>
@@ -1619,9 +1669,22 @@ function requestRev(revId){
   // video also decoding, the crossfade's repeated seeking of the inactive element can leave it
   // stalled (frozen currentTime ⇒ the synced picture loops a few frames in silence until a reload).
   // Reloading is fresh each time (no stuck seek state) and runs only 2 decoders. Picture keeps playing.
-  if(curVideoName()){ loadTrack(curTrackId, revId, {play:!audio.paused, keepPos:audio.currentTime}); return; }
+  if(curVideoName()){ claimSwapCompare(revId); loadTrack(curTrackId, revId, {play:!audio.paused, keepPos:audio.currentTime}); return; }
   if(crossing){ pendingRev=revId; return; }
   crossfadeTo(revId);
+}
+// A ⇄ swap routed through loadTrack (video mix switch, or a paused A/B) must point the compare at
+// the rev being LEFT before loadTrack's syncPlayerSelectors runs. Otherwise the sync sees the stale
+// auto-pick still in the box and "helpfully" retargets the compare to the revision BELOW the new
+// one, so repeated swaps ROTATE (v4/v3 → v3/v2 → v2/v1…) instead of toggling. The playing crossfade
+// path does the same fix-up itself on completion (crossfadeTo); recording the pick as the auto
+// choice for the new rev keeps the sync's retarget branch off it.
+function claimSwapCompare(revId){
+  const from=curRevId;
+  if(!from || +$('#cmpSel').value!==revId) return;   // not a swap (revSel jump to a 3rd rev) — leave the compare alone
+  $('#cmpSel').value=from;
+  if(selCmpAuto!=null) selCmpAuto=from;              // a manually-chosen compare (null) stays manual
+  selCmpRev=revId;
 }
 function drainPendingRev(){ const p=pendingRev; pendingRev=null; if(p && p!==curRevId) requestRev(p); }
 // Resolve once no A/B crossfade is in flight, so a forced reload (e.g. after replacing audio) doesn't
@@ -1728,7 +1791,7 @@ async function crossfadeTo(revId){
   const target=revById(t,revId); if(!target || revId===curRevId) return;
   if(nullOn) stopNull();
   const fromRev=curRevId;   // the rev we're leaving — becomes the natural swap-back / compare target
-  if(audio.paused){ loadTrack(curTrackId, revId, {play:false, keepPos:audio.currentTime}); return; }
+  if(audio.paused){ claimSwapCompare(revId); loadTrack(curTrackId, revId, {play:false, keepPos:audio.currentTime}); return; }
   crossing=true;
   const other=players[1-act], pos=audio.currentTime, outgoing=audio;
   // Everything below runs under try/finally so `crossing` is ALWAYS released — a thrown error or a
@@ -2716,6 +2779,9 @@ async function renderAdmin(){
     const [users, projects] = await Promise.all([api('admin/users'), api('admin/projects')]);
     renderUsers(users); renderAdminProjects(projects, users);
   }catch(e){ toast(e.message,true); }
+  // Storage is rendered separately so a failed scan never blanks the Users/Projects cards.
+  try{ stData=await api('admin/storage'); renderStorage(); }
+  catch(e){ $('#storageBox').innerHTML='<div class="faint small">Storage scan failed: '+esc(e.message)+'</div>'; }
 }
 function renderUsers(users){
   const box=$('#usersBox'); box.innerHTML=''; const tbl=document.createElement('div'); tbl.className='utable';
@@ -2793,6 +2859,120 @@ function renderAdminProjects(projects, users){
     box.appendChild(card);
   });
 }
+// ── Admin storage (disk usage + media file manager) ─────────
+// One row per file in uploads/, classified by the server (what references it → what it's for).
+// Sort/filter state lives in module vars so it survives the renderAdmin() rebuilds that SSE
+// changes and user-management actions trigger.
+const ST_KINDS={ 'audio':['audio','kb-audio'], 'audio-orig':['lossless','kb-orig'], 'video':['video','kb-video'],
+  'video-proxy':['proxy','kb-proxy'], 'video-orig':['orig video','kb-orig'], 'art':['art','kb-art'],
+  'image':['image','kb-image'], 'orphan':['orphan','kb-orphan'], 'temp':['temp','kb-temp'] };
+const ST_KIND_NAMES={ 'audio':'Audio previews','audio-orig':'Lossless originals','video':'HQ video',
+  'video-proxy':'Video proxies','video-orig':'Original videos','art':'Album art','image':'Note images',
+  'orphan':'Orphaned files','temp':'Temp files' };
+let stData=null, stSort={key:'size',dir:-1}, stQ='', stKind='', stPid='', stRows=[];
+function fmtBytes(n){ if(n==null||isNaN(n)) return '—'; let i=0; const u=['B','KB','MB','GB','TB'];
+  while(n>=1024&&i<u.length-1){ n/=1024; i++; } return (i?n.toFixed(n>=100?0:1):n)+' '+u[i]; }
+function stFiltered(){
+  let fs=stData.files;
+  if(stKind) fs=fs.filter(f=>f.kind===stKind);
+  if(stPid!=='') fs = stPid==='other' ? fs.filter(f=>f.pid==null) : fs.filter(f=>f.pid===+stPid);
+  const q=stQ.trim().toLowerCase();
+  if(q) fs=fs.filter(f=>[f.name,f.label,f.project,f.track,f.source,f.by].some(v=>v&&String(v).toLowerCase().includes(q)));
+  const {key:k,dir}=stSort;
+  const val=f=> k==='size'?f.size : k==='mtime'?f.mtime : k==='kind'?f.kind
+    : k==='project'?(f.project||'￿').toLowerCase() : ((f.track||'')+' '+f.label).toLowerCase();
+  return [...fs].sort((a,b)=>{ const x=val(a),y=val(b); return x<y?-dir:x>y?dir:0; });
+}
+// What a swap of the delete button for a lock means, per kind.
+function stLockHint(f){ return f.kind==='video'||f.kind==='video-proxy'
+  ? 'This is the picture itself — replace the video or delete its track to remove it.'
+  : 'Set by the video — replace the video to change it.'; }
+function stConfirmMsg(f){
+  const rev=f.label.split(' · ')[0];   // "v3 · preview" → "v3"
+  switch(f.kind){
+    case 'audio':      return `Delete revision ${rev} of “${f.track}”?\n\nThis deletes the revision itself (and its kept lossless original, if any) — same as deleting it in Studio. Notes on it are kept but lose their pin.\n\nThis cannot be undone.`;
+    case 'audio-orig': return `Remove the kept lossless original for ${rev} of “${f.track}”?\n\nThe playable preview stays — only the lossless download goes away.`;
+    case 'video-orig': return `Remove the kept original video for “${f.track}”?\n\nThe streaming copies stay — only the original-quality download goes away.`;
+    case 'art':        return `Remove the album art for “${f.project}”?`;
+    case 'image':      return `Delete this note image from its note on “${f.track}”?\n\nThe note itself is kept.`;
+    default:           return `Delete ${f.name} (${fmtBytes(f.size)})?\n\nNothing references this file.`;
+  }
+}
+function renderStorage(){
+  const box=$('#storageBox'); if(!stData){ box.innerHTML='<div class="faint small">Scanning…</div>'; return; }
+  const d=stData;
+  // Per-project byte totals drive the stacked bar; files nothing references pool under "Unreferenced".
+  const sums=new Map();
+  d.files.forEach(f=>{ const k=f.pid!=null?'p'+f.pid:'other';
+    const cur=sums.get(k)||{key:k,name:f.pid!=null?(f.project||('Project '+f.pid)):'Unreferenced',pid:f.pid,bytes:0,n:0};
+    cur.bytes+=f.size; cur.n++; sums.set(k,cur); });
+  const segs=[...sums.values()].sort((a,b)=>b.bytes-a.bytes);
+  const segColor=s=>s.pid!=null?userColor('proj:'+s.pid+':'+s.name):'var(--faint)';
+  const kindsPresent=Object.keys(ST_KINDS).filter(k=>d.files.some(f=>f.kind===k));
+  const projOpts=segs.map(s=>`<option value="${s.pid!=null?s.pid:'other'}" ${String(stPid)===String(s.pid!=null?s.pid:'other')?'selected':''}>${esc(s.name)}</option>`).join('');
+  box.innerHTML=`
+    <div class="stt">
+      <div class="tile"><div class="tv">${fmtBytes(d.total)}</div><div class="tk">media on disk</div><div class="ts">${d.files.length} file${d.files.length===1?'':'s'} in uploads</div></div>
+      <div class="tile"><div class="tv">${fmtBytes(d.dbBytes)}</div><div class="tk">database</div><div class="ts">notes, users, waveforms</div></div>
+      ${d.disk?`<div class="tile"><div class="tv">${fmtBytes(d.disk.free)}</div><div class="tk">disk free</div><div class="ts">of ${fmtBytes(d.disk.total)} total</div></div>`:''}
+    </div>
+    <div class="stbar">${segs.map(s=>`<span style="width:${Math.max(.4,100*s.bytes/(d.total||1))}%;background:${segColor(s)}" title="${esc(s.name)} — ${fmtBytes(s.bytes)}"></span>`).join('')}</div>
+    <div class="stlegend">${segs.map(s=>`<button type="button" class="${String(stPid)===String(s.pid!=null?s.pid:'other')?'on':''}" data-p="${s.pid!=null?s.pid:'other'}"><span class="dot" style="background:${segColor(s)}"></span>${esc(s.name)} <span class="faint">${fmtBytes(s.bytes)}</span></button>`).join('')}</div>
+    <div class="stctl">
+      <input id="stQ" placeholder="Filter by name, project, track…" value="${esc(stQ)}">
+      <select id="stKind"><option value="">All types</option>${kindsPresent.map(k=>`<option value="${k}" ${stKind===k?'selected':''}>${ST_KIND_NAMES[k]}</option>`).join('')}</select>
+      <select id="stProj"><option value="">All projects</option>${projOpts}</select>
+    </div>
+    <div id="stTableWrap"></div>`;
+  $('#stQ').addEventListener('input',e=>{ stQ=e.target.value; renderStorageTable(); });
+  $('#stKind').addEventListener('change',e=>{ stKind=e.target.value; renderStorageTable(); });
+  $('#stProj').addEventListener('change',e=>{ stPid=e.target.value; renderStorage(); });   // legend highlight needs the full redraw
+  $$('#storageBox .stlegend button').forEach(b=>b.addEventListener('click',()=>{ stPid=(String(stPid)===b.dataset.p)?'':b.dataset.p; renderStorage(); }));
+  renderStorageTable();
+}
+function renderStorageTable(){
+  const wrap=$('#stTableWrap'); if(!wrap||!stData) return;
+  stRows=stFiltered();
+  const arrow=k=>stSort.key===k?(stSort.dir<0?' ▾':' ▴'):'';
+  const th=(k,lbl,cls)=>`<th class="${cls||''}" data-k="${k}">${lbl}${arrow(k)}</th>`;
+  const dfmt=ms=>{ const dt=new Date(ms); return dt.toLocaleDateString(undefined,{month:'short',day:'numeric'}); };
+  const rows=stRows.map((f,i)=>{
+    const [bl,bc]=ST_KINDS[f.kind]||['?','kb-temp'];
+    return `<tr>
+      <td><span class="kbadge ${bc}">${bl}</span></td>
+      <td><div class="fmain">${esc(f.label)}${f.track?` <span class="ftrack">· ${esc(f.track)}</span>`:''}</div>
+          <div class="fsub" title="${esc(f.name)}${f.by?' · by '+esc(f.by):''}">${esc(f.source||f.name)}</div></td>
+      <td class="fproj">${f.project?esc(f.project):'<span class="faint">—</span>'}</td>
+      <td class="num">${fmtBytes(f.size)}</td>
+      <td class="num faint" title="${new Date(f.mtime).toLocaleString()}">${dfmt(f.mtime)}</td>
+      <td class="num">${f.deletable
+        ?`<button class="fdel" data-i="${i}" title="Delete">✕</button>`
+        :`<span class="flock" title="${esc(stLockHint(f))}">🔒</span>`}</td>
+    </tr>`; }).join('');
+  const shown=stRows.reduce((a,f)=>a+f.size,0);
+  wrap.innerHTML=`
+    <div class="stwrap"><table class="stfiles">
+      <thead><tr>${th('kind','Type')}${th('file','File')}${th('project','Project')}${th('size','Size','num')}${th('mtime','Date','num')}<th class="st-noclick"></th></tr></thead>
+      <tbody>${rows||`<tr><td colspan="6"><div class="stempty">No files match.</div></td></tr>`}</tbody>
+    </table></div>
+    <div class="faint small" style="margin-top:8px">Showing ${stRows.length} of ${stData.files.length} files · ${fmtBytes(shown)}</div>`;
+  $$('#stTableWrap th[data-k]').forEach(h=>h.addEventListener('click',()=>{
+    const k=h.dataset.k;
+    if(stSort.key===k) stSort.dir=-stSort.dir; else stSort={key:k, dir:(k==='size'||k==='mtime')?-1:1};
+    renderStorageTable();
+  }));
+  $$('#stTableWrap .fdel').forEach(b=>b.addEventListener('click',async()=>{
+    const f=stRows[+b.dataset.i]; if(!f||b.disabled) return;
+    if(!confirm(stConfirmMsg(f))) return;
+    b.disabled=true;
+    try{
+      await api('admin/storage/'+encodeURIComponent(f.name),{method:'DELETE'});
+      toast('Deleted — freed '+fmtBytes(f.size));
+      stData=await api('admin/storage'); renderStorage();
+    }catch(e){ b.disabled=false; toast(e.message,true); }
+  }));
+}
+
 // Show (and keep) the freshly-minted invite link in the admin Users card so it can be copied
 // deliberately. Persists across renderAdmin() (the panel lives in the static add-user form, which
 // renderUsers/renderAdminProjects don't touch).
