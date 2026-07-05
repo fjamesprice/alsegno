@@ -344,12 +344,19 @@
   .stx{display:flex;flex-direction:column;gap:14px}
   .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:16px}
   .card h2{font-size:15px;margin:0 0 12px;font-weight:600}
-  .strack{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden}
+  /* Studio master–detail: track list (left column) + selected-track panel (right column). */
+  .stmain{display:flex;align-items:flex-start;gap:14px}
+  #studioTracks{flex:0 0 330px;min-width:0}
+  .strack{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;transition:.12s}
+  .strack:hover{border-color:var(--accent)}
+  .strack.sel{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
   .strack-h{display:flex;align-items:center;gap:10px;padding:13px 15px;cursor:pointer}
-  .strack-h .stitle{font-weight:600;flex:1}
-  .strack-h .chev{color:var(--faint);transition:.15s}
-  .strack-h.open .chev{transform:rotate(90deg)}
-  .strack-body{padding:0 15px 15px;border-top:1px solid var(--line);display:flex;flex-direction:column;gap:12px}
+  .strack-h .stitle{font-weight:600;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .strack-body{display:flex;flex-direction:column;gap:12px}
+  /* Right column: the selected track's detail card, or a low-contrast "select a track" placeholder. */
+  .stdetail{flex:1;min-width:0;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:16px}
+  .stdetail.empty{display:flex;align-items:center;justify-content:center;min-height:200px;padding:24px;background:transparent;border-style:dashed}
+  .stdetail-ph{color:var(--faint);font-size:14px}
   .srev{background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:11px 12px}
   .srev .sr-h{display:flex;align-items:center;gap:9px;margin-bottom:7px}
   .srev .sr-h .rn{font-weight:600}
@@ -361,6 +368,26 @@
   .toast.err{border-color:var(--danger);color:#ffd7da}
   .spin{display:inline-block;width:14px;height:14px;border:2px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:sp .7s linear infinite;vertical-align:-2px}
   @keyframes sp{to{transform:rotate(360deg)}}
+
+  /* Studio: project-settings header — clickable title + "add track" on the left, album-art slot on the right */
+  .stset{display:flex;align-items:center;gap:20px;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:20px 22px}
+  .stset-info{flex:1;min-width:0;display:flex;flex-direction:column;align-items:flex-start;gap:13px}
+  .stset-kind{font-size:11px;text-transform:uppercase;letter-spacing:.9px;color:var(--faint);font-weight:600}
+  .stset-title{display:inline-flex;align-items:center;gap:10px;max-width:100%;margin:-3px -8px;padding:3px 8px;background:none;border:none;border-radius:9px;
+    font-size:26px;font-weight:650;line-height:1.15;letter-spacing:-.2px;color:var(--text);transition:.12s}
+  .stset-title > span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .stset-title .pencil{width:17px;height:17px;flex:none;color:var(--faint);opacity:0;transition:.12s}
+  .stset-title:hover{background:var(--panel2);color:#fff}
+  .stset-title:hover .pencil{opacity:1;color:var(--accent)}
+  .stset-hint{margin:-4px 0 0}
+  /* Album-art slot: rounded dashed square; shows the art, or a low-alpha generic "no picture" glyph */
+  .stset-art{position:relative;width:104px;height:104px;flex:none;display:flex;align-items:center;justify-content:center;
+    background:var(--panel2);border:2px dashed var(--line);border-radius:16px;overflow:hidden;padding:0;transition:.14s}
+  .stset-art:hover{border-color:var(--accent)}
+  .stset-art > img{width:100%;height:100%;object-fit:cover;display:block}
+  .stset-art-ph{display:flex;align-items:center;justify-content:center;color:var(--muted);opacity:.22;transition:.14s}
+  .stset-art-ph svg{width:46px;height:46px}
+  .stset-art:hover .stset-art-ph{opacity:.42}
 
   /* Projects list */
   .plist{display:flex;flex-direction:column;gap:9px}
@@ -489,6 +516,15 @@
     .pb-controls > .nowtitle{order:2}
     .pb-controls > #dlBtn{order:3}
 
+    /* Studio project-settings header: smaller title + art slot so it fits a narrow screen. */
+    .stset{gap:14px;padding:16px 16px}
+    .stset-title{font-size:21px}
+    .stset-art{width:78px;height:78px;border-radius:13px}
+    .stset-art-ph svg{width:34px;height:34px}
+    /* Studio master–detail: stack the columns (list on top, selected-track panel below). */
+    .stmain{flex-direction:column}
+    #studioTracks{flex:none;width:100%}
+
     /* Bigger touch targets for the range sliders (volume / doneness / null-boost). The seek/scrub bar
        is a <canvas>, not a range input, so playback scrubbing is unaffected. */
     input[type=range]{height:9px}
@@ -583,31 +619,25 @@
   <!-- STUDIO VIEW -->
   <div id="studioView" class="hidden">
     <div class="stx">
-      <div class="card" id="stTitleCard">
-        <h2 id="stTitleH">Album title</h2>
-        <div class="row">
-          <input id="albInput" style="flex:1" placeholder="Title">
-          <button class="btn" id="albSave">Save</button>
+      <div class="stset" id="stSettings">
+        <div class="stset-info">
+          <div class="stset-kind" id="stKindLabel">Album</div>
+          <button class="stset-title" id="stTitleBtn" type="button" title="Edit title">
+            <span id="stTitleText">Album title</span>
+            <svg class="pencil" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+          </button>
+          <button class="btn primary sm" id="addTrack" type="button">＋ Add track</button>
+          <p class="muted small hidden stset-hint" id="stAddHint">Adding a second track turns this song into an album.</p>
         </div>
-        <div id="stArtBlock" class="hidden" style="margin-top:12px">
-          <label class="muted small">Album art — jpg/png/webp, downscaled to ≤1024px</label>
-          <div class="row" style="margin-top:6px;align-items:center;gap:12px">
-            <img id="stArtThumb" class="alb-art hidden" alt="">
-            <input type="file" id="stArtFile" accept="image/*" style="flex:1;min-width:120px">
-            <button class="btn sm" id="stArtUp">Upload</button>
-            <button class="btn ghost sm hidden" id="stArtDel">Remove</button>
-          </div>
-        </div>
+        <button class="stset-art hidden" id="stArtBtn" type="button" title="Manage album art">
+          <img id="stArtThumb" alt="Album art" class="hidden">
+          <span class="stset-art-ph" id="stArtPh"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2.5"/><circle cx="8.5" cy="8.5" r="1.6"/><path d="M21 15l-5-5L5 21"/></svg></span>
+        </button>
       </div>
-      <div class="card">
-        <h2 id="stAddH">Add a track</h2>
-        <p class="muted small hidden" id="stAddHint" style="margin:-4px 0 10px">Adding a second track turns this song into an album.</p>
-        <div class="row">
-          <input id="newTrack" style="flex:1" placeholder="Track title">
-          <button class="btn primary" id="addTrack">Add track</button>
-        </div>
+      <div class="stmain">
+        <div id="studioTracks" class="stx"></div>
+        <div id="studioDetail" class="stdetail empty"></div>
       </div>
-      <div id="studioTracks" class="stx"></div>
     </div>
   </div>
 
@@ -763,6 +793,63 @@
     <div class="modal-actions">
       <button class="btn ghost" type="button" id="npCancel">Cancel</button>
       <button class="btn primary" type="button" id="npCreate">Create project</button>
+    </div>
+  </div>
+</div>
+
+<!-- Studio: edit the project/album/song title (opened from the settings-header title) -->
+<div id="titleModal" class="modal-bg hidden">
+  <div class="modal-card" role="dialog" aria-modal="true" aria-label="Edit title">
+    <h2 id="titleModalH">Edit title</h2>
+    <div class="mfield">
+      <label for="titleModalInput" id="titleModalLbl">Title</label>
+      <input type="text" id="titleModalInput" autocomplete="off">
+    </div>
+    <div class="modal-actions">
+      <button class="btn ghost" type="button" id="titleModalCancel">Cancel</button>
+      <button class="btn primary" type="button" id="titleModalSave">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Studio: add a track / video (opened from the settings-header button) -->
+<div id="trackModal" class="modal-bg hidden">
+  <div class="modal-card" role="dialog" aria-modal="true" aria-label="Add track">
+    <h2 id="trackModalH">Add track</h2>
+    <div class="mfield">
+      <label for="trackModalInput" id="trackModalLbl">Track title</label>
+      <input type="text" id="trackModalInput" autocomplete="off" placeholder="Track title">
+    </div>
+    <div class="mfield hidden" id="trackModalAlbField">
+      <label for="trackModalAlb">Album title</label>
+      <input type="text" id="trackModalAlb" autocomplete="off">
+      <div class="faint small" style="margin-top:6px">Adding a second track turns this song into an album.</div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn ghost" type="button" id="trackModalCancel">Cancel</button>
+      <button class="btn primary" type="button" id="trackModalCreate">Add track</button>
+    </div>
+  </div>
+</div>
+
+<!-- Studio: manage album art (opened from the settings-header art slot; albums only) -->
+<div id="artModal" class="modal-bg hidden">
+  <div class="modal-card" role="dialog" aria-modal="true" aria-label="Album art">
+    <h2>Album art</h2>
+    <div class="mfield" style="display:flex;justify-content:center">
+      <div class="stset-art" style="width:150px;height:150px;cursor:default">
+        <img id="artModalThumb" alt="Album art" class="hidden">
+        <span class="stset-art-ph" id="artModalPh"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2.5"/><circle cx="8.5" cy="8.5" r="1.6"/><path d="M21 15l-5-5L5 21"/></svg></span>
+      </div>
+    </div>
+    <div class="mfield">
+      <label for="artModalFile">Choose an image — jpg/png/webp, downscaled to ≤1024px</label>
+      <input type="file" id="artModalFile" accept="image/*">
+    </div>
+    <div class="modal-actions">
+      <button class="btn ghost danger hidden" type="button" id="artModalDel" style="margin-right:auto">Remove art</button>
+      <button class="btn ghost" type="button" id="artModalClose">Close</button>
+      <button class="btn primary" type="button" id="artModalUp">Upload</button>
     </div>
   </div>
 </div>
@@ -2484,36 +2571,97 @@ async function markSeen(t,revId){
 }
 
 // ───────── STUDIO (engineer/admin) ─────────
-$('#albSave').addEventListener('click',async()=>{ const v=$('#albInput').value.trim(); if(!v||!PROJECT)return;
+// Edit-title dialog — opened by clicking the settings-header title. Works for album/song/project.
+function openTitleModal(){
+  if(!PROJECT) return;
+  const isSong=PROJECT.type==='song', isVid=isVideoProject();
+  const noun = isVid ? 'project title' : (isSong ? 'song title' : 'album title');
+  $('#titleModalH').textContent = 'Edit '+noun;
+  $('#titleModalLbl').textContent = noun.charAt(0).toUpperCase()+noun.slice(1);
+  $('#titleModalInput').value = PROJECT.title;
+  $('#titleModal').classList.remove('hidden');
+  setTimeout(()=>{ const el=$('#titleModalInput'); el.focus(); if(el.select) el.select(); },0);
+}
+function closeTitleModal(){ $('#titleModal').classList.add('hidden'); }
+async function saveTitle(){
+  const v=$('#titleModalInput').value.trim(); if(!v||!PROJECT)return;
   try{ await api('projects/'+PROJECT.id,{method:'PUT',body:{title:v}}); PROJECT.title=v; ALBUM=v;
-    $('#albumTitle').textContent=ALBUM; document.title=ALBUM; render(); toast('Title saved'); }
-  catch(e){ toast(e.message,true); } });
-// Album art upload/replace + remove (albums only; the control is hidden for songs).
-$('#stArtUp').addEventListener('click',async()=>{
-  const f=$('#stArtFile').files[0]; if(!f||!PROJECT)return;
-  const fd=new FormData(); fd.append('file',f);
-  try{ await api('projects/'+PROJECT.id+'/art',{method:'POST',body:fd}); $('#stArtFile').value=''; await reload(); renderStudio(); toast('Album art updated'); }
-  catch(e){ toast(e.message,true); } });
-$('#stArtDel').addEventListener('click',async()=>{
-  if(!PROJECT || !confirm('Remove album art?'))return;
-  try{ await api('projects/'+PROJECT.id+'/art',{method:'DELETE'}); await reload(); renderStudio(); toast('Album art removed'); }
-  catch(e){ toast(e.message,true); } });
-$('#addTrack').addEventListener('click',addTrackFn);
-$('#newTrack').addEventListener('keydown',e=>{ if(e.key==='Enter') addTrackFn(); });
-async function addTrackFn(){
-  const v=$('#newTrack').value.trim(); if(!v||!PROJECT)return;
-  const body={title:v};
-  // Adding a 2nd track to an AUDIO song promotes it to an album — collect the album title here.
-  // Video projects never promote: they just hold multiple videos, so skip the prompt entirely.
-  if(PROJECT.type==='song' && TRACKS.length>=1 && !isVideoProject()){
-    const at=prompt('Adding a second track turns this song into an album.\nAlbum title:', PROJECT.title);
-    if(at===null) return;
-    if(!at.trim()){ toast('Album title required',true); return; }
-    body.album_title=at.trim();
-  }
-  try{ const r=await api('projects/'+PROJECT.id+'/tracks',{method:'POST',body}); $('#newTrack').value=''; if(r&&r.id) openStudio.add(r.id); await reload(); setView('studio'); }
+    $('#albumTitle').textContent=ALBUM; document.title=ALBUM; closeTitleModal(); render(); renderStudio(); toast('Title saved'); }
   catch(e){ toast(e.message,true); }
 }
+$('#stTitleBtn').addEventListener('click',openTitleModal);
+$('#titleModalSave').addEventListener('click',saveTitle);
+$('#titleModalCancel').addEventListener('click',closeTitleModal);
+$('#titleModal').addEventListener('click',e=>{ if(e.target===$('#titleModal')) closeTitleModal(); });
+$('#titleModalInput').addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); saveTitle(); } });
+
+// Album-art dialog — opened by clicking the settings-header art slot (albums only). Upload/replace/remove.
+function openArtModal(){
+  if(!PROJECT) return;
+  const has=!!PROJECT.art_stored_name;
+  const thumb=$('#artModalThumb');
+  thumb.classList.toggle('hidden', !has); $('#artModalPh').classList.toggle('hidden', has);
+  if(has) thumb.src='api/art/'+PROJECT.art_stored_name;
+  $('#artModalFile').value='';
+  $('#artModalDel').classList.toggle('hidden', !has);
+  $('#artModalUp').textContent = has ? 'Replace' : 'Upload';
+  $('#artModal').classList.remove('hidden');
+}
+function closeArtModal(){ $('#artModal').classList.add('hidden'); }
+$('#stArtBtn').addEventListener('click',openArtModal);
+$('#artModalClose').addEventListener('click',closeArtModal);
+$('#artModal').addEventListener('click',e=>{ if(e.target===$('#artModal')) closeArtModal(); });
+$('#artModalUp').addEventListener('click',async()=>{
+  const f=$('#artModalFile').files[0]; if(!f||!PROJECT)return;
+  const fd=new FormData(); fd.append('file',f);
+  try{ await api('projects/'+PROJECT.id+'/art',{method:'POST',body:fd}); await reload(); renderStudio(); closeArtModal(); toast('Album art updated'); }
+  catch(e){ toast(e.message,true); } });
+$('#artModalDel').addEventListener('click',async()=>{
+  if(!PROJECT || !confirm('Remove album art?'))return;
+  try{ await api('projects/'+PROJECT.id+'/art',{method:'DELETE'}); await reload(); renderStudio(); closeArtModal(); toast('Album art removed'); }
+  catch(e){ toast(e.message,true); } });
+
+// Add-track dialog — opened by the settings-header button. Adds a track (or a video, for video projects).
+function openTrackModal(){
+  if(!PROJECT) return;
+  const isVid=isVideoProject();
+  const promote = PROJECT.type==='song' && TRACKS.length>=1 && !isVid;   // 2nd track on an audio song → album
+  const noun = isVid ? 'video' : 'track';
+  $('#trackModalH').textContent = 'Add '+noun;
+  $('#trackModalLbl').textContent = (isVid?'Video':'Track')+' title';
+  $('#trackModalInput').value=''; $('#trackModalInput').placeholder = (isVid?'Video':'Track')+' title';
+  $('#trackModalCreate').textContent = 'Add '+noun;
+  $('#trackModalAlbField').classList.toggle('hidden', !promote);
+  if(promote) $('#trackModalAlb').value=PROJECT.title;
+  $('#trackModal').classList.remove('hidden');
+  setTimeout(()=>$('#trackModalInput').focus(),0);
+}
+function closeTrackModal(){ $('#trackModal').classList.add('hidden'); }
+async function addTrackFn(){
+  const v=$('#trackModalInput').value.trim(); if(!v||!PROJECT)return;
+  const body={title:v};
+  // Adding a 2nd track to an AUDIO song promotes it to an album — the album title is collected inline.
+  // Video projects never promote: they just hold multiple videos, so the album field stays hidden.
+  if(PROJECT.type==='song' && TRACKS.length>=1 && !isVideoProject()){
+    const at=$('#trackModalAlb').value.trim();
+    if(!at){ toast('Album title required',true); $('#trackModalAlb').focus(); return; }
+    body.album_title=at;
+  }
+  try{ const r=await api('projects/'+PROJECT.id+'/tracks',{method:'POST',body}); if(r&&r.id) stSelected=r.id; closeTrackModal(); await reload(); setView('studio'); }
+  catch(e){ toast(e.message,true); }
+}
+$('#addTrack').addEventListener('click',openTrackModal);
+$('#trackModalCreate').addEventListener('click',addTrackFn);
+$('#trackModalCancel').addEventListener('click',closeTrackModal);
+$('#trackModal').addEventListener('click',e=>{ if(e.target===$('#trackModal')) closeTrackModal(); });
+$('#trackModalInput').addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); addTrackFn(); } });
+$('#trackModalAlb').addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); addTrackFn(); } });
+// Esc closes whichever studio dialog is open.
+document.addEventListener('keydown',e=>{ if(e.key!=='Escape') return;
+  if(!$('#titleModal').classList.contains('hidden')) closeTitleModal();
+  else if(!$('#trackModal').classList.contains('hidden')) closeTrackModal();
+  else if(!$('#artModal').classList.contains('hidden')) closeArtModal();
+});
 
 // Reload the OPEN project's payload (replaces the old album-wide bootstrap reload). fromEvent is
 // threaded through to render() so an SSE-driven reload never pauses the player on a remote delete.
@@ -2524,46 +2672,58 @@ async function reload(fromEvent){
   render(fromEvent); if(VIEW==='studio') renderStudio();
 }
 
-const openStudio=new Set();
+let stSelected=null;   // id of the track shown in the right-hand detail panel (null = none selected)
 function renderStudio(){
   if(!PROJECT) return;
   const isSong=PROJECT.type==='song';
   const isVid=isVideoProject();
-  // A video project is never an album: it just holds one or more videos. So no "Album title", no
-  // album art, no song→album promotion hint — and the add card adds videos, not tracks.
-  $('#stTitleH').textContent = isVid ? 'Project title' : (isSong?'Song title':'Album title');
+  const isAlbum=!isSong && !isVid;
+  // Settings header: kind eyebrow + clickable title + add-track button. A video project is never an
+  // album — it just holds one or more videos, so no album art and no song→album promotion hint, and
+  // the button adds videos rather than tracks.
+  $('#stKindLabel').textContent = isVid ? 'Project' : (isSong ? 'Song' : 'Album');
+  $('#stTitleText').textContent = PROJECT.title;
+  $('#addTrack').textContent    = isVid ? '＋ Add video' : '＋ Add track';
   $('#stAddHint').classList.toggle('hidden', !isSong || isVid);
-  $('#albInput').value=PROJECT.title;
-  $('#stAddH').textContent   = isVid ? 'Add a video' : 'Add a track';
-  $('#addTrack').textContent = isVid ? 'Add video'   : 'Add track';
-  $('#newTrack').placeholder = isVid ? 'Video title' : 'Track title';
-  // Album art controls — audio albums only.
-  $('#stArtBlock').classList.toggle('hidden', isSong || isVid);
-  if(!isSong && !isVid){
+  // Album-art slot — audio albums only; hidden for songs & videos. Shows the art, else the placeholder.
+  const artBtn=$('#stArtBtn');
+  artBtn.classList.toggle('hidden', !isAlbum);
+  if(isAlbum){
     const has=!!PROJECT.art_stored_name, thumb=$('#stArtThumb');
-    thumb.classList.toggle('hidden', !has); if(has) thumb.src='api/art/'+PROJECT.art_stored_name;
-    $('#stArtDel').classList.toggle('hidden', !has);
-    $('#stArtUp').textContent = has?'Replace':'Upload';
+    thumb.classList.toggle('hidden', !has); $('#stArtPh').classList.toggle('hidden', has);
+    if(has) thumb.src='api/art/'+PROJECT.art_stored_name;
   }
+  // Drop a stale selection (e.g. the selected track was deleted from under us by an SSE resync).
+  if(stSelected!=null && !TRACKS.some(t=>t.id===stSelected)) stSelected=null;
+  // LEFT column — the clickable track list.
   const box=$('#studioTracks'); box.innerHTML='';
-  if(!TRACKS.length){ box.innerHTML='<div class="card faint">'+(isVid?'No videos yet — add one above.':'No tracks yet — add one above.')+'</div>'; return; }
-  TRACKS.forEach((t,i)=>{
-    const card=document.createElement('div'); card.className='strack';
-    const open=openStudio.has(t.id);
+  if(!TRACKS.length){
+    box.innerHTML='<div class="card faint">'+(isVid?'No videos yet — add one above.':'No tracks yet — add one above.')+'</div>';
+  } else TRACKS.forEach((t,i)=>{
+    const sel=t.id===stSelected;
+    const card=document.createElement('div'); card.className='strack'+(sel?' sel':'');
     card.innerHTML=`
-      <div class="strack-h ${open?'open':''}">
-        <span class="chev">▶</span>
+      <div class="strack-h">
         <span class="num">${i+1}</span>
         <span class="stitle">${esc(t.title)}</span>
         <span class="badge rev">${mixRevCount(t)} rev${mixRevCount(t)!==1?'s':''}</span>
         ${t.doneness>=100?'<span class="badge done"><svg class="bl" viewBox="0 0 12 16" aria-hidden="true"><rect x="2" y="1.5" width="1.6" height="13" fill="currentColor"/><rect x="6" y="1.5" width="3.4" height="13" rx=".4" fill="currentColor"/></svg> DONE</span>':`<span class="faint small">${t.doneness}%</span>`}
-      </div>
-      <div class="strack-body ${open?'':'hidden'}"></div>`;
-    const head=card.querySelector('.strack-h'), bodyEl=card.querySelector('.strack-body');
-    head.addEventListener('click',()=>{ if(open)openStudio.delete(t.id); else openStudio.add(t.id); renderStudio(); });
-    if(open) buildStudioBody(bodyEl,t);
+      </div>`;
+    card.querySelector('.strack-h').addEventListener('click',()=>{ stSelected = sel ? null : t.id; renderStudio(); });
     box.appendChild(card);
   });
+  // RIGHT column — the selected track's detail (what used to expand under the row), or a placeholder.
+  const detail=$('#studioDetail'); detail.innerHTML='';
+  const cur = stSelected!=null ? TRACKS.find(t=>t.id===stSelected) : null;
+  if(cur){
+    detail.classList.remove('empty');
+    const body=document.createElement('div'); body.className='strack-body';
+    buildStudioBody(body,cur);
+    detail.appendChild(body);
+  }else{
+    detail.classList.add('empty');
+    detail.innerHTML='<div class="stdetail-ph">Select a track</div>';
+  }
 }
 function buildStudioBody(el,t){
   el.innerHTML='';
@@ -2575,7 +2735,7 @@ function buildStudioBody(el,t){
   tools.querySelector('.rnsave').addEventListener('click',async()=>{ const v=tools.querySelector('.rn').value.trim(); if(!v)return;
     try{ await api('tracks/'+t.id,{method:'PUT',body:{title:v}}); await reload(); toast('Renamed'); }catch(e){ toast(e.message,true); } });
   tools.querySelector('.tdel').addEventListener('click',async()=>{ if(!confirm('Delete "'+t.title+'" and all its revisions?'))return;
-    try{ await api('tracks/'+t.id,{method:'DELETE'}); openStudio.delete(t.id); await reload(); toast(isVideoProject()?'Video deleted':'Track deleted'); }catch(e){ toast(e.message,true); } });
+    try{ await api('tracks/'+t.id,{method:'DELETE'}); if(stSelected===t.id) stSelected=null; await reload(); toast(isVideoProject()?'Video deleted':'Track deleted'); }catch(e){ toast(e.message,true); } });
   el.appendChild(tools);
 
   const isVid=isVideoProject();
@@ -3297,11 +3457,11 @@ async function resyncOpenProject(){
 // an SSE re-render that would clear the picker out from under the user.
 function studioHasPendingFile(){
   if(VIEW!=='studio') return false;
-  // A chosen file, a ticked "keep lossless" checkbox, OR unsaved text (change notes, rename, the
-  // add-track field) counts as in-progress — don't let an SSE re-render wipe any of it out from
-  // under the user. Mid-typing is covered by the focus check; already-typed-but-blurred text in the
-  // innerHTML-built fields is caught by value≠defaultValue (#albInput is set via JS so its
-  // defaultValue is meaningless — the focus check covers it instead).
+  // A chosen file, a ticked "keep lossless" checkbox, OR unsaved text (change notes) counts as
+  // in-progress — don't let an SSE re-render wipe any of it out from under the user. Mid-typing is
+  // covered by the focus check; already-typed-but-blurred text in the innerHTML-built fields is
+  // caught by value≠defaultValue. (Title/add-track/art now live in modals outside #studioView, so
+  // renderStudio never re-renders them — they don't need guarding here.)
   // TEXT fields only in both checks below: a checkbox with no value attribute has value 'on' but
   // defaultValue '' — matching it made this permanently true whenever an uploader was open, which
   // deferred every SSE resync until the user left Studio ("processing…" never cleared, new
@@ -3310,8 +3470,7 @@ function studioHasPendingFile(){
   if(ae && ae.matches && ae.matches('#studioView textarea, #studioView input[type=text], #studioView input:not([type])')) return true;
   return [...document.querySelectorAll('#studioView input[type=file]')].some(i=>i.files && i.files.length)
       || [...document.querySelectorAll('#studioView .ukeep')].some(c=>c.checked)
-      || [...document.querySelectorAll('#studioTracks textarea, #studioTracks input[type=text], #studioTracks input:not([type])')].some(el=>el.value!==el.defaultValue)
-      || $('#newTrack').value!=='';
+      || [...document.querySelectorAll('#studioDetail textarea, #studioDetail input[type=text], #studioDetail input:not([type])')].some(el=>el.value!==el.defaultValue);
 }
 // The set of projects / who can see them / a user's role changed → refresh whatever's on screen and
 // re-validate the open project (a revoked member is dropped to the list by resyncOpenProject).
