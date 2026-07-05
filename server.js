@@ -1324,10 +1324,10 @@ app.post('/api/projects', requireAdmin, (req, res) => {
   res.json({ id });
 });
 
-// Retitle a project. Engineer-on-the-project (or admin) — the Studio title card is shown to
-// engineers, and art upload/removal below is already engineer-scoped; admin-only here was the odd
-// one out (an engineer's Save always 403'd).
-app.put('/api/projects/:id', requireProjectEngineer(pParam), (req, res) => {
+// Retitle a project. Any project member (incl. client) — the Studio title card is now shown to all
+// members, and only the title field is touched here, so it's safe alongside art upload/removal below
+// (also member-scoped). Structural changes (create/delete) remain admin-only.
+app.put('/api/projects/:id', requireProjectAccess(pParam), (req, res) => {
   const title = String(req.body.title || '').trim().slice(0, 200);
   if (!title) return res.status(400).json({ error: 'Title required' });
   db.prepare("UPDATE projects SET title = ?, updated_at = datetime('now') WHERE id = ?").run(title, req.projectId);
@@ -1336,9 +1336,9 @@ app.put('/api/projects/:id', requireProjectEngineer(pParam), (req, res) => {
   res.json({ ok: true });
 });
 
-// Album art (album projects only). Engineer/admin on the project. Stored as a downscaled jpg; the
-// previous art file is unlinked. Both broadcasts so the open album AND everyone's project-list thumb update.
-app.post('/api/projects/:id/art', requireProjectEngineer(pParam), artUpload, async (req, res) => {
+// Album art (album projects only). Any project member (incl. client) may set it. Stored as a downscaled
+// jpg; the previous art file is unlinked. Both broadcasts so the open album AND everyone's project-list thumb update.
+app.post('/api/projects/:id/art', requireProjectAccess(pParam), artUpload, async (req, res) => {
   const pid = req.projectId;
   const proj = db.prepare('SELECT type, art_stored_name FROM projects WHERE id = ?').get(pid);
   if (!req.file) return res.status(400).json({ error: 'An image file is required' });
@@ -1356,7 +1356,8 @@ app.post('/api/projects/:id/art', requireProjectEngineer(pParam), artUpload, asy
   res.json({ art_stored_name: storedName });
 });
 
-app.delete('/api/projects/:id/art', requireProjectEngineer(pParam), (req, res) => {
+// Remove album art — any project member (incl. client), mirroring the upload above.
+app.delete('/api/projects/:id/art', requireProjectAccess(pParam), (req, res) => {
   const pid = req.projectId;
   const old = db.prepare('SELECT art_stored_name FROM projects WHERE id = ?').get(pid)?.art_stored_name;
   db.prepare("UPDATE projects SET art_stored_name = NULL, updated_at = datetime('now') WHERE id = ?").run(pid);
@@ -1413,7 +1414,8 @@ app.delete('/api/projects/:id/users/:username', requireAdmin, (req, res) => {
 // Create a track in a project. Song→album promotion: adding a 2nd track to an AUDIO 'song' flips it
 // to 'album' and (re)titles it from album_title — so albums get a heading + ordering they lacked.
 // Video projects are exempt: they hold multiple videos as 'song'-type tracks and never become albums.
-app.post('/api/projects/:id/tracks', requireProjectEngineer(pParam), (req, res) => {
+// Add a track — any project member (incl. client). Creates a title-only row (song→album promotion below).
+app.post('/api/projects/:id/tracks', requireProjectAccess(pParam), (req, res) => {
   const pid = req.projectId;
   const title = String(req.body.title || '').trim().slice(0, 200);
   if (!title) return res.status(400).json({ error: 'Track title required' });
@@ -1433,7 +1435,8 @@ app.post('/api/projects/:id/tracks', requireProjectEngineer(pParam), (req, res) 
   res.json({ id: r.lastInsertRowid, promoted });
 });
 
-app.put('/api/tracks/:id', requireProjectEngineer(pTrack), (req, res) => {
+// Rename a track — any project member (incl. client); only the title is touched. Delete stays engineer-only.
+app.put('/api/tracks/:id', requireProjectAccess(pTrack), (req, res) => {
   const title = String(req.body.title || '').trim().slice(0, 200);
   if (!title) return res.status(400).json({ error: 'Title required' });
   db.prepare("UPDATE tracks SET title = ?, updated_at = datetime('now') WHERE id = ?").run(title, req.params.id);
