@@ -276,7 +276,9 @@
   .cmt.deleted{opacity:.5} .cmt.deleted .cbody{font-style:italic}
   .setrow{margin:4px 0 14px} .setrow .toggle{font-size:14px;font-weight:500}
   .cmt .crev{font-size:11px;color:var(--faint)}
-  .cmt .cact{display:flex;gap:6px;flex:none;opacity:.0;transition:.1s}
+  /* Actions live INLINE at the end of the body's meta line (beside "· v3"/"(edited)"), not as a
+     right-hand column — so the body text spans the full width. Hover-reveal via opacity as before. */
+  .cmt .cact{display:inline-flex;gap:8px;vertical-align:middle;margin-left:8px;opacity:0;transition:.1s}
   .cmt:hover .cact{opacity:1}
   .cmt .cact button{font-size:11.5px;color:var(--faint)} .cmt .cact button:hover{color:var(--text)}
   .cmt .cedit{font-size:11px;color:var(--faint);font-style:italic;margin-left:6px;white-space:nowrap}
@@ -534,7 +536,8 @@
     .cmt .tsbtn, .cmt .gen{align-self:flex-start}
     .cmt .cbody{flex:0 0 auto;width:100%}
     .cmt .crev{white-space:nowrap}
-    .cmt .cact{opacity:1;justify-content:flex-start;gap:10px;margin-top:1px}
+    /* Touch has no hover — keep actions visible; inline-flex wraps them as a unit below the meta. */
+    .cmt .cact{opacity:1;margin-left:0;gap:10px}
     .cmt .cact button{padding:7px 10px;font-size:12.5px}
     /* Touch has no hover — keep the lightbox controls visible. */
     .lb-stage .lb-nav:not(.hidden),.lb-stage .lb-close,.lb-stage .lb-count{opacity:1}
@@ -2453,11 +2456,10 @@ function renderComments(){
     const editedHtml = c.edited_at ? `<span class="cedit" title="last edited ${esc(fmtDate(c.edited_at))}">(last edited ${esc(fmtDate(c.edited_at))})</span>` : '';
     if(isReply){
       div.className='cmt reply';
-      div.innerHTML=`<div class="cbody"><span class="cwho" style="color:${userColor(c.author)}">${esc(c.author)}</span>${esc(c.body)}${editedHtml}${attHtml(c)}</div>
-        <div class="cact">
+      div.innerHTML=`<div class="cbody"><span class="cwho" style="color:${userColor(c.author)}">${esc(c.author)}</span>${esc(c.body)}${editedHtml}<span class="cact">
           ${canEdit?'<button class="edit">edit</button>':''}
           ${canEdit?'<button class="del danger">del</button>':''}
-        </div>`;
+        </span>${attHtml(c)}</div>`;
     } else {
       const tsHtml = c.ts!=null ? `<button class="tsbtn" title="Jump to ${esc(fmtPin(c))}">${fmtPin(c)}</button>` : `<span class="gen">general</span>`;
       const nReplies=(repliesByParent[c.id]||[]).length;
@@ -2465,13 +2467,12 @@ function renderComments(){
       div.className='cmt'+(c.resolved?' resolved':'')+(c.revision_id===curRevId?' cur':'');
       div.innerHTML=`${tsHtml}
         <div class="cbody"><span class="cwho" style="color:${userColor(c.author)}">${esc(c.author)}</span>${esc(c.body)}
-          <span class="crev">${c.rev_number?('· v'+c.rev_number):''}</span>${editedHtml}${rcountHtml}${attHtml(c)}</div>
-        <div class="cact">
-          <button class="res">${c.resolved?'reopen':'resolve'}</button>
-          <button class="reply">reply</button>
-          ${canEdit?'<button class="edit">edit</button>':''}
-          ${canEdit?'<button class="del danger">del</button>':''}
-        </div>`;
+          <span class="crev">${c.rev_number?('· v'+c.rev_number):''}</span>${editedHtml}${rcountHtml}<span class="cact">
+            <button class="res">${c.resolved?'reopen':'resolve'}</button>
+            <button class="reply">reply</button>
+            ${canEdit?'<button class="edit">edit</button>':''}
+            ${canEdit?'<button class="del danger">del</button>':''}
+          </span>${attHtml(c)}</div>`;
       if(c.ts!=null) div.querySelector('.tsbtn').addEventListener('click',()=>{
         if(curTrackId!==c.track_id){ const t=trackById(c.track_id); const rv=revById(t,c.revision_id)||t.revisions.at(-1); loadTrack(c.track_id, rv.id,{play:true,keepPos:c.ts}); }
         else if(c.revision_id && c.revision_id!==curRevId){ loadTrack(c.track_id,c.revision_id,{play:true,keepPos:c.ts}); }
