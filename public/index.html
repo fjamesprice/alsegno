@@ -111,28 +111,36 @@
   .topbar .brandbtn svg{width:21px;height:21px;display:block}
 
   /* Album progress */
-  .album-prog{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:14px 16px;margin:10px 0 16px;display:flex;align-items:center;gap:14px}
-  .album-prog .lbl{display:flex;justify-content:space-between;font-size:13px;color:var(--muted);margin-bottom:8px}
+  /* Full-width album header: compact — a small square thumbnail next to the label + bar. */
+  .album-prog{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:10px 14px;margin:10px 0 14px;display:flex;align-items:center;gap:12px}
+  .album-prog .lbl{display:flex;justify-content:space-between;font-size:13px;color:var(--muted);margin-bottom:7px}
   .barwrap{height:8px;background:#0a0b0f;border-radius:6px;overflow:hidden}
   .barwrap > i{display:block;height:100%;background:linear-gradient(90deg,var(--accent2),var(--done));border-radius:6px;transition:width .3s}
 
-  /* Track list */
+  /* Track list — the whole row is a click target that opens the track (paused); the grip, ▲▼ arrows and
+     the ▶/⏸ glyph are interactive "islands" that stop the click. One-line title + one-line meta keeps
+     every row the SAME height regardless of how many badges it carries. */
   .tracks{display:flex;flex-direction:column;gap:8px}
-  .track{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:11px 12px;display:flex;align-items:center;gap:11px}
+  .track{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:11px 12px;display:flex;align-items:center;gap:10px;cursor:pointer}
+  .track:hover{border-color:var(--accent2)}
   .track.playing{border-color:var(--accent)}
   .track.dragging{opacity:.4}
   .track.dragover{border-color:var(--accent);border-style:dashed}
-  .handle{color:var(--faint);cursor:grab;font-size:18px;line-height:1;user-select:none;padding:2px}
+  /* grip + reorder arrows + number, kept tight together as one lead cluster */
+  .tlead{display:flex;align-items:center;gap:4px;flex:none}
+  .handle{color:var(--faint);cursor:grab;font-size:18px;line-height:1;user-select:none;padding:0 1px}
   .ord{display:flex;flex-direction:column;gap:2px}
   .ord button{font-size:10px;line-height:1;color:var(--faint);padding:1px 3px}
   .ord button:hover{color:var(--text)}
-  .num{width:22px;text-align:center;color:var(--muted);font-variant-numeric:tabular-nums}
-  .play-btn{width:40px;height:40px;border-radius:50%;background:var(--panel2);border:1px solid var(--line);display:flex;align-items:center;justify-content:center;font-size:15px;flex:none}
-  .play-btn:hover{border-color:var(--accent);color:#fff}
-  .play-btn.on{background:var(--accent2);border-color:var(--accent2);color:#fff}
+  .num{min-width:18px;text-align:center;color:var(--muted);font-variant-numeric:tabular-nums}
+  /* slim play/pause glyph (no circle) — small footprint so the title gets the width */
+  .play-btn{flex:none;width:24px;text-align:center;background:none;border:none;padding:2px;font-size:16px;line-height:1;color:var(--muted);cursor:pointer}
+  .play-btn:hover{color:#fff}
+  .play-btn.on{color:var(--accent)}
+  .play-btn:disabled{opacity:.35;cursor:default}
   .tmid{flex:1;min-width:0}
-  .tname{font-weight:600;display:flex;align-items:center;gap:8px;min-width:0;cursor:pointer}
-  .tname span.nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .tname{font-weight:600;display:flex;align-items:center;gap:8px;min-width:0}
+  .tname span.nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:0 1 auto;min-width:0}
   .badge{font-size:10.5px;font-weight:700;letter-spacing:.4px;padding:2px 6px;border-radius:5px;flex:none}
   .badge.new{background:var(--accent);color:#0b1020}
   .badge.done{background:rgba(58,210,159,.16);color:var(--done)}
@@ -140,15 +148,24 @@
   .badge.rev{background:var(--panel2);color:var(--muted);border:1px solid var(--line)}
   .tmeta{font-size:12px;color:var(--faint);margin-top:2px;display:flex;gap:10px;flex-wrap:wrap}
   .tmeta .cc{cursor:pointer} .tmeta .cc:hover{color:var(--muted)}
-  /* doneness */
-  .done-ctl{display:flex;flex-direction:column;align-items:flex-end;gap:5px;width:160px;flex:none}
-  .done-ctl .dl{font-size:11.5px;color:var(--muted)}
-  .done-ctl input[type=range]{width:150px}
   input[type=range]{-webkit-appearance:none;appearance:none;height:6px;border-radius:5px;background:#0a0b0f;border:none;padding:0}
   input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:15px;height:15px;border-radius:50%;background:var(--accent);border:2px solid #0d0e12;cursor:pointer}
   input[type=range]::-moz-range-thumb{width:15px;height:15px;border-radius:50%;background:var(--accent);border:2px solid #0d0e12;cursor:pointer}
-  .dbar{height:5px;width:150px;background:#0a0b0f;border-radius:4px;overflow:hidden}
-  .dbar>i{display:block;height:100%;background:linear-gradient(90deg,var(--accent2),var(--done))}
+  /* Doneness control — a compact card in the player's side column with a SINGLE bar that both shows
+     the open track's progress and, as a range slider, sets it. Filled portion (up to --fill) = progress. */
+  .done-ctl{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:12px 14px;display:flex;flex-direction:column;gap:9px}
+  .done-ctl .dl-row{display:flex;justify-content:space-between;align-items:baseline;gap:10px}
+  .done-ctl .dl{font-size:12.5px;color:var(--muted)}
+  .done-ctl .dval{color:var(--text);font-variant-numeric:tabular-nums;font-size:14px;font-weight:600}
+  input[type=range].done-slider{-webkit-appearance:none;appearance:none;width:100%;height:12px;border-radius:7px;background:#0a0b0f;cursor:pointer}
+  /* WebKit/Blink: the runnable-track carries the fill (a gradient sized to --fill over the dark base). */
+  input[type=range].done-slider::-webkit-slider-runnable-track{height:12px;border-radius:7px;background:linear-gradient(90deg,var(--accent2),var(--done)) no-repeat,#0a0b0f;background-size:var(--fill,0%) 100%,100% 100%}
+  input[type=range].done-slider::-webkit-slider-thumb{-webkit-appearance:none;width:18px;height:18px;border-radius:50%;background:#fff;border:3px solid var(--accent2);box-shadow:0 1px 4px rgba(0,0,0,.5);cursor:pointer;margin-top:-3px}
+  /* Firefox: native track + auto-filling progress pseudo (no --fill needed there). */
+  input[type=range].done-slider::-moz-range-track{height:12px;border-radius:7px;background:#0a0b0f}
+  input[type=range].done-slider::-moz-range-progress{height:12px;border-radius:7px;background:linear-gradient(90deg,var(--accent2),var(--done))}
+  input[type=range].done-slider::-moz-range-thumb{width:18px;height:18px;border-radius:50%;background:#fff;border:3px solid var(--accent2);box-shadow:0 1px 4px rgba(0,0,0,.5);cursor:pointer}
+  input[type=range].done-slider:disabled{opacity:.5;cursor:not-allowed}
 
   /* Player bar */
   #playerBar{position:fixed;left:0;right:0;bottom:0;z-index:30;background:rgba(18,20,28,.97);backdrop-filter:blur(12px);border-top:1px solid var(--line)}
@@ -332,8 +349,25 @@
     position:sticky;top:12px;max-height:calc(100vh - 24px);overflow:auto}
   .pb-inner.theater #cpanel{margin-top:0}
   /* the note-input box is its own card when lifted out of #cpanel (above it in both audio + theater) */
-  #playerView > .addc, #theaterNotes > .addc{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:14px 16px}
-  #playerView > .addc{margin-top:14px}
+  #playerSide > .addc, #theaterNotes > .addc{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:14px 16px}
+
+  /* AUDIO player view (non-theater): the album progress bar spans the full width at the top; below it
+     the track list sits on the LEFT (~40%) and the open track's doneness + note composer + comments
+     stack on the RIGHT (~60%). The right column (#playerSide) only exists once a track is open —
+     #playerView gets .side-open (see openTrack/stopAll) — so until then the track list is full width.
+     Theater/video projects relocate these into the bar (applyLayout). */
+  #playerView{display:flex;flex-direction:column}
+  #playerCols{display:flex;gap:20px;align-items:flex-start}
+  #playerMain{flex:1 1 auto;min-width:0}
+  #playerSide{display:none;flex:1 1 0;min-width:0;flex-direction:column;gap:14px}
+  #playerView.side-open #playerMain{flex:0 0 40%}
+  #playerView.side-open #playerSide{display:flex}
+  #playerSide > .cpanel{margin-top:0}   /* the column gap already spaces it below the composer */
+  @media(max-width:760px){
+    #playerCols{flex-direction:column;align-items:stretch}
+    #playerView.side-open #playerMain{flex:0 0 auto}
+    #playerSide{flex:0 0 auto}
+  }
   @media(max-width:860px){
     .pb-inner.theater.with-notes{grid-template-columns:1fr;grid-template-areas:"engine" "notes" "tracks"}
     .pb-inner.theater.with-notes.vidwide{grid-template-areas:"video" "engine" "notes" "tracks"}
@@ -352,7 +386,10 @@
   .strack.sel{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
   .strack-h{display:flex;align-items:center;gap:10px;padding:13px 15px;cursor:pointer}
   .strack-h .stitle{font-weight:600;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .strack-body{display:flex;flex-direction:column;gap:12px}
+  .strack-body{display:flex;flex-direction:column;gap:11px}
+  /* Compact top tools row (rename · replace · delete); the rename field is a touch shorter than a default input. */
+  .strack-tools .rn{padding:6px 9px}
+  .btn.vrepl.on{border-color:var(--accent);color:#fff}   /* active while the video-replace uploader is open */
   /* Right column: the selected track's detail card, or a low-contrast "select a track" placeholder. */
   .stdetail{flex:1;min-width:0;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:16px}
   .stdetail.empty{display:flex;align-items:center;justify-content:center;min-height:200px;padding:24px;background:transparent;border-style:dashed}
@@ -369,24 +406,26 @@
   .spin{display:inline-block;width:14px;height:14px;border:2px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:sp .7s linear infinite;vertical-align:-2px}
   @keyframes sp{to{transform:rotate(360deg)}}
 
-  /* Studio: project-settings header — clickable title + "add track" on the left, album-art slot on the right */
-  .stset{display:flex;align-items:center;gap:20px;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:20px 22px}
-  .stset-info{flex:1;min-width:0;display:flex;flex-direction:column;align-items:flex-start;gap:13px}
-  .stset-kind{font-size:11px;text-transform:uppercase;letter-spacing:.9px;color:var(--faint);font-weight:600}
-  .stset-title{display:inline-flex;align-items:center;gap:10px;max-width:100%;margin:-3px -8px;padding:3px 8px;background:none;border:none;border-radius:9px;
-    font-size:26px;font-weight:650;line-height:1.15;letter-spacing:-.2px;color:var(--text);transition:.12s}
+  /* Studio: project-settings header — compact single row. Eyebrow + clickable title on the left; the
+     add-track/video button and (albums only) the art slot on the right; the song→album hint, when shown,
+     wraps to a thin line below (flex-basis:100%). */
+  .stset{display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:11px 16px}
+  .stset-info{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;align-items:flex-start;gap:1px}
+  .stset-kind{font-size:10.5px;text-transform:uppercase;letter-spacing:.9px;color:var(--faint);font-weight:600}
+  .stset-title{display:inline-flex;align-items:center;gap:9px;max-width:100%;margin:-2px -7px;padding:2px 7px;background:none;border:none;border-radius:8px;
+    font-size:19px;font-weight:650;line-height:1.2;letter-spacing:-.2px;color:var(--text);transition:.12s}
   .stset-title > span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .stset-title .pencil{width:17px;height:17px;flex:none;color:var(--faint);opacity:0;transition:.12s}
+  .stset-title .pencil{width:15px;height:15px;flex:none;color:var(--faint);opacity:0;transition:.12s}
   .stset-title:hover{background:var(--panel2);color:#fff}
   .stset-title:hover .pencil{opacity:1;color:var(--accent)}
-  .stset-hint{margin:-4px 0 0}
-  /* Album-art slot: rounded dashed square; shows the art, or a low-alpha generic "no picture" glyph */
-  .stset-art{position:relative;width:104px;height:104px;flex:none;display:flex;align-items:center;justify-content:center;
-    background:var(--panel2);border:2px dashed var(--line);border-radius:16px;overflow:hidden;padding:0;transition:.14s}
+  .stset-hint{flex-basis:100%;margin:1px 0 0}
+  /* Album-art slot: small rounded dashed square; shows the art, or a low-alpha generic "no picture" glyph */
+  .stset-art{position:relative;width:52px;height:52px;flex:none;display:flex;align-items:center;justify-content:center;
+    background:var(--panel2);border:2px dashed var(--line);border-radius:11px;overflow:hidden;padding:0;transition:.14s}
   .stset-art:hover{border-color:var(--accent)}
   .stset-art > img{width:100%;height:100%;object-fit:cover;display:block}
   .stset-art-ph{display:flex;align-items:center;justify-content:center;color:var(--muted);opacity:.22;transition:.14s}
-  .stset-art-ph svg{width:46px;height:46px}
+  .stset-art-ph svg{width:26px;height:26px}
   .stset-art:hover .stset-art-ph{opacity:.42}
 
   /* Projects list */
@@ -402,7 +441,9 @@
   .pcard .barwrap{height:6px;margin-top:5px}
   /* Album art (Phase 6e — albums only): list thumbnail + open-album header image. */
   .pcard .pthumb{width:46px;height:46px;border-radius:8px;object-fit:cover;flex:none;border:1px solid var(--line);background:var(--panel2)}
-  .alb-art{width:64px;height:64px;border-radius:8px;object-fit:cover;flex:none;border:1px solid var(--line);background:var(--panel2)}
+  /* Open-album header thumbnail: small square roughly matching the label + bar height; click → lightbox. */
+  .alb-art{width:40px;height:40px;border-radius:6px;object-fit:cover;flex:none;border:1px solid var(--line);background:var(--panel2);cursor:pointer}
+  .alb-art:hover{border-color:var(--accent2)}
 
   /* Admin tables */
   .utable{display:flex;flex-direction:column;gap:7px}
@@ -465,12 +506,8 @@
   .stempty{padding:18px 12px;text-align:center;color:var(--faint);font-size:13px}
 
   @media(max-width:620px){
-    .done-ctl{width:120px} .done-ctl input[type=range],.dbar{width:110px}
     .track{flex-wrap:wrap} .topbar .title{font-size:14px}
     .pcard .pprog{display:none}
-    /* Track row: drop the doneness control to its own line so the title gets the full width instead
-       of being truncated to a couple characters. */
-    .track .done-ctl{flex-basis:100%;align-items:flex-start;margin-top:2px;width:auto}
     /* HTML5 drag-reorder never fires on touch, so the grip is dead weight that steals title width —
        hide it on mobile (reordering still works via the ▲▼ arrows). */
     .track .handle{display:none}
@@ -516,11 +553,11 @@
     .pb-controls > .nowtitle{order:2}
     .pb-controls > #dlBtn{order:3}
 
-    /* Studio project-settings header: smaller title + art slot so it fits a narrow screen. */
-    .stset{gap:14px;padding:16px 16px}
-    .stset-title{font-size:21px}
-    .stset-art{width:78px;height:78px;border-radius:13px}
-    .stset-art-ph svg{width:34px;height:34px}
+    /* Studio project-settings header: keep it compact on a narrow screen too. */
+    .stset{gap:8px 12px;padding:11px 14px}
+    .stset-title{font-size:18px}
+    .stset-art{width:50px;height:50px;border-radius:11px}
+    .stset-art-ph svg{width:25px;height:25px}
     /* Studio master–detail: stack the columns (list on top, selected-track panel below). */
     .stmain{flex-direction:column}
     #studioTracks{flex:none;width:100%}
@@ -572,22 +609,34 @@
     <div id="noProjects" class="pb-empty hidden">No projects yet.</div>
   </div>
 
-  <!-- PLAYER VIEW.  Audio projects: album progress + track list here, the fixed #playerBar (below)
-       carries the engine, comments sit under the track list.  VIDEO projects in the player view go
-       "theater" (see applyLayout): #albumProg/#trackList/#emptyHint move into #theaterTracks and
-       #cpanel/#vnotePanel into #theaterNotes, inside a restyled (in-flow) #playerBar. -->
+  <!-- PLAYER VIEW.  Audio projects: the album progress bar spans the full width at the top; below it the
+       track list is on the LEFT (#playerMain, ~40%) and the open track's doneness + note composer +
+       comments stack on the RIGHT (#playerSide, ~60%, revealed only once a track is open — see
+       #playerView.side-open).  VIDEO projects in the player view go "theater" (see applyLayout):
+       #albumProg/#trackList/#emptyHint move into #theaterTracks and #doneCtl/#cpanel/#vnotePanel into
+       #theaterNotes, inside a restyled (in-flow) #playerBar. -->
   <div id="playerView">
-    <div class="album-prog" id="albumProg">
-      <img id="albArt" class="alb-art hidden" alt="Album art">
-      <div style="flex:1;min-width:0">
-        <div class="lbl"><span id="apDone">0 / 0 done</span><span id="apAvg">0%</span></div>
-        <div class="barwrap"><i id="apBar" style="width:0%"></i></div>
-      </div>
-    </div>
+   <div class="album-prog" id="albumProg">
+     <img id="albArt" class="alb-art hidden" alt="Album art" title="View album art">
+     <div style="flex:1;min-width:0;align-self:center">
+       <div class="lbl"><span id="apDone">0 / 0 done</span><span id="apAvg">0%</span></div>
+       <div class="barwrap"><i id="apBar" style="width:0%"></i></div>
+     </div>
+   </div>
+   <div id="playerCols">
+   <div id="playerMain">
     <div class="tracks" id="trackList"></div>
     <div id="emptyHint" class="pb-empty hidden">No tracks in this project yet.</div>
+   </div>
+   <div id="playerSide">
+    <!-- Doneness for the OPEN track: ONE bar that both shows progress and, as a slider, sets it.
+         Filled to --fill (set by renderDoneCtl); relocated with the notes by applyLayout. -->
+    <div class="done-ctl hidden" id="doneCtl">
+      <div class="dl-row"><span class="dl" id="doneLbl">Progress</span><b class="dval" id="doneVal">0%</b></div>
+      <input type="range" min="0" max="100" step="5" value="0" id="doneRange" class="done-slider" title="Drag to set how done this piece feels">
+    </div>
 
-    <!-- comments for the open track (audio home: below the track list) -->
+    <!-- comments for the open track -->
     <div class="cpanel hidden" id="cpanel">
       <h3 id="cTitle"><span id="cTitleText">Notes</span><button class="btn ghost sm" id="exportBtn" title="Export timed notes as DAW / editor marker files">⤓ Export</button></h3>
       <div class="clist" id="clist"></div>
@@ -614,6 +663,8 @@
         </div>
       </div>
     </div>
+   </div>
+   </div>
   </div>
 
   <!-- STUDIO VIEW -->
@@ -626,13 +677,13 @@
             <span id="stTitleText">Album title</span>
             <svg class="pencil" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
           </button>
-          <button class="btn primary sm" id="addTrack" type="button">＋ Add track</button>
-          <p class="muted small hidden stset-hint" id="stAddHint">Adding a second track turns this song into an album.</p>
         </div>
+        <button class="btn primary sm" id="addTrack" type="button">＋ Add track</button>
         <button class="stset-art hidden" id="stArtBtn" type="button" title="Manage album art">
           <img id="stArtThumb" alt="Album art" class="hidden">
           <span class="stset-art-ph" id="stArtPh"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2.5"/><circle cx="8.5" cy="8.5" r="1.6"/><path d="M21 15l-5-5L5 21"/></svg></span>
         </button>
+        <p class="muted small hidden stset-hint" id="stAddHint">Adding a second track turns this song into an album.</p>
       </div>
       <div class="stmain">
         <div id="studioTracks" class="stx"></div>
@@ -1135,26 +1186,32 @@ function applyMediaMode(){
 // Arrange the player for the project's media type + current view.  Audio (any view) and
 // video-in-studio keep the fixed bottom #playerBar.  A VIDEO project in the PLAYER view goes
 // "theater": the bar becomes the page (video+controls left, notes right, track list below the
-// controls).  Only light, id-referenced nodes move (#albumProg/#trackList/#emptyHint and
-// #vnotePanel/#cpanel); the engine (#pbActive — video tiers, canvas, transport) never moves, so its
-// listeners + media state are untouched.  Idempotent (guarded by parentNode checks).
+// controls).  Only light, id-referenced nodes move (#albumProg/#trackList/#emptyHint into the left
+// column, #doneCtl/#addc/#cpanel/#vnotePanel into the notes column); the engine (#pbActive — video
+// tiers, canvas, transport) never moves, so its listeners + media state are untouched.  Idempotent
+// (guarded by parentNode checks; the trailing insertBefore calls fix the in-column order).
 function applyLayout(){
   const theater = isVideoProject() && VIEW==='player';
   const bar=$('#playerBar'), inner=bar.querySelector('.pb-inner');
-  const pv=$('#playerView'), pbActive=$('#pbActive'), vn=$('#vnotePanel');
+  const pbActive=$('#pbActive'), vn=$('#vnotePanel');
   if(theater){
     bar.classList.add('theater'); inner.classList.add('theater');
     const tt=$('#theaterTracks'), tn=$('#theaterNotes');
     [$('#albumProg'),$('#trackList'),$('#emptyHint')].forEach(el=>{ if(el.parentNode!==tt) tt.appendChild(el); });
     vn.classList.remove('bar'); vn.classList.add('panel');
-    [vn,$('#cpanel')].forEach(el=>{ if(el.parentNode!==tn) tn.appendChild(el); });
+    [vn,$('#doneCtl'),$('#addc'),$('#cpanel')].forEach(el=>{ if(el.parentNode!==tn) tn.appendChild(el); });
     tn.insertBefore($('#addc'), $('#cpanel'));   // note-input box sits between version notes and the comments
+    tn.insertBefore($('#doneCtl'), tn.firstChild);   // doneness at the very top of the notes column
   } else {
     bar.classList.remove('theater'); inner.classList.remove('theater');
     vn.classList.remove('panel'); vn.classList.add('bar');
-    [$('#albumProg'),$('#trackList'),$('#emptyHint'),$('#cpanel')].forEach(el=>{ if(el.parentNode!==pv) pv.appendChild(el); });
+    const pv=$('#playerView'), cols=$('#playerCols'), main=$('#playerMain'), side=$('#playerSide');
+    if($('#albumProg').parentNode!==pv) pv.insertBefore($('#albumProg'), cols);   // full-width header above the columns
+    [$('#trackList'),$('#emptyHint')].forEach(el=>{ if(el.parentNode!==main) main.appendChild(el); });
+    [$('#doneCtl'),$('#addc'),$('#cpanel')].forEach(el=>{ if(el.parentNode!==side) side.appendChild(el); });
     if(vn.parentNode!==pbActive) pbActive.appendChild(vn);
-    pv.insertBefore($('#addc'), $('#cpanel'));   // note-input box sits above the comments panel
+    side.insertBefore($('#addc'), $('#cpanel'));    // note-input box above the comments panel
+    side.insertBefore($('#doneCtl'), $('#addc'));   // doneness at the top of the side column
   }
   inner.classList.toggle('with-notes', !$('#cpanel').classList.contains('hidden'));   // notes column shows only while a track is open
   applyVidWide();
@@ -1497,6 +1554,7 @@ function render(fromEvent){
 
   const list=$('#trackList'); list.innerHTML='';
   TRACKS.forEach((t,i)=>list.appendChild(trackRow(t,i)));
+  renderDoneCtl();   // the open track's doneness lives in the side column now, not per-row
   // keep player selectors in sync if current track changed
   if(curTrackId){ const t=TRACKS.find(x=>x.id===curTrackId);
     if(!t){ if(!fromEvent) stopAll(); }            // event-driven vanish: leave playback alone (invariant); it self-heals
@@ -1506,55 +1564,46 @@ function render(fromEvent){
 function trackRow(t,i){
   const isSong = PROJECT && PROJECT.type==='song';
   const li=document.createElement('div');
-  li.className='track'+(t.id===curTrackId?' playing':'');
+  // Highlight the OPEN track (whose notes/progress fill the side pane), not the loaded-audio track —
+  // a track with no revision yet opens its panel without ever becoming curTrackId. Gate on the panel
+  // actually being shown so the highlight clears when the panel closes (stopAll hides #cpanel).
+  const panelOpen = !$('#cpanel').classList.contains('hidden');
+  li.className='track'+((panelOpen && t.id===panelTrackId)?' playing':'');
   li.dataset.id=t.id;
   const latest=t.revisions[t.revisions.length-1];
   const isPlayingThis=t.id===curTrackId && !audio.paused;
   const doneBadge = t.doneness>=100
-    ? `<span class="badge done"><svg class="bl" viewBox="0 0 12 16" aria-hidden="true"><rect x="2" y="1.5" width="1.6" height="13" fill="currentColor"/><rect x="6" y="1.5" width="3.4" height="13" rx=".4" fill="currentColor"/></svg> DONE${t.done_revision_id?` · r${(t.revisions.find(r=>r.id===t.done_revision_id)||{}).rev_number||''}`:''}</span>` : '';
+    ? `<span class="badge done"><svg class="bl" viewBox="0 0 12 16" aria-hidden="true"><rect x="2" y="1.5" width="1.6" height="13" fill="currentColor"/><rect x="6" y="1.5" width="3.4" height="13" rx=".4" fill="currentColor"/></svg> DONE</span>` : '';   // the adjacent "N revs" badge already conveys revision count
   const newBadge = (ME.role==='client' && t.unseen && t.id!==curTrackId) ? '<span class="badge new">NEW</span>' : '';
   const nRev = mixRevCount(t);
   const revBadge = latest ? `<span class="badge rev">${nRev} rev${nRev!==1?'s':''}</span>`:'<span class="badge rev">no audio</span>';
-  const doneLabel = ME.role==='client'?'Your':'Client';   // a reviewer sees "Your"; engineers/admin see "Client"
-  // The slider is shared "doneness". The client sets it ("you"); engineers/admin read the client's value.
-  const doneTip = ME.role==='client'?'How done you feel this is':'How done the client feels this is';
+  // Doneness moved out of the row into the side column's #doneCtl (renderDoneCtl) — the row keeps only
+  // the "DONE" badge as an at-a-glance signal; open a track to see/set its progress.
   li.innerHTML=`
-    ${isSong?'':'<span class="handle" title="Drag to reorder">⋮⋮</span><span class="ord"><button class="up" title="Move up">▲</button><button class="dn" title="Move down">▼</button></span>'}
-    <span class="num">${isSong && !isVideoProject() ? '♪' : i+1}</span>
-    <button class="play-btn ${isPlayingThis?'on':''}" ${latest?'':'disabled'}>${isPlayingThis?'⏸':'▶'}</button>
+    <span class="tlead">
+      ${isSong?'':'<span class="handle" title="Drag to reorder">⋮⋮</span><span class="ord"><button class="up" title="Move up">▲</button><button class="dn" title="Move down">▼</button></span>'}
+      <span class="num">${isSong && !isVideoProject() ? '♪' : i+1}</span>
+    </span>
+    <button class="play-btn ${isPlayingThis?'on':''}" ${latest?'':'disabled'} title="${isPlayingThis?'Pause':'Play'}">${isPlayingThis?'⏸':'▶'}</button>
     <div class="tmid">
       <div class="tname"><span class="nm">${esc(t.title)}</span>${newBadge}${doneBadge}${revBadge}</div>
       <div class="tmeta">
         ${latest?`<span>${fmt(latest.duration)}</span>`:''}
         <span class="cc">💬 ${t.comment_count}${t.open_comment_count?` <span class="open-note">(${t.open_comment_count} open)</span>`:''}</span>
       </div>
-    </div>
-    <div class="done-ctl">
-      <span class="dl" title="${doneTip}">${doneLabel} progress · <b class="dval">${t.doneness}%</b></span>
-      <input type="range" min="0" max="100" step="5" value="${t.doneness}" ${latest?'':'disabled'}>
-      <div class="dbar"><i style="width:${t.doneness}%"></i></div>
     </div>`;
 
+  // Whole row opens the track (paused); the ▶/⏸ glyph plays; grip + arrows stop the click (drag/reorder).
+  const openNoPlay=e=>{e.stopPropagation(); if(latest) loadTrack(t.id, latest.id,{play:false}); else openTrack(t.id);};
+  li.addEventListener('click', openNoPlay);
   li.querySelector('.play-btn').addEventListener('click',e=>{e.stopPropagation(); if(!latest)return;
     if(t.id===curTrackId){ togglePlay(); } else { loadTrack(t.id, latest.id, {play:true}); } });
-  // Open the track without playing (load the latest rev paused, or just open its notes if no audio).
-  const openNoPlay=e=>{e.stopPropagation(); if(latest) loadTrack(t.id, latest.id,{play:false}); else openTrack(t.id);};
-  li.querySelector('.cc').addEventListener('click',openNoPlay);
-  li.querySelector('.tname').addEventListener('click',openNoPlay);
   if(!isSong){   // ordering affordances exist only for albums
+    li.querySelector('.handle').addEventListener('click',e=>e.stopPropagation());   // grip is for dragging, not opening
     li.querySelector('.up').addEventListener('click',e=>{e.stopPropagation(); move(i,-1);});
     li.querySelector('.dn').addEventListener('click',e=>{e.stopPropagation(); move(i,1);});
     setupDrag(li);
   }
-
-  const rng=li.querySelector('input[type=range]'), dval=li.querySelector('.dval'), dbar=li.querySelector('.dbar>i');
-  rng.addEventListener('input',()=>{ dval.textContent=rng.value+'%'; dbar.style.width=rng.value+'%'; });
-  // Mark the drag in-flight so a remote SSE re-render doesn't rip the slider out mid-drag (finding):
-  // the rebuild would destroy this element before 'change' fires, dropping the user's value.
-  rng.addEventListener('pointerdown',()=>{ doneDragging=true; });
-  const endDrag=()=>{ doneDragging=false; };
-  rng.addEventListener('pointerup',endDrag); rng.addEventListener('pointercancel',endDrag); rng.addEventListener('blur',endDrag);
-  rng.addEventListener('change',()=>{ doneDragging=false; setDoneness(t,parseInt(rng.value,10)); });
 
   return li;
 }
@@ -1594,6 +1643,37 @@ async function setDoneness(t,val){
   try{ const r=await api(`tracks/${t.id}/doneness`,{method:'PUT',body}); t.done_revision_id=r.done_revision_id; render(); }
   catch(e){ t.doneness=prev; render(); toast(e.message,true); }   // server rejected → restore the real value (drives the album progress bar)
 }
+
+// The single doneness control at the top of the side column reflects/sets the OPEN track (panelTrackId).
+// One <input type=range> whose filled portion (via --fill / ::-moz-range-progress) IS the progress bar.
+// It's a persistent element wired once (wireDoneCtl); this only refreshes its label/value/fill/disabled.
+function renderDoneCtl(){
+  const dc=$('#doneCtl'), rng=$('#doneRange'); if(!dc||!rng) return;
+  const t=trackById(panelTrackId);
+  if(!t){ dc.classList.add('hidden'); return; }
+  const isClient = ME && ME.role==='client';   // a reviewer sets it ("Your"); engineers/admin read the client's value
+  const lbl=$('#doneLbl');
+  lbl.textContent = (isClient?'Your':'Client')+' progress';
+  lbl.title = isClient?'How done you feel this is':'How done the client feels this is';
+  rng.disabled = !t.revisions.length;   // nothing to review yet → read-only
+  if(!doneDragging){   // don't fight the user's own in-flight drag (SSE/local re-renders can land mid-drag)
+    rng.value=t.doneness;
+    rng.style.setProperty('--fill', t.doneness+'%');
+    $('#doneVal').textContent=t.doneness+'%';
+  }
+}
+// Wire the persistent slider once: live fill/value on input, commit to the open track on change. The
+// doneDragging guard defers SSE re-renders (mirrors the old per-row behaviour) so a remote change can't
+// yank the value mid-drag.
+(function wireDoneCtl(){
+  const rng=$('#doneRange'); if(!rng) return;
+  const paint=v=>{ rng.style.setProperty('--fill', v+'%'); $('#doneVal').textContent=v+'%'; };
+  rng.addEventListener('input',()=>paint(rng.value));
+  rng.addEventListener('pointerdown',()=>{ doneDragging=true; });
+  const endDrag=()=>{ doneDragging=false; };
+  rng.addEventListener('pointerup',endDrag); rng.addEventListener('pointercancel',endDrag); rng.addEventListener('blur',endDrag);
+  rng.addEventListener('change',()=>{ doneDragging=false; const t=trackById(panelTrackId); if(t) setDoneness(t,parseInt(rng.value,10)); });
+})();
 
 // ───────── player engine ─────────
 function trackById(id){ return TRACKS.find(t=>t.id===id); }
@@ -1697,7 +1777,7 @@ function togglePlay(){
   if(crossing){ pendingPause=true; $('#playBtn').textContent='▶'; return; }
   if(audio.paused){ audio.volume=userVol; audio.play().catch(()=>{}); } else audio.pause();
 }
-function stopAll(){ players.forEach(p=>{try{p.pause()}catch{}}); stopNull(); curTrackId=null; curRevId=null; dragSeek=null; stepT=null; scrubEl=null; $('#pbActive').classList.add('hidden'); $('#cpanel').classList.add('hidden'); $('#addc').classList.add('hidden'); $('#vnotePanel').classList.add('hidden'); $('.pb-inner').classList.remove('with-notes'); applyVidWide(); updateBarVis(); updateStage(); render(); }
+function stopAll(){ players.forEach(p=>{try{p.pause()}catch{}}); stopNull(); curTrackId=null; curRevId=null; dragSeek=null; stepT=null; scrubEl=null; $('#pbActive').classList.add('hidden'); $('#cpanel').classList.add('hidden'); $('#addc').classList.add('hidden'); $('#doneCtl').classList.add('hidden'); $('#playerView').classList.remove('side-open'); $('#vnotePanel').classList.add('hidden'); $('.pb-inner').classList.remove('with-notes'); applyVidWide(); updateBarVis(); updateStage(); render(); }
 
 $('#playBtn').addEventListener('click',togglePlay);
 $('#prevBtn').addEventListener('click',()=>step(-1));
@@ -2191,7 +2271,12 @@ async function openTrack(trackId, fromPlayer){
   panelTrackId=trackId;
   $('#cpanel').classList.remove('hidden');
   $('#addc').classList.remove('hidden');          // show the note-input box (it lives above #cpanel)
+  $('#doneCtl').classList.remove('hidden');       // and the open track's doneness control (top of the side column)
+  $('#playerView').classList.add('side-open');    // audio: split into track list (left) + notes column (right)
   $('.pb-inner').classList.add('with-notes');   // theater: reveal the notes column now a track is open
+  // Move the selection highlight now — a no-revision track opens without a list re-render (no loadTrack).
+  $$('.track').forEach(el=>el.classList.toggle('playing', +el.dataset.id===trackId));
+  renderDoneCtl();                                // reflect this track's progress in the side control
   applyVidWide();                                 // notes column now present → reveal the "Wide" button (and honor wide mode)
   if(curRevId) drawWave();                        // the engine column width changed → re-layout the canvas
   $('#cTitleText').textContent='Notes — '+t.title;
@@ -2472,7 +2557,10 @@ async function refreshCounts(){ // light refresh of badges
 $('#cSend').addEventListener('click',sendComment);
 $('#cInput').addEventListener('keydown',e=>{ if((e.metaKey||e.ctrlKey)&&e.key==='Enter') sendComment(); });
 // Optional range end for a pinned note — the "to __" box lives behind the Pin checkbox.
-$('#cPin').addEventListener('change',()=>{ const on=$('#cPin').checked; $('#cRangeWrap').classList.toggle('hidden',!on); if(!on){ $('#cPinEnd').value=''; setPinStartLock(false); } });
+// The optional range end lives behind the Pin checkbox; clear it when unpinning. The START lock is
+// independent of this checkbox — a ⌖-stamped (or typed) start must survive an uncheck/re-check, so it's
+// released only by ⌖ again or the post-send reset, NOT here. (An unpinned note ignores the start anyway.)
+$('#cPin').addEventListener('change',()=>{ const on=$('#cPin').checked; $('#cRangeWrap').classList.toggle('hidden',!on); if(!on){ $('#cPinEnd').value=''; } });
 $('#cPinEndNow').addEventListener('click',()=>{ $('#cPinEnd').value=fmtTsEdit(nullOn?nullTime():audio.currentTime); });
 // Pin START: the field mirrors the playhead until it locks. Locking happens two ways — ⌖ stamps the
 // exact playhead (full precision kept in pinStartVal, not the displayed string) and freezes it, or
@@ -2533,14 +2621,16 @@ async function sendComment(){
   finally{ sendComment._busy=false; }
 }
 // ───────── picture lightbox ─────────
-let lbImgs=[], lbIdx=0;
-function openLightbox(names, idx){
+// Reused for note attachments (api/cimg/…) and the open-album art (api/art/…) — the prefix picks the source.
+let lbImgs=[], lbIdx=0, lbPrefix='api/cimg/';
+function openLightbox(names, idx, prefix){
   if(!names || !names.length) return;
+  lbPrefix = prefix || 'api/cimg/';
   lbImgs=names; lbIdx=Math.max(0, Math.min(idx|0, names.length-1));
   showLbImg(); $('#imgModal').classList.remove('hidden');
 }
 function showLbImg(){
-  $('#lbImg').src='api/cimg/'+lbImgs[lbIdx];
+  $('#lbImg').src=lbPrefix+lbImgs[lbIdx];
   $('#lbCount').textContent = lbImgs.length>1 ? (lbIdx+1)+' / '+lbImgs.length : '';
   $('#lbPrev').classList.toggle('hidden', lbIdx<=0);                  // hide the arrow that makes no sense
   $('#lbNext').classList.toggle('hidden', lbIdx>=lbImgs.length-1);
@@ -2563,6 +2653,8 @@ $('#clist').addEventListener('click',e=>{
   const c=comments.find(x=>x.id===Number(img.dataset.cid)); if(!c||!c.attachments) return;
   openLightbox(c.attachments, Number(img.dataset.idx));
 });
+// Click the album header art → full-size in the (page-dimming) lightbox; click outside / Esc closes it.
+$('#albArt').addEventListener('click',()=>{ if(PROJECT && PROJECT.art_stored_name) openLightbox([PROJECT.art_stored_name], 0, 'api/art/'); });
 
 async function markSeen(t,revId){
   if(ME.role!=='client')return; // seen-tracking drives clients' "NEW" badges only
@@ -2680,7 +2772,7 @@ function renderStudio(){
   // Settings header: kind eyebrow + clickable title + add-track button. A video project is never an
   // album — it just holds one or more videos, so no album art and no song→album promotion hint, and
   // the button adds videos rather than tracks.
-  $('#stKindLabel').textContent = isVid ? 'Project' : (isSong ? 'Song' : 'Album');
+  $('#stKindLabel').textContent = isVid ? 'Video project' : (isSong ? 'Song' : 'Album');
   $('#stTitleText').textContent = PROJECT.title;
   $('#addTrack').textContent    = isVid ? '＋ Add video' : '＋ Add track';
   $('#stAddHint').classList.toggle('hidden', !isSong || isVid);
@@ -2730,10 +2822,12 @@ function buildStudioBody(el,t){
   // engineer/admin-only controls below (uploads, replace audio, notes editing, delete) are hidden —
   // matched by the server guards so a client never sees a button that would 403.
   const manage=canManage();
-  // rename / delete
-  const tools=document.createElement('div'); tools.className='row'; tools.style.flexWrap='wrap';
-  tools.innerHTML=`<input class="rn" value="${esc(t.title)}" style="flex:1;min-width:160px">
+  // rename / delete (+ the video "Replace" toggle, which reveals the collapsed video uploader below)
+  const canReplaceVid = manage && isVideoProject() && t.has_video && !t.video_processing;
+  const tools=document.createElement('div'); tools.className='row strack-tools'; tools.style.flexWrap='wrap';
+  tools.innerHTML=`<input class="rn" value="${esc(t.title)}" style="flex:1;min-width:140px">
     <button class="btn sm rnsave">Rename</button>
+    ${canReplaceVid?'<button class="btn sm vrepl">↻ Replace</button>':''}
     ${manage?`<button class="btn sm danger tdel" style="margin-left:auto">Delete ${isVideoProject()?'video':'track'}</button>`:''}`;
   tools.querySelector('.rnsave').addEventListener('click',async()=>{ const v=tools.querySelector('.rn').value.trim(); if(!v)return;
     try{ await api('tracks/'+t.id,{method:'PUT',body:{title:v}}); await reload(); toast('Renamed'); }catch(e){ toast(e.message,true); } });
@@ -2765,11 +2859,20 @@ function buildStudioBody(el,t){
         ? `<div class="small" style="margin-bottom:6px">Current: <b>${esc(t.video_original_name||'video')}</b> · ${t.video_width||'?'}×${t.video_height||'?'}${t.video_fps?' · '+t.video_fps+' fps':''} · ${fmt(t.video_duration||0)}
              <a class="btn sm" style="margin-left:8px" href="api/audio/${t.video_stored_name}?dl=1">⬇ Download</a></div>`
         : `<div class="small faint" style="margin-bottom:6px">No video yet — upload the picture. Its own audio becomes the “Original audio” revision; then upload mixes below.</div>`;
+      // When a video already exists, collapse this whole uploader — the "↻ Replace" button in the tools
+      // row toggles it open. When there's no video yet, it stays visible as the upload prompt.
+      if(t.has_video) vsec.classList.add('hidden');
       vsec.innerHTML=`<div class="field"><label>${t.has_video?'Replace video (the picture)':'Upload video (the picture)'} — ${KEEP_LOSSLESS?'original kept for download; ':''}an H.264 MP4 preview + 480p proxy are generated${t.has_video?'. Your audio mixes are kept.':''}</label>
           ${cur}<input type="file" class="vfile" accept="${videoAccept}"></div>
         ${keepBox}
-        <div class="row"><button class="btn primary vup">${t.has_video?'Replace video':'Upload video'}</button><span class="vstat faint small"></span></div>`;
+        <div class="row"><button class="btn primary vup">${t.has_video?'Upload replacement':'Upload video'}</button>
+          ${t.has_video?'<button class="btn sm ghost vcancel">Cancel</button>':''}
+          <span class="vstat faint small"></span></div>`;
       const vfile=vsec.querySelector('.vfile'), vstat=vsec.querySelector('.vstat'), vbtn=vsec.querySelector('.vup');
+      // Reveal from the tools-row "↻ Replace"; Cancel collapses it again.
+      const vreplBtn=tools.querySelector('.vrepl'), vcancelBtn=vsec.querySelector('.vcancel');
+      if(vreplBtn) vreplBtn.addEventListener('click',()=>{ vsec.classList.toggle('hidden'); vreplBtn.classList.toggle('on', !vsec.classList.contains('hidden')); if(!vsec.classList.contains('hidden')) vfile.focus(); });
+      if(vcancelBtn) vcancelBtn.addEventListener('click',()=>{ vsec.classList.add('hidden'); vreplBtn?.classList.remove('on'); vfile.value=''; vstat.textContent=''; });
       vbtn.addEventListener('click',async()=>{
         if(!vfile.files[0]){ toast('Choose a video file',true); return; }
         const fd=new FormData(); fd.append('file',vfile.files[0]);
