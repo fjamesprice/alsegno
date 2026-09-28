@@ -110,6 +110,38 @@
   .topbar .brandbtn:hover{background:var(--panel2)}
   .topbar .brandbtn svg{width:21px;height:21px;display:block}
 
+  /* Notification bell (left of the username) + its dropdown. The badge counts rows since the bell was last opened. */
+  .notif{position:relative;flex:none}
+  .bellbtn{position:relative;display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;padding:0;border-radius:8px;color:var(--muted)}
+  .bellbtn:hover,.bellbtn[aria-expanded="true"]{color:var(--text);background:var(--panel2)}
+  .bellbtn svg{width:19px;height:19px;display:block}
+  .nbadge{position:absolute;top:1px;right:0;min-width:16px;height:16px;padding:0 4px;border-radius:8px;background:var(--warn);color:#1a1405;
+    font-size:10px;font-weight:700;line-height:16px;text-align:center;font-variant-numeric:tabular-nums;box-shadow:0 0 0 2px var(--bg);pointer-events:none}
+  .notif-menu{position:absolute;top:calc(100% + 10px);right:-6px;width:360px;max-width:calc(100vw - 24px);background:var(--panel);border:1px solid var(--line);
+    border-radius:12px;box-shadow:0 14px 36px rgba(0,0,0,.55);z-index:26;overflow:hidden}
+  .nm-head{padding:11px 14px;border-bottom:1px solid var(--line);font-size:13px;font-weight:600}
+  .nm-list{max-height:min(62vh,460px);overflow-y:auto}
+  .nm-empty{padding:22px 14px;text-align:center;color:var(--faint);font-size:13px}
+  .nm-all{display:block;width:100%;padding:10px 14px;text-align:center;font-size:13px;color:var(--accent);border-top:1px solid var(--line)}
+  .nm-all:hover{background:var(--panel2)}
+  .nitem{display:flex;align-items:flex-start;gap:10px;width:100%;text-align:left;padding:10px 14px;border-bottom:1px solid var(--line)}
+  .nitem:last-child{border-bottom:none}
+  .nitem:hover{background:var(--panel2)}
+  .nitem.unread{background:rgba(227,179,65,.07)}
+  .nitem.unread:hover{background:rgba(227,179,65,.12)}
+  .nico{flex:none;width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:var(--panel2);color:var(--muted)}
+  .nico svg{width:15px;height:15px;display:block}
+  .nico.k-upload,.nico.k-replace{color:var(--accent)} .nico.k-video{color:#c39bff} .nico.k-done{color:var(--done)}
+  .ntext{flex:1;min-width:0;font-size:13px;line-height:1.4;color:var(--muted)}
+  .ntext b{color:var(--text);font-weight:600}
+  .nsnip{margin-top:2px;color:var(--text);overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;word-break:break-word}
+  .nsub{display:block;margin-top:3px;font-size:11.5px;color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .ndot{flex:none;width:7px;height:7px;border-radius:50%;background:var(--warn);margin-top:10px}
+  .nfull{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden}
+  /* A notification click lands on its note / doneness control and briefly flashes it. */
+  @keyframes nflash{0%,35%{box-shadow:0 0 0 2px var(--warn);background:rgba(227,179,65,.16)}100%{box-shadow:0 0 0 2px transparent}}
+  .nflash{animation:nflash 2.4s ease-out}
+
   /* Album progress */
   /* Full-width album header: compact — a small square thumbnail next to the label + bar. */
   .album-prog{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:10px 14px;margin:10px 0 14px;display:flex;align-items:center;gap:12px}
@@ -527,6 +559,9 @@
     #logoutBtn{display:none}
     .nav .navx-logout{display:block;color:var(--muted);border-top:1px solid var(--line);margin-top:4px;padding-top:11px}
     .who #whoName{max-width:120px}
+    /* The bell dropdown spans the bar (anchored to the sticky topbar, like the hamburger menu). */
+    .notif{position:static}
+    .notif-menu{top:calc(100% - 1px);left:2px;right:2px;width:auto;max-width:none}
 
     /* Notes: stack each note vertically so the body text gets its own FULL-width line under the
        timestamp chip — instead of being squeezed into a narrow column beside it, which broke the text
@@ -596,6 +631,17 @@
     <button type="button" class="brandbtn" id="aboutBtn" aria-haspopup="dialog" title="About alsegno" aria-label="About alsegno"><svg viewBox="0 0 64 64" aria-hidden="true"><path d="M41 21C41 15 23 15 23 24C23 31 41 33 41 40C41 49 23 49 23 42" fill="none" stroke="currentColor" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M18 46L46 18" fill="none" stroke="currentColor" stroke-width="5.5" stroke-linecap="round"/><circle cx="18" cy="29" r="3" fill="currentColor"/><circle cx="46" cy="35" r="3" fill="currentColor"/></svg></button>
     <div class="title" id="albumTitle">Projects</div>
     <div class="nav" id="nav"></div>
+    <div class="notif" id="notifWrap">
+      <button type="button" class="bellbtn" id="bellBtn" aria-haspopup="true" aria-expanded="false" aria-controls="notifMenu" title="Notifications" aria-label="Notifications">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+        <span class="nbadge hidden" id="bellBadge"></span>
+      </button>
+      <div class="notif-menu hidden" id="notifMenu">
+        <div class="nm-head">Notifications</div>
+        <div class="nm-list" id="notifList"></div>
+        <button type="button" class="nm-all" id="notifAll">See all notifications →</button>
+      </div>
+    </div>
     <button type="button" class="who" id="who" aria-haspopup="dialog" title="Account settings">
       <span id="whoName"></span></button>
     <button class="btn ghost sm" id="logoutBtn">Sign out</button>
@@ -692,6 +738,17 @@
         <div id="studioTracks" class="stx"></div>
         <div id="studioDetail" class="stdetail empty"></div>
       </div>
+    </div>
+  </div>
+
+  <!-- NOTIFICATIONS VIEW (everyone) — the full recent feed, opened from the bell dropdown -->
+  <div id="notificationsView" class="hidden">
+    <div class="row" style="margin:8px 0 14px">
+      <h2 style="font-size:17px;margin:0;flex:1">Notifications</h2>
+    </div>
+    <div class="nfull" id="notifPage"></div>
+    <div class="row hidden" id="notifMoreRow" style="justify-content:center;margin-top:14px">
+      <button type="button" class="btn sm" id="notifMore">Load more</button>
     </div>
   </div>
 
@@ -1102,7 +1159,7 @@ async function api(path, opts={}){
 function toast(msg,isErr){ const t=$('#toast'); t.textContent=msg; t.className='toast show'+(isErr?' err':''); clearTimeout(t._t); t._t=setTimeout(()=>t.className='toast',2600); }
 
 // ───────── auth / boot ─────────
-function showLogin(){ disconnectEvents(); $('#loginView').classList.remove('hidden'); $('#mainView').classList.add('hidden'); $('#playerBar').classList.add('hidden'); $('#barReopen').classList.add('hidden');
+function showLogin(){ disconnectEvents(); closeNotifMenu(); NOTIF_UNREAD=0; paintBell(); $('#loginView').classList.remove('hidden'); $('#mainView').classList.add('hidden'); $('#playerBar').classList.add('hidden'); $('#barReopen').classList.add('hidden');
   $('#loginHint').classList.toggle('hidden', !INVITE); }   // TOFU hint only for a new account arriving via a valid invite link
 // One-time invite link. Build it from window.location (origin+pathname → relative + subpath-safe),
 // token in the URL hash — the browser never sends the fragment to the server, and we resolve it via
@@ -1450,6 +1507,7 @@ async function boot(){
   $('#newProjectBtn').classList.toggle('hidden', ME.role!=='admin');
   applyNullVis();
   connectEvents(); // open the realtime stream once we're authenticated (before any early return below)
+  refreshNotifs(); // bell badge
   // Jump straight back into the last-opened project (the server already re-verified access on the
   // bootstrap echo); any failure (e.g. access revoked mid-flight) just drops to the project list.
   const last=data.last_project_id;
@@ -1513,16 +1571,17 @@ function setView(v){
   if((v==='player'||v==='studio') && !PROJECT) v='projects';   // Studio is open to any project member; engineer-only controls hide inside it
   if((v==='admin'||v==='settings') && (!ME||ME.role!=='admin')) v='projects';
   VIEW=v;
-  ['projects','player','studio','admin','settings'].forEach(n=>{ const el=$('#'+n+'View'); if(el) el.classList.toggle('hidden', n!==v); });
+  ['projects','player','studio','admin','settings','notifications'].forEach(n=>{ const el=$('#'+n+'View'); if(el) el.classList.toggle('hidden', n!==v); });
   applyLayout();      // theater (video+player) vs fixed bottom bar (audio / video-in-studio)
   updateBarVis();     // show the bar only when there's a track / theater to display
-  $('#albumTitle').textContent = v==='projects'?'Projects' : v==='admin'?'Admin' : v==='settings'?'Settings' : ALBUM;
+  $('#albumTitle').textContent = v==='projects'?'Projects' : v==='admin'?'Admin' : v==='settings'?'Settings' : v==='notifications'?'Notifications' : ALBUM;
   document.title = (v==='player'||v==='studio') ? ALBUM : 'alsegno';
   renderNav();
   if(v==='projects') loadProjects();
   if(v==='studio') renderStudio();
   if(v==='admin') renderAdmin();
   if(v==='settings') renderSettings();
+  if(v==='notifications') renderNotifPage();
   syncBottomPad();   // the player bar shows/hides with the view → re-measure the content clearance
 }
 $('#nav').addEventListener('click',e=>{ const b=e.target.closest('button'); if(!b) return;
@@ -1530,7 +1589,7 @@ $('#nav').addEventListener('click',e=>{ const b=e.target.closest('button'); if(!
   if(b.dataset.view){ setView(b.dataset.view); closeNavMenu(); } });
 // Mobile hamburger: the nav is a dropdown (CSS) toggled here; close on outside tap, Escape, or select.
 function closeNavMenu(){ $('#nav').classList.remove('open'); const t=$('#navBurger'); if(t) t.setAttribute('aria-expanded','false'); }
-$('#navBurger').addEventListener('click',e=>{ e.stopPropagation(); const open=$('#nav').classList.toggle('open'); $('#navBurger').setAttribute('aria-expanded', open?'true':'false'); });
+$('#navBurger').addEventListener('click',e=>{ e.stopPropagation(); closeNotifMenu(); const open=$('#nav').classList.toggle('open'); $('#navBurger').setAttribute('aria-expanded', open?'true':'false'); });
 document.addEventListener('click',e=>{ if($('#nav').classList.contains('open') && !e.target.closest('#nav') && !e.target.closest('#navBurger')) closeNavMenu(); });
 document.addEventListener('keydown',e=>{ if(e.key==='Escape') closeNavMenu(); });
 
@@ -2264,6 +2323,7 @@ async function fetchCommentsInto(trackId){
 }
 async function openTrack(trackId, fromPlayer){
   const t=trackById(trackId); if(!t)return;
+  if(focusNote && focusNote.trackId!==trackId) focusNote=null;   // a notification's target note lives on another track
   if(panelTrackId!==trackId){
     // Switching tracks: drop composer state so staged images can't bleed onto another track. A
     // SAME-track re-open (A/B swap, pin click, rev switch) must keep in-progress drafts + images.
@@ -2502,8 +2562,8 @@ function renderComments(){
   [...notes].reverse().forEach(note=>{
     const thread=document.createElement('div');
     thread.className='thread'+(note.resolved?' resolved':'');
-    thread.appendChild(buildRow(note,false));
-    (repliesByParent[note.id]||[]).forEach(rep=>thread.appendChild(buildRow(rep,true)));
+    const noteRow=buildRow(note,false); noteRow.dataset.cid=note.id; thread.appendChild(noteRow);
+    (repliesByParent[note.id]||[]).forEach(rep=>{ const r=buildRow(rep,true); r.dataset.cid=rep.id; thread.appendChild(r); });
     if(replyingId===note.id){
       const ed=document.createElement('div'); ed.className='creply';
       ed.innerHTML=`<textarea class="creply-ta" data-pid="${note.id}" rows="2" placeholder="Reply…"></textarea>
@@ -2549,6 +2609,11 @@ function renderComments(){
   if(toFocus){ toFocus.focus();
     if(caret) toFocus.setSelectionRange(caret[0],caret[1]);
     else if(toFocus.classList.contains('cedit-ta')) toFocus.setSelectionRange(toFocus.value.length, toFocus.value.length); }
+  // Arrived from a notification: scroll to that note/reply and flash it (once — then it's consumed).
+  if(focusNote && focusNote.trackId===panelTrackId){
+    const el=box.querySelector('.cmt[data-cid="'+focusNote.cid+'"]');
+    if(el){ focusNote=null; flashEl(el,'center'); }
+  }
 }
 async function refreshCounts(){ // light refresh of badges
   const t=trackById(panelTrackId); if(!t)return;
@@ -3366,6 +3431,159 @@ $('#acPassSave').addEventListener('click',changePassword);
 $('#acDisplay').addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); saveDisplayName(); } });
 ['#acCur','#acNew','#acNew2'].forEach(sel=>$(sel).addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); changePassword(); } }));
 
+// ───────── notifications (bell) ─────────
+// The server decides WHAT each user sees (only their assigned projects; clients: new uploads + replies in
+// threads they're part of; engineers/admins: client notes + client DONE marks). Here: the badge (count
+// since the bell was last opened), the 10-item dropdown, the full page, and click-to-navigate. Opening
+// the bell (or the page) marks the feed checked — the list itself is kept.
+let NOTIF_UNREAD=0;
+const notifById=new Map();              // id → item, for the delegated click handlers
+let menuSeq=0, pageSeq=0;               // generation tokens: a slow fetch can't overwrite a newer render
+let menuHiAbove=null, pageHiAbove=null; // rows with id > this render as "new" (captured when the list was opened)
+let notifPageItems=[];
+let notifT=null;
+let focusNote=null;                     // {cid, trackId}: a note to scroll to + flash once the notes panel renders it
+const NOTIF_ICONS={
+  upload:'<path d="M12 15V4"/><path d="M7.5 8.5 12 4l4.5 4.5"/><path d="M4 15v4a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-4"/>',
+  video:'<rect x="3" y="6" width="13" height="12" rx="2"/><path d="m16 10.5 5-3v9l-5-3z"/>',
+  note:'<path d="M20.5 11.5a8 8 0 0 1-11.7 7.1L4 20l1.3-4.3a8 8 0 1 1 15.2-4.2z"/>',
+  done:'<path d="m5 12.5 4.5 4.5L19 7.5"/>',
+};
+NOTIF_ICONS.replace=NOTIF_ICONS.upload; NOTIF_ICONS.reply=NOTIF_ICONS.note;
+// SQLite UTC timestamp → "just now" / "5m ago" / "3h ago" / "2d ago", then a plain date.
+function fmtAgo(s){
+  const d=new Date(String(s||'').replace(' ','T')+'Z'); if(isNaN(d)) return '';
+  const sec=Math.max(0,(Date.now()-d.getTime())/1000);
+  return sec<60?'just now' : sec<3600?Math.floor(sec/60)+'m ago' : sec<86400?Math.floor(sec/3600)+'h ago' : sec<7*86400?Math.floor(sec/86400)+'d ago' : fmtDate(s);
+}
+function notifHtml(n, isNew){
+  const who=`<b>${esc(n.actor_name)}</b>`, trk=`<b>${esc(n.track_title)}</b>`, rv=n.rev_number!=null?`<b>v${n.rev_number}</b>`:'';
+  const line = n.kind==='upload'  ? `${who} uploaded ${rv||'a new revision'} of ${trk}`
+             : n.kind==='replace' ? `${who} re-uploaded ${rv||'a revision'} of ${trk}`
+             : n.kind==='video'   ? `${who} uploaded a new video for ${trk}`
+             : n.kind==='note'    ? `${who} left a note on ${trk}`
+             : n.kind==='reply'   ? `${who} replied on ${trk}`
+             : n.kind==='done'    ? `${who} marked ${trk} DONE` : `${who} · ${trk}`;
+  const snip = (n.kind==='note'||n.kind==='reply') ? (n.snippet ? '“'+esc(n.snippet)+'”' : (n.has_image ? '📎 Image' : '')) : '';
+  const sub = (n.project_title && n.project_title!==n.track_title ? esc(n.project_title)+' · ' : '') + esc(fmtAgo(n.created_at));
+  return `<button type="button" class="nitem${isNew?' unread':''}" data-nid="${n.id}">
+    <span class="nico k-${esc(n.kind)}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${NOTIF_ICONS[n.kind]||NOTIF_ICONS.note}</svg></span>
+    <span class="ntext"><span>${line}</span>${snip?`<span class="nsnip">${snip}</span>`:''}<span class="nsub" title="${esc(fmtDate(n.created_at))}">${sub}</span></span>
+    ${isNew?'<span class="ndot" title="New"></span>':''}
+  </button>`;
+}
+function renderNotifList(el, items, hiAbove){
+  items.forEach(n=>notifById.set(n.id,n));
+  el.innerHTML = items.length ? items.map(n=>notifHtml(n, n.id>hiAbove)).join('') : '<div class="nm-empty">No notifications yet.</div>';
+}
+function paintBell(){
+  const n=NOTIF_UNREAD, txt=n>99?'99+':String(n);
+  $('#bellBadge').textContent=txt;
+  $('#bellBadge').classList.toggle('hidden', !n);
+  $('#bellBtn').setAttribute('aria-label', n?`Notifications (${txt} new)`:'Notifications');
+}
+const fetchNotifs=(limit, before)=>api('notifications?limit='+limit+(before?'&before='+before:''));
+// Checking the feed clears the badge: everything up to the newest row we showed counts as seen.
+async function markNotifsSeen(r){
+  NOTIF_UNREAD=0; paintBell();
+  const top=r.items.length ? r.items[0].id : 0;
+  if(r.unread>0 && top>r.seen_id){ try{ await api('notifications/seen',{method:'POST',body:{upto:top}}); }catch{} }
+}
+// Something changed server-side (SSE 'notify', a reconnect, a membership change) — refresh whatever
+// shows notifications right now. Debounced so a burst of events is one fetch.
+function scheduleNotifRefresh(){ clearTimeout(notifT); notifT=setTimeout(refreshNotifs, 250); }
+async function refreshNotifs(){
+  if(!ME) return;
+  try{
+    if(notifMenuOpen()) await loadNotifMenu();
+    else if(VIEW==='notifications') await loadNotifPage(true);
+    else { const r=await fetchNotifs(0); NOTIF_UNREAD=r.unread; paintBell(); }
+  }catch{}
+}
+
+// Dropdown — the 10 most recent.
+function notifMenuOpen(){ return !$('#notifMenu').classList.contains('hidden'); }
+async function loadNotifMenu(){
+  const my=++menuSeq;
+  const r=await fetchNotifs(10);
+  if(my!==menuSeq || !notifMenuOpen()) return;
+  if(menuHiAbove==null) menuHiAbove=r.seen_id;   // keep "new" highlights for this whole opening
+  renderNotifList($('#notifList'), r.items, menuHiAbove);
+  await markNotifsSeen(r);
+}
+function openNotifMenu(){
+  closeNavMenu();
+  $('#notifMenu').classList.remove('hidden'); $('#bellBtn').setAttribute('aria-expanded','true');
+  menuHiAbove=null;
+  if(!$('#notifList').children.length) $('#notifList').innerHTML='<div class="nm-empty">Loading…</div>';
+  loadNotifMenu().catch(()=>{ if(notifMenuOpen()) $('#notifList').innerHTML='<div class="nm-empty">Couldn’t load notifications.</div>'; });
+}
+function closeNotifMenu(){ $('#notifMenu').classList.add('hidden'); $('#bellBtn').setAttribute('aria-expanded','false'); }
+$('#bellBtn').addEventListener('click',e=>{ e.stopPropagation(); if(notifMenuOpen()) closeNotifMenu(); else openNotifMenu(); });
+document.addEventListener('click',e=>{ if(notifMenuOpen() && !e.target.closest('#notifWrap')) closeNotifMenu(); });
+document.addEventListener('keydown',e=>{ if(e.key==='Escape' && notifMenuOpen()) closeNotifMenu(); });
+$('#notifList').addEventListener('click',e=>{ const b=e.target.closest('.nitem'); if(!b) return; closeNotifMenu(); gotoNotif(notifById.get(+b.dataset.nid)); });
+$('#notifAll').addEventListener('click',()=>{ closeNotifMenu(); setView('notifications'); });
+
+// Full page — every recent notification, 30 at a time. A live refresh (reset) re-fetches what's shown.
+async function loadNotifPage(reset){
+  const my=++pageSeq;
+  const last=notifPageItems.length ? notifPageItems[notifPageItems.length-1].id : 0;
+  const r=await fetchNotifs(reset ? Math.min(100, Math.max(30, notifPageItems.length)) : 30, reset ? 0 : last);
+  if(my!==pageSeq || VIEW!=='notifications') return;
+  if(pageHiAbove==null) pageHiAbove=r.seen_id;
+  notifPageItems = reset ? r.items : notifPageItems.concat(r.items);
+  renderNotifList($('#notifPage'), notifPageItems, pageHiAbove);
+  $('#notifMoreRow').classList.toggle('hidden', !r.has_more);
+  if(reset) await markNotifsSeen(r);
+}
+function renderNotifPage(){
+  pageHiAbove=null; notifPageItems=[];
+  $('#notifPage').innerHTML='<div class="nm-empty">Loading…</div>'; $('#notifMoreRow').classList.add('hidden');
+  loadNotifPage(true).catch(e=>toast(e.message,true));
+}
+$('#notifMore').addEventListener('click',async()=>{
+  const b=$('#notifMore'); if(b.disabled) return; b.disabled=true;
+  try{ await loadNotifPage(false); }catch(e){ toast(e.message,true); }
+  finally{ b.disabled=false; }
+});
+$('#notifPage').addEventListener('click',e=>{ const b=e.target.closest('.nitem'); if(b) gotoNotif(notifById.get(+b.dataset.nid)); });
+
+function flashEl(el, block){
+  if(!el) return;
+  el.classList.remove('nflash'); void el.offsetWidth; el.classList.add('nflash');   // restart the animation
+  setTimeout(()=>el.classList.remove('nflash'), 2500);
+  el.scrollIntoView({block:block||'nearest', behavior:'smooth'});
+}
+// Take the user to what a notification is about, in the Player: an upload loads that revision (paused);
+// a note/reply opens its track's notes and flashes it (a pinned note on another track loads parked at
+// its pin); a DONE mark opens the track and flashes its progress. A track that's already loaded isn't
+// restarted unless the notification is a different revision to hear.
+async function gotoNotif(n){
+  if(!n) return;
+  try{
+    if(!PROJECT || PROJECT.id!==n.project_id) await openProject(n.project_id);
+    else if(VIEW!=='player') setView('player');
+  }catch{ toast('That project is no longer available',true); return; }
+  let t=trackById(n.track_id);
+  const isUpload = n.kind==='upload' || n.kind==='replace';
+  // The notification can outrun the project resync (it arrives first) — refetch once if it's not here yet.
+  if(!t || (isUpload && !revById(t, n.revision_id))){ try{ await reload(true); }catch{} t=trackById(n.track_id); }
+  if(!t){ toast('That track is no longer available',true); return; }
+  const isNote = n.kind==='note' || n.kind==='reply';
+  focusNote = isNote ? {cid:n.comment_id, trackId:t.id} : null;
+  let rev=null, keepPos=null;
+  if(isUpload) rev=revById(t, n.revision_id);
+  else if(curTrackId!==t.id){
+    if(n.kind==='note' && n.ts!=null && revById(t, n.revision_id)){ rev=revById(t, n.revision_id); keepPos=n.ts; }
+    else rev=(n.kind==='done' && revById(t, t.done_revision_id)) || t.revisions[t.revisions.length-1] || null;
+  }
+  if(rev && !(curTrackId===t.id && curRevId===rev.id)) await loadTrack(t.id, rev.id, {play:false, keepPos});
+  else await openTrack(t.id);
+  if(n.kind==='done') flashEl($('#doneCtl'));
+  else if(!isNote){ const row=document.querySelector('#trackList .track[data-id="'+t.id+'"]'); if(row) row.scrollIntoView({block:'nearest', behavior:'smooth'}); }
+}
+
 // ───────── notes export (Cluster C) ─────────
 // Timed (pinned) notes → marker/locator files for DAWs + video editors. The download is a plain
 // relative-URL anchor click; the server sends Content-Disposition: attachment so the browser saves
@@ -3600,14 +3818,16 @@ function connectEvents(){
     if(VIEW==='projects'){ syncList=true; scheduleSync(); }                       // list badges reflect the change
     else if(PROJECT && d.projectId===PROJECT.id){ syncProj=true; scheduleSync(); } // the open project changed
   });
-  es.addEventListener('projects',()=>{ syncList=true; scheduleSync(); });
+  es.addEventListener('projects',()=>{ syncList=true; scheduleSync(); scheduleNotifRefresh(); });   // membership/role changes what the bell may show
+  // Something this user can see was added to their notification feed (or another tab checked it).
+  es.addEventListener('notify',()=>scheduleNotifRefresh());
   // A queued upload job failed server-side after its {processing:true} response — show the reason
   // (the "processing…" pill just vanishing was the only signal before).
   es.addEventListener('joberror',e=>{ try{ const d=JSON.parse(e.data); if(PROJECT && d.projectId===PROJECT.id) toast(d.message,true); }catch{} });
   // Admin-only update-available nudge (Cluster E): refresh the badge + panel, toast once.
   es.addEventListener('update',e=>{ try{ UPDATE_INFO=JSON.parse(e.data); }catch{} renderNav(); if(VIEW==='settings') renderUpdateStatus(); if(UPDATE_INFO&&UPDATE_INFO.behind>0) toast('Update available — see Settings'); });
   // 'open' fires on first connect AND every reconnect; only a RECONNECT may have missed events → resync.
-  es.addEventListener('open',()=>{ if(esWasOpen){ syncList=true; scheduleSync(); } esWasOpen=true; });
+  es.addEventListener('open',()=>{ if(esWasOpen){ syncList=true; scheduleSync(); scheduleNotifRefresh(); } esWasOpen=true; });
   // A transient drop leaves readyState=CONNECTING and EventSource auto-reconnects (the 'open' above
   // then resyncs). readyState=CLOSED means the browser gave up — a non-200 at (re)connect. That's
   // EITHER an expired session (401) OR a transient proxy error during a server restart (502) — probe
@@ -3619,7 +3839,7 @@ function connectEvents(){
     setTimeout(async()=>{
       if(es || !ME) return;                                  // already reconnected, or logged out meanwhile
       try{ await api('me'); }catch(e){ if(e.message==='unauth') return; }   // 401 → login shown; other errors: still retry the stream
-      connectEvents(); syncList=true; scheduleSync();
+      connectEvents(); syncList=true; scheduleSync(); scheduleNotifRefresh();
     }, 3000);
   });
 }

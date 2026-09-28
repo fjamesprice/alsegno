@@ -379,6 +379,70 @@ db.transaction(() => {
   }
 })();
 
+// Notifications: an append-only activity log — ONE row per event, never one per recipient. Who sees a
+// row is decided at read time (notifWhere below) from live membership + role, so a revoked member or a
+// role change takes effect at once. kind: 'upload' (new revision) | 'replace' (revision audio replaced) |
+// 'video' (track picture set/replaced) | 'note' | 'reply' | 'done' (a client marked a track DONE).
+// actor_role is the actor's role AT EVENT TIME ("notes by clients" stays true after a promotion).
+// New table ⇒ real FKs: deleting a project/track/revision/comment cascades its events away, so a
+// notification can never point at something that's gone. users.notif_seen_id = the newest activity id
+// the user has checked (the bell badge counts visible rows above it).
+{
+  const fresh = !db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'activity'").get();
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS activity (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      kind        TEXT NOT NULL,
+      project_id  INTEGER NOT NULL,
+      track_id    INTEGER NOT NULL,
+      revision_id INTEGER,
+      comment_id  INTEGER,
+      actor       TEXT NOT NULL,
+      actor_role  TEXT,
+      created_at  TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY (project_id)  REFERENCES projects(id)  ON DELETE CASCADE,
+      FOREIGN KEY (track_id)    REFERENCES tracks(id)    ON DELETE CASCADE,
+      FOREIGN KEY (revision_id) REFERENCES revisions(id) ON DELETE CASCADE,
+      FOREIGN KEY (comment_id)  REFERENCES comments(id)  ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_activity_project  ON activity(project_id);
+    CREATE INDEX IF NOT EXISTS idx_activity_track    ON activity(track_id);
+    CREATE INDEX IF NOT EXISTS idx_activity_revision ON activity(revision_id);
+    CREATE INDEX IF NOT EXISTS idx_activity_comment  ON activity(comment_id);
+    CREATE INDEX IF NOT EXISTS idx_comments_parent   ON comments(parent_id);
+  `);
+  const ucols = db.prepare('PRAGMA table_info(users)').all().map(c => c.name);
+  const addSeen = !ucols.includes('notif_seen_id');
+  if (addSeen) db.exec('ALTER TABLE users ADD COLUMN notif_seen_id INTEGER NOT NULL DEFAULT 0');
+  if (fresh || addSeen) db.transaction(() => {
+    // One-time backfill from what the DB already records (uploads, the current picture, live notes),
+    // in time order so ids track chronology. Who marked a track DONE was never stored, so that kind
+    // starts empty. Everyone's seen-pointer then jumps to the end: history, but no bogus unread badge.
+    const n = !fresh ? 0 : db.prepare(`
+      INSERT INTO activity (kind, project_id, track_id, revision_id, comment_id, actor, actor_role, created_at)
+      SELECT kind, project_id, track_id, revision_id, comment_id, actor, actor_role, created_at FROM (
+        SELECT 'upload' AS kind, t.project_id, t.id AS track_id, r.id AS revision_id, NULL AS comment_id,
+               r.uploaded_by AS actor, u.role AS actor_role, r.created_at, 0 AS src, r.id AS sid
+          FROM revisions r JOIN tracks t ON t.id = r.track_id JOIN projects p ON p.id = t.project_id
+          LEFT JOIN users u ON u.username = r.uploaded_by
+         WHERE r.is_orig_audio = 0 AND r.uploaded_by IS NOT NULL
+        UNION ALL
+        SELECT 'video', t.project_id, t.id, NULL, NULL, t.video_uploaded_by, u.role, t.video_updated_at, 1, t.id
+          FROM tracks t JOIN projects p ON p.id = t.project_id
+          LEFT JOIN users u ON u.username = t.video_uploaded_by
+         WHERE t.video_stored_name IS NOT NULL AND t.video_uploaded_by IS NOT NULL AND t.video_updated_at IS NOT NULL
+        UNION ALL
+        SELECT CASE WHEN c.parent_id IS NULL THEN 'note' ELSE 'reply' END, t.project_id, t.id, NULL, c.id,
+               c.author, u.role, c.created_at, 2, c.id
+          FROM comments c JOIN tracks t ON t.id = c.track_id JOIN projects p ON p.id = t.project_id
+          LEFT JOIN users u ON u.username = c.author
+         WHERE c.deleted_at IS NULL
+      ) ORDER BY created_at, src, sid`).run().changes;
+    db.prepare('UPDATE users SET notif_seen_id = (SELECT COALESCE(MAX(id), 0) FROM activity)').run();
+    if (n) console.log(`[migrate] notifications: backfilled ${n} activity row(s)`);
+  })();
+}
+
 // ── Auth (trust-on-first-use) ────────────────────────────────
 // scrypt runs ASYNC (crypto.scrypt, not scryptSync): it's a deliberately expensive CPU-bound KDF, and
 // the sync form would block Node's single event loop for the whole computation — so a burst of login
@@ -1067,6 +1131,71 @@ function broadcastUpdate(status) {
   }
 }
 
+// ── Notifications (bell) ─────────────────────────────────────
+// Which activity rows a user sees, built per role from FIXED SQL fragments (never user input) bound to
+// @me. Always: only projects the user is ASSIGNED to (project_users — admins included, not "every
+// project"), never their own actions, never a soft-deleted note. Clients: new uploads/pictures, plus
+// replies by others in threads they're part of (they wrote the note, or had replied before this reply).
+// Engineers/admins: notes, replies and DONE marks made by clients.
+const NOTIF_FROM = `FROM activity a
+  JOIN project_users pu ON pu.project_id = a.project_id AND pu.username = @me
+  LEFT JOIN comments c  ON c.id = a.comment_id
+  LEFT JOIN comments pc ON pc.id = c.parent_id`;
+function notifWhere(isClient) {
+  const scope = isClient
+    ? `(a.kind IN ('upload', 'replace', 'video')
+        OR (a.kind = 'reply' AND (pc.author = @me OR EXISTS (SELECT 1 FROM comments mc
+              WHERE mc.parent_id = c.parent_id AND mc.author = @me AND mc.id < c.id))))`
+    : `(a.actor_role = 'client' AND a.kind IN ('note', 'reply', 'done'))`;
+  return `WHERE a.actor <> @me AND (a.comment_id IS NULL OR c.deleted_at IS NULL) AND ${scope}`;
+}
+const notifStmts = {};
+function notifQueries(role) {
+  const key = role === 'client' ? 'client' : 'staff';
+  if (notifStmts[key]) return notifStmts[key];
+  const where = notifWhere(key === 'client');
+  return (notifStmts[key] = {
+    visible: db.prepare(`SELECT 1 ${NOTIF_FROM} ${where} AND a.id = @id`),
+    unread: db.prepare(`SELECT COUNT(*) v FROM (SELECT 1 ${NOTIF_FROM} ${where} AND a.id > @seen LIMIT 100)`),
+    list: db.prepare(`SELECT a.id, a.kind, a.project_id, a.track_id, COALESCE(a.revision_id, c.revision_id) AS revision_id,
+                             a.comment_id, c.parent_id, c.ts, c.body, c.attachments, a.actor, a.created_at,
+                             COALESCE(u.display_name, a.actor) AS actor_name, t.title AS track_title,
+                             p.title AS project_title, r.rev_number
+                      ${NOTIF_FROM}
+                      JOIN tracks t   ON t.id = a.track_id
+                      JOIN projects p ON p.id = a.project_id
+                      LEFT JOIN revisions r ON r.id = COALESCE(a.revision_id, c.revision_id)
+                      LEFT JOIN users u ON u.username = a.actor
+                      ${where} AND a.id < @before ORDER BY a.id DESC LIMIT @limit`),
+  });
+}
+// Nudge only the connected users who can actually see a new row (the same query, pinned to its id);
+// their client refetches its own count. Role/active/membership are read live, like every broadcast.
+function broadcastNotify(activityId) {
+  const sees = new Map();
+  for (const c of [...sseClients]) {
+    if (!sees.has(c.username)) {
+      const u = db.prepare('SELECT role, active FROM users WHERE username = ?').get(c.username);
+      sees.set(c.username, !!u && u.active === 1 && !!notifQueries(u.role).visible.get({ me: c.username, id: activityId }));
+    }
+    if (sees.get(c.username)) sseSend(c, 'notify', {});
+  }
+}
+// Log one event. Best-effort: a failure here (e.g. the track was deleted mid-job ⇒ FK) is logged and
+// swallowed — a notification must never fail the upload/note/doneness that caused it. A track keeps
+// only its latest DONE mark, so un-marking and re-marking it re-notifies once instead of stacking.
+function recordActivity(kind, { projectId, trackId, revisionId = null, commentId = null, actor }) {
+  try {
+    const role = db.prepare('SELECT role FROM users WHERE username = ?').get(actor)?.role ?? null;
+    const id = db.transaction(() => {
+      if (kind === 'done') db.prepare("DELETE FROM activity WHERE kind = 'done' AND track_id = ?").run(trackId);
+      return db.prepare(`INSERT INTO activity (kind, project_id, track_id, revision_id, comment_id, actor, actor_role)
+                         VALUES (?, ?, ?, ?, ?, ?, ?)`).run(kind, projectId, trackId, revisionId, commentId, actor, role).lastInsertRowid;
+    })();
+    broadcastNotify(id);
+  } catch (e) { console.warn('[activity] not recorded:', e.message); }
+}
+
 // ── Auth routes ──────────────────────────────────────────────
 // Tiny in-memory throttle (no dependency) for the unauthenticated, password/token-guessing endpoints.
 // Sliding per-IP window: caps how fast an attacker can brute-force credentials/invite tokens or pile
@@ -1293,6 +1422,36 @@ app.get('/api/projects/:id', requireProjectAccess(pParam), (req, res) => {
   res.json({ user: req.session.user, project: p, tracks: projectTracks(req.session.user.username, p.id) });
 });
 
+// The caller's notification feed, newest first. ?limit=0–100 (default 10; 0 = just the unread count),
+// ?before=<id> pages back. unread = visible rows newer than the caller's seen-pointer (capped at 100,
+// shown as "99+"); seen_id lets the client highlight which listed rows were new when it looked.
+app.get('/api/notifications', requireAuth, (req, res) => {
+  const me = req.session.user.username;
+  const q = notifQueries(req.session.user.role);
+  const seen = db.prepare('SELECT notif_seen_id FROM users WHERE username = ?').get(me)?.notif_seen_id || 0;
+  const lim = Number(req.query.limit);
+  const limit = Number.isInteger(lim) ? Math.max(0, Math.min(100, lim)) : 10;
+  const before = intId(req.query.before) ?? Number.MAX_SAFE_INTEGER;
+  const rows = limit ? q.list.all({ me, before, limit: limit + 1 }) : [];   // +1 ⇒ has_more without a COUNT
+  const items = rows.slice(0, limit).map(({ body, attachments, ...n }) => {
+    let imgs = 0; try { imgs = JSON.parse(attachments || '[]').length; } catch {}
+    return { ...n, snippet: body == null ? null : String(body).replace(/\s+/g, ' ').trim().slice(0, 160), has_image: imgs > 0 };
+  });
+  res.json({ items, unread: q.unread.get({ me, seen }).v, seen_id: seen, has_more: rows.length > limit });
+});
+
+// Mark the feed checked up to `upto` (the newest id the client displayed — so a row landing between
+// the fetch and this call still counts as new). Never moves backwards; clamped to ids that exist.
+// The caller's other tabs are nudged so their badges clear too.
+app.post('/api/notifications/seen', requireAuth, (req, res) => {
+  const me = req.session.user.username;
+  const max = db.prepare('SELECT COALESCE(MAX(id), 0) v FROM activity').get().v;
+  const upto = intId(req.body && req.body.upto);
+  db.prepare('UPDATE users SET notif_seen_id = MAX(notif_seen_id, ?) WHERE username = ?').run(upto == null ? max : Math.min(upto, max), me);
+  for (const c of [...sseClients]) if (c.username === me) sseSend(c, 'notify', {});
+  res.json({ ok: true });
+});
+
 // ── Project management (admin) ───────────────────────────────
 // Admin sees every project with its members + a track count, for the admin page.
 app.get('/api/admin/projects', requireAdmin, (req, res) => {
@@ -1492,8 +1651,12 @@ app.put('/api/tracks/:id/doneness', requireProjectAccess(pTrack), (req, res) => 
       doneRev = db.prepare('SELECT MAX(id) v FROM revisions WHERE track_id = ?').get(req.params.id).v;
     }
   }
+  const wasDone = (db.prepare('SELECT doneness FROM tracks WHERE id = ?').get(req.params.id)?.doneness ?? 0) >= 100;
   db.prepare("UPDATE tracks SET doneness = ?, done_revision_id = ?, updated_at = datetime('now') WHERE id = ?")
     .run(d, doneRev, req.params.id);
+  // A client crossing into DONE notifies the project's engineers/admins (re-saving 100 doesn't).
+  if (d >= 100 && !wasDone && req.session.user.role === 'client')
+    recordActivity('done', { projectId: req.projectId, trackId: Number(req.params.id), actor: req.session.user.username });
   broadcastChange(req.projectId);
   res.json({ ok: true, doneness: d, done_revision_id: doneRev });
 });
@@ -1592,6 +1755,7 @@ app.post('/api/tracks/:id/video', requireProjectEngineer(pTrack), uploadGuard(),
     if (old.mi && old.mi !== a.video.microName) unlinkStored(old.mi);
     if (old.ov && old.ov !== a.video.originalStoredName) unlinkStored(old.ov);
     if (oldOrig) { if (!oa || oldOrig.stored_name !== oa.storedName) unlinkStored(oldOrig.stored_name); unlinkStored(oldOrig.original_stored_name); }
+    recordActivity('video', { projectId, trackId, actor: username });
     broadcastChange(projectId);
   });
 });
@@ -1629,14 +1793,15 @@ app.post('/api/tracks/:id/revisions', requireProjectEngineer(pTrack), uploadGuar
     }
     try {
       const nextRev = (db.prepare('SELECT COALESCE(MAX(rev_number), 0) v FROM revisions WHERE track_id = ?').get(trackId).v) + 1;
-      db.prepare(`INSERT INTO revisions
+      const revId = db.prepare(`INSERT INTO revisions
         (track_id, rev_number, stored_name, original_name, original_stored_name, mime_type, size, duration, peaks, notes, uploaded_by,
          lufs_i, lufs_lra, true_peak, st_interval, st_series, peak_interval, peak_series)
         VALUES (?, ?, ?, ?, ?, 'audio/mpeg', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .run(trackId, nextRev, a.storedName, a.origName, a.originalStoredName, a.size, a.duration, JSON.stringify(a.wave.peaks),
              notes, username, a.loud.i, a.loud.lra, a.loud.tp, a.loud.st_interval, JSON.stringify(a.loud.st),
-             a.wave.peakInterval, JSON.stringify(a.wave.peakSeries));
+             a.wave.peakInterval, JSON.stringify(a.wave.peakSeries)).lastInsertRowid;
       db.prepare("UPDATE tracks SET updated_at = datetime('now') WHERE id = ?").run(trackId);
+      recordActivity('upload', { projectId, trackId, revisionId: revId, actor: username });
     } catch (e) {
       unlinkStored(a.storedName); unlinkStored(a.originalStoredName);
       console.error('[mix] db insert failed:', e.message);
@@ -1660,7 +1825,7 @@ app.post('/api/revisions/:id/replace', requireProjectEngineer(pRev), uploadGuard
   // background queue — never hold it in one HTTP request (proxy/browser timeout → a "failed" replace
   // that actually succeeded), and never run a second ffmpeg + big f32le decode in parallel with a
   // queued job. Studio shows "processing…" via mix_processing; the new audio lands via SSE 'change'.
-  const file = req.file, projectId = req.projectId, revId = rev.id, trackId = rev.track_id;
+  const file = req.file, projectId = req.projectId, revId = rev.id, trackId = rev.track_id, username = req.session.user.username;
   const keepLossless = wantKeepLossless(req);
   db.prepare('UPDATE tracks SET mix_processing = mix_processing + 1 WHERE id = ?').run(trackId);
   broadcastChange(projectId);
@@ -1701,6 +1866,7 @@ app.post('/api/revisions/:id/replace', requireProjectEngineer(pRev), uploadGuard
     // Committed — the old preview + old kept original (read live at job time) are no longer referenced.
     if (cur.stored_name !== a.storedName) unlinkStored(cur.stored_name);
     if (cur.original_stored_name && cur.original_stored_name !== a.originalStoredName) unlinkStored(cur.original_stored_name);
+    recordActivity('replace', { projectId, trackId, revisionId: revId, actor: username });
     done(); // analysis/waveform/stored_name changed — broadcast so listeners refetch metadata
   });
 });
@@ -1855,6 +2021,8 @@ app.post('/api/tracks/:id/comments', requireProjectAccess(pTrack), uploadGuard()
     for (const n of stored) unlinkStored(n);
     return res.status(400).json({ error: 'Note could not be saved — the track may have been deleted' });
   }
+  recordActivity(parentId != null ? 'reply' : 'note',
+    { projectId: req.projectId, trackId: Number(req.params.id), commentId: r.lastInsertRowid, actor: req.session.user.username });
   broadcastChange(req.projectId);
   res.json({ id: r.lastInsertRowid });
 });
@@ -2245,7 +2413,9 @@ app.post('/api/users', requireAdmin, (req, res) => {
   // pw_hash NULL ⇒ TOFU; the invite token is what unlocks that first login. Return it so the admin
   // can hand the new user their one-time link.
   const token = mintInviteToken();
-  db.prepare('INSERT INTO users (username, role, display_name, active, first_login_token) VALUES (?, ?, ?, 1, ?)').run(username, role, display_name, token);
+  // A new account's bell starts from "now" — earlier project history is in its feed, but not unread.
+  db.prepare(`INSERT INTO users (username, role, display_name, active, first_login_token, notif_seen_id)
+              VALUES (?, ?, ?, 1, ?, (SELECT COALESCE(MAX(id), 0) FROM activity))`).run(username, role, display_name, token);
   broadcastProjects(); // keep other admins' user tables in sync
   res.json({ ok: true, username, first_login_token: token });
 });
